@@ -1,0 +1,62 @@
+{
+  "meta": {"type": "users", "count": 4, "version": 5},
+  "data": [
+    {
+      "Properties": {
+        "name": "SVC-SQL@CONTOSO.LOCAL",
+        "samaccountname": "svc-sql",
+        "enabled": true,
+        "hasspn": true,
+        "dontreqpreauth": false,
+        "supportedencryptiontypes": 4,
+        "description": "",
+        "lastlogontimestamp": 1700000000,
+        "pwdlastset": 1600000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-1103",
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "JDOE@CONTOSO.LOCAL",
+        "samaccountname": "jdoe",
+        "enabled": true,
+        "hasspn": false,
+        "dontreqpreauth": true,
+        "supportedencryptiontypes": 0,
+        "description": "Temp password: Welcome1!",
+        "lastlogontimestamp": 1700000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-1104",
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "ADMINISTRATOR@CONTOSO.LOCAL",
+        "samaccountname": "Administrator",
+        "enabled": true,
+        "hasspn": false,
+        "dontreqpreauth": false,
+        "supportedencryptiontypes": 28,
+        "description": "",
+        "lastlogontimestamp": 1600000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-500",
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "BACKUP-SVC@CONTOSO.LOCAL",
+        "samaccountname": "backup-svc",
+        "enabled": true,
+        "hasspn": true,
+        "dontreqpreauth": false,
+        "supportedencryptiontypes": 4,
+        "description": "",
+        "lastlogontimestamp": 1700000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-1105",
+      "Aces": []
+    }
+  ]
+}

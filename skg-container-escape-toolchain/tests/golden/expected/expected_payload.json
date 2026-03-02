@@ -1,0 +1,9 @@
+{
+  "attack_path_id": "container_escape_privileged_v1",
+  "required_wickets": ["CE-01", "CE-02", "CE-09", "CE-10", "CE-14"],
+  "realized": ["CE-01", "CE-02", "CE-09", "CE-10", "CE-14"],
+  "blocked": [],
+  "unknown": [],
+  "escape_score": 1.0,
+  "classification": "realized"
+}

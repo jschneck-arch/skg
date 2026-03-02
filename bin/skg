@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+skg — Unified CLI: daemon commands + toolchain passthrough
+
+DAEMON (requires running daemon on 127.0.0.1:5055):
+  skg status
+  skg mode [kernel|resonance|unified|anchor] [--reason "..."]
+  skg identity [history]
+
+TOOLCHAIN (runs directly, no daemon needed):
+  skg ingest config_effective --root <path> --out <file> --workload-id <id>
+  skg ingest net_sandbox --docker-inspect <path> --out <file> --workload-id <id>
+  skg project --in <events.ndjson> --out <interp.ndjson>
+  skg latest --interp <interp.ndjson> --attack-path-id <id> --workload-id <id>
+  skg validate <events.ndjson>
+"""
+import json, sys, argparse, subprocess, urllib.request, urllib.error
+from pathlib import Path
+
+API = "http://127.0.0.1:5055"
+_BIN        = Path(__file__).resolve()
+TC_DIR      = _BIN.parent.parent / "skg-aprs-toolchain"
+TC_PYTHON   = TC_DIR / ".venv" / "bin" / "python"
+TC_CLI      = TC_DIR / "skg.py"
+
+
+def _api(method, path, data=None):
+    url  = f"{API}{path}"
+    body = json.dumps(data).encode() if data else None
+    hdrs = {"Content-Type": "application/json"} if body else {}
+    req  = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+    except urllib.error.URLError:
+        print("Error: SKG daemon not running.  Start: systemctl --user start skg")
+        sys.exit(1)
+    except urllib.error.HTTPError as e:
+        print(f"Error: {json.loads(e.read()).get('detail', str(e))}")
+        sys.exit(1)
+
+
+def _tc(*args):
+    if not TC_PYTHON.exists():
+        print(f"Error: Toolchain not bootstrapped.\n  cd {TC_DIR} && ./bootstrap.sh")
+        return 1
+    return subprocess.call([str(TC_PYTHON), str(TC_CLI)] + list(args), cwd=str(TC_DIR))
+
+
+# --- Daemon commands ---
+
+def cmd_status(a):
+    d = _api("GET", "/status")
+    print(f"  Status   : {d['status']}")
+    print(f"  Mode     : {d['mode']} — {d['mode_description']}")
+    print(f"  Started  : {d['started_at']}")
+    print(f"  Toolchain: {'ready' if d['toolchain_available'] else 'NOT BOOTSTRAPPED'}")
+    print(f"  TC runs  : {'enabled' if d['toolchain_runs_enabled'] else 'disabled in this mode'}")
+    i = d['identity']
+    print(f"  Identity : {i['name']} v{i['version']} | coherence={i['coherence']} | sessions={i['sessions']}")
+
+
+def cmd_mode(a):
+    if a.set_mode:
+        t = _api("POST", "/mode", {"mode": a.set_mode, "reason": a.reason or ""})["transition"]
+        print(f"  Mode: {t['from']} → {t['to']}" + (f"\n  Reason: {t['reason']}" if t.get("reason") else ""))
+    else:
+        d = _api("GET", "/mode")
+        print(f"  Mode: {d['mode']}\n  {d['description']}")
+
+
+def cmd_identity(a):
+    if getattr(a, "subcommand", None) == "history":
+        for r in _api("GET", "/identity/history"):
+            print(f"  [{r['timestamp']}] mode={r['mode']} coherence={r['coherence']} src={r['source']}")
+    else:
+        for k, v in _api("GET", "/identity").items():
+            if k not in ("timestamp", "source"):
+                print(f"  {k}: {v}")
+
+
+# --- Toolchain passthrough commands ---
+
+def cmd_ingest(a):
+    args = ["ingest", a.adapter, "--out", a.out, "--attack-path-id", a.attack_path_id]
+    if a.run_id:      args += ["--run-id",      a.run_id]
+    if a.workload_id: args += ["--workload-id",  a.workload_id]
+    if getattr(a, "root",           None): args += ["--root",           a.root]
+    if getattr(a, "docker_inspect", None): args += ["--docker-inspect", a.docker_inspect]
+    if getattr(a, "resolv_conf",    None): args += ["--resolv-conf",    a.resolv_conf]
+    if getattr(a, "iptables",       None): args += ["--iptables",       a.iptables]
+    if getattr(a, "ps",             None): args += ["--ps",             a.ps]
+    sys.exit(_tc(*args))
+
+
+def cmd_project(a):
+    sys.exit(_tc("project", "aprs",
+                 "--in", a.infile, "--out", a.outfile,
+                 "--attack-path-id", a.attack_path_id))
+
+
+def cmd_latest(a):
+    tc_args = ["latest", "--interp", a.interp, "--attack-path-id", a.attack_path_id]
+    if a.workload_id: tc_args += ["--workload-id", a.workload_id]
+    sys.exit(_tc(*tc_args))
+
+
+def cmd_validate(a):
+    sys.exit(_tc("validate", a.events))
+
+
+def main():
+    p   = argparse.ArgumentParser(prog="skg", description="SKG — Semantic Kernel Gravity")
+    sub = p.add_subparsers(dest="command")
+
+    sub.add_parser("status")
+
+    mp = sub.add_parser("mode")
+    mp.add_argument("set_mode", nargs="?", choices=["kernel","resonance","unified","anchor"])
+    mp.add_argument("--reason", default="")
+
+    ip = sub.add_parser("identity")
+    ip.add_argument("subcommand", nargs="?", choices=["history"])
+
+    ing = sub.add_parser("ingest")
+    ing.add_argument("adapter", choices=["config_effective","net_sandbox"])
+    ing.add_argument("--out",            required=True)
+    ing.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
+    ing.add_argument("--run-id",         default=None)
+    ing.add_argument("--workload-id",    default=None)
+    ing.add_argument("--root",           default=None)
+    ing.add_argument("--docker-inspect", dest="docker_inspect", default=None)
+    ing.add_argument("--resolv-conf",    dest="resolv_conf",    default=None)
+    ing.add_argument("--iptables",       default=None)
+    ing.add_argument("--ps",             default=None)
+
+    prj = sub.add_parser("project")
+    prj.add_argument("--in",  dest="infile",  required=True)
+    prj.add_argument("--out", dest="outfile", required=True)
+    prj.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
+
+    lat = sub.add_parser("latest")
+    lat.add_argument("--interp",         required=True)
+    lat.add_argument("--attack-path-id", required=True)
+    lat.add_argument("--workload-id",    default=None)
+
+    val = sub.add_parser("validate")
+    val.add_argument("events")
+
+    a = p.parse_args()
+    {
+        "status":   cmd_status,
+        "mode":     cmd_mode,
+        "identity": cmd_identity,
+        "ingest":   cmd_ingest,
+        "project":  cmd_project,
+        "latest":   cmd_latest,
+        "validate": cmd_validate,
+    }.get(a.command, lambda _: p.print_help())(a)
+
+
+if __name__ == "__main__":
+    main()

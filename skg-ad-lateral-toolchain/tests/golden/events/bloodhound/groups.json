@@ -1,0 +1,14 @@
+{
+  "meta": {"type": "groups", "count": 1, "version": 5},
+  "data": [
+    {
+      "Properties": {
+        "name": "DOMAIN ADMINS@CONTOSO.LOCAL"
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-512",
+      "Members": [
+        {"ObjectIdentifier": "S-1-5-21-1234-5678-9012-500", "ObjectType": "User"}
+      ]
+    }
+  ]
+}

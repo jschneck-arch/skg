@@ -1,0 +1,157 @@
+{
+  "version": "1.0.0",
+  "wickets": [
+    {
+      "id": "AP-L4",
+      "name": "Log4j loaded at runtime",
+      "description": "Log4j classes are loaded during execution.",
+      "evidence_rank_min": 1
+    },
+    {
+      "id": "AP-L7",
+      "name": "Outbound egress permits callback",
+      "description": "Network policy permits outbound connectivity needed for remote resolution/callback.",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L8",
+      "name": "Attacker-controlled input reaches a Log4j sink",
+      "description": "Untrusted input is logged by Log4j on a reachable code path.",
+      "evidence_rank_min": 1
+    },
+    {
+      "id": "AP-L9",
+      "name": "Exposure class supports attacker access",
+      "description": "Service exposure posture allows attacker interaction (public/internal/post-auth).",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L10",
+      "name": "JNDI lookup capability present",
+      "description": "Required lookup capability/classes are present/active in runtime.",
+      "evidence_rank_min": 1
+    },
+    {
+      "id": "AP-L11",
+      "name": "Lookups enabled in effective configuration",
+      "description": "Effective logging configuration permits lookups / message substitution relevant to the path.",
+      "evidence_rank_min": 3
+    },
+    {
+      "id": "AP-L12",
+      "name": "DNS resolution allowed",
+      "description": "Environment permits DNS resolution required for outbound target discovery.",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L13",
+      "name": "LDAP/RMI outbound permitted",
+      "description": "Environment permits LDAP/RMI egress or equivalent protocol needed for classic JNDI retrieval.",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L14",
+      "name": "HTTP/HTTPS outbound permitted",
+      "description": "Environment permits HTTP(S) egress (alternative retrieval / callback).",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L15",
+      "name": "Proxy-only outbound with allowlist",
+      "description": "Outbound is constrained to proxy and allowlist governs destinations.",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L16",
+      "name": "Process spawn permitted",
+      "description": "Policy allows exec/spawn needed for high-impact payloads.",
+      "evidence_rank_min": 3
+    },
+    {
+      "id": "AP-L17",
+      "name": "Relevant file write permitted",
+      "description": "Policy allows writing to locations needed for persistence/impact.",
+      "evidence_rank_min": 3
+    },
+    {
+      "id": "AP-L18",
+      "name": "Outbound channel lacks strong endpoint authentication",
+      "description": "Outbound retrieval/callback channel can be intercepted/modified due to missing TLS validation, weak trust, or use of cleartext protocols.",
+      "evidence_rank_min": 4
+    },
+    {
+      "id": "AP-L19",
+      "name": "No certificate pinning / proxy interception permitted",
+      "description": "Client permits interception (e.g., enterprise proxy) and does not pin certificates or otherwise prevent MITM substitution.",
+      "evidence_rank_min": 3
+    }
+  ],
+  "attack_paths": [
+    {
+      "attack_path_id": "log4j_dos_v1",
+      "name": "Log4j Lookup/Pattern DoS v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L11"
+      ],
+      "notes": "Objective: resource exhaustion via expensive pattern/lookup evaluation; impact depends on rate limits and logging volume."
+    },
+    {
+      "attack_path_id": "log4j_info_disclosure_v1",
+      "name": "Log4j Lookup-Driven Info Disclosure v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L11"
+      ],
+      "notes": "Objective: attacker-controlled input triggers lookup evaluation that may disclose environment/runtime data via logs or error channels; avoids assuming outbound retrieval."
+    },
+    {
+      "attack_path_id": "log4j_jndi_callback_v1",
+      "name": "Log4j JNDI Callback (network interaction) v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7"
+      ],
+      "notes": "Objective: external influence triggers outbound lookup/callback. Does not assert final impact."
+    },
+    {
+      "attack_path_id": "log4j_jndi_rce_v1",
+      "name": "Log4j JNDI RCE (generic) v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7"
+      ],
+      "notes": "Minimal generic path: runtime load + reachable sink + access posture + capability + config + dns + egress."
+    },
+    {
+      "attack_path_id": "log4j_mitm_injection_v1",
+      "name": "Log4j Outbound Retrieval with MITM Injection v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7",
+        "AP-L18",
+        "AP-L19"
+      ],
+      "notes": "Objective: outbound retrieval/callback is possible AND the channel can be intercepted/modified (MITM), increasing attacker control when traffic traverses untrusted networks or intercepting proxies."
+    }
+  ]
+}

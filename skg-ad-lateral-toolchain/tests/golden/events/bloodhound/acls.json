@@ -1,0 +1,19 @@
+{
+  "meta": {"type": "acls", "count": 2, "version": 5},
+  "data": [
+    {
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-512",
+      "PrincipalObjectIdentifier": "S-1-5-21-1234-5678-9012-1104",
+      "PrincipalName": "JDOE@CONTOSO.LOCAL",
+      "RightName": "GenericAll",
+      "IsInherited": false
+    },
+    {
+      "ObjectIdentifier": "DC=CONTOSO,DC=LOCAL",
+      "PrincipalObjectIdentifier": "S-1-5-21-1234-5678-9012-1105",
+      "PrincipalName": "BACKUP-SVC@CONTOSO.LOCAL",
+      "RightName": "GetChanges",
+      "IsInherited": false
+    }
+  ]
+}
