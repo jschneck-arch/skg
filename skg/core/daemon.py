@@ -609,6 +609,25 @@ def topology_manifold():
         raise HTTPException(500, f"Manifold error: {exc}")
 
 
+@app.get("/topology/dynamics")
+def topology_dynamics(steps: int = 200, K: float = 2.0):
+    """Kuramoto phase dynamics on the live wicket graph."""
+    try:
+        from skg.topology.kuramoto import run_dynamics
+        history = run_dynamics(EVENTS_DIR, INTERP_DIR,
+                               steps=steps, dt=0.05, K=K)
+        return {
+            "K":       K,
+            "steps":   steps,
+            "R_init":  round(history[0].R, 6) if history else 0,
+            "R_final": round(history[-1].R, 6) if history else 0,
+            "delta_R": round(history[-1].R - history[0].R, 6) if history else 0,
+            "series":  [s.as_dict() for s in history],
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Dynamics error: {exc}")
+
+
 @app.get("/topology/energy/history")
 def topology_energy_history(sphere: str = "host"):
     """G(t) trajectory for a sphere across all historical sweeps."""
