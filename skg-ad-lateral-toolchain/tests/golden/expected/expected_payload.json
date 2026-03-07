@@ -1,0 +1,9 @@
+{
+  "attack_path_id": "ad_kerberoast_v1",
+  "required_wickets": ["AD-01", "AD-02", "AD-03", "AD-24"],
+  "realized": ["AD-01", "AD-02", "AD-03", "AD-24"],
+  "blocked": [],
+  "unknown": [],
+  "lateral_score": 1.0,
+  "classification": "realized"
+}

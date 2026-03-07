@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+skg-aprs-toolchain/.venv/
+/etc/skg/local.yml
+*.ndjson.local
+.DS_Store
+tests/golden/expected/_out_*.ndjson
+*.pid
+*.log
+/var/
+skg-container-escape-toolchain/.venv/
+skg-container-escape-toolchain/tests/golden/expected/_out_*.ndjson
+skg-ad-lateral-toolchain/.venv/
+skg-ad-lateral-toolchain/tests/golden/expected/_out_*.ndjson

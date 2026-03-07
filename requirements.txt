@@ -1,0 +1,21 @@
+# SKG core daemon + resonance engine
+fastapi
+uvicorn
+pydantic
+
+# Resonance engine (semantic memory)
+faiss-cpu
+numpy
+sentence-transformers
+
+# Sensor layer — collection transports
+paramiko          # SSH sensor
+pywinrm           # WinRM sensor
+pymetasploit3     # MSF sensor (RPC)
+requests          # HTTP agent callbacks, NVD API
+
+# YAML support (catalog compiler + config)
+pyyaml
+
+# Optional: local model backend (install separately via AUR/pip)
+# ollama            # pip install ollama

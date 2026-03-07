@@ -1,0 +1,122 @@
+{
+  "version": "1.0.0",
+  "description": "Container escape attack preconditions catalog. Wickets are observable conditions required for specific escape paths. Each wicket maps to an evidence source collectable via docker inspect or runtime observation.",
+  "wickets": {
+    "CE-01": {
+      "id": "CE-01",
+      "label": "container_running_as_root",
+      "description": "Container process runs as UID 0 (root) inside the container namespace.",
+      "evidence_hint": "docker inspect .Config.User == '' or '0' or 'root'"
+    },
+    "CE-02": {
+      "id": "CE-02",
+      "label": "privileged_flag_set",
+      "description": "Container launched with --privileged, granting full host capability set and disabling seccomp/AppArmor.",
+      "evidence_hint": "docker inspect .HostConfig.Privileged == true"
+    },
+    "CE-03": {
+      "id": "CE-03",
+      "label": "docker_socket_mounted",
+      "description": "Host Docker socket (/var/run/docker.sock) mounted into container, allowing full Docker API access.",
+      "evidence_hint": "docker inspect .Mounts[] where Source == /var/run/docker.sock"
+    },
+    "CE-04": {
+      "id": "CE-04",
+      "label": "cap_sys_admin_present",
+      "description": "SYS_ADMIN capability granted. Enables cgroup namespace escape, mount operations, and other privileged actions.",
+      "evidence_hint": "docker inspect .HostConfig.CapAdd contains SYS_ADMIN, or Privileged==true"
+    },
+    "CE-05": {
+      "id": "CE-05",
+      "label": "cap_sys_ptrace_present",
+      "description": "SYS_PTRACE capability granted. Enables process injection into host PID namespace processes.",
+      "evidence_hint": "docker inspect .HostConfig.CapAdd contains SYS_PTRACE"
+    },
+    "CE-06": {
+      "id": "CE-06",
+      "label": "host_pid_namespace_shared",
+      "description": "Container shares host PID namespace (--pid=host). Container processes can see and interact with all host processes.",
+      "evidence_hint": "docker inspect .HostConfig.PidMode == 'host'"
+    },
+    "CE-07": {
+      "id": "CE-07",
+      "label": "host_network_namespace_shared",
+      "description": "Container shares host network namespace (--network=host). Full host network stack access.",
+      "evidence_hint": "docker inspect .HostConfig.NetworkMode == 'host'"
+    },
+    "CE-08": {
+      "id": "CE-08",
+      "label": "sensitive_host_path_mounted",
+      "description": "Sensitive host path mounted into container (e.g. /etc, /proc, /sys, /root, /, host filesystem).",
+      "evidence_hint": "docker inspect .Mounts[] where Source starts with /etc or /proc or /sys or /root or / (host root)"
+    },
+    "CE-09": {
+      "id": "CE-09",
+      "label": "seccomp_disabled",
+      "description": "Seccomp profile disabled or set to unconfined. No syscall filtering in place.",
+      "evidence_hint": "docker inspect .HostConfig.SecurityOpt contains seccomp=unconfined, or Privileged==true"
+    },
+    "CE-10": {
+      "id": "CE-10",
+      "label": "apparmor_disabled",
+      "description": "AppArmor profile disabled or set to unconfined for this container.",
+      "evidence_hint": "docker inspect .HostConfig.SecurityOpt contains apparmor=unconfined, or Privileged==true"
+    },
+    "CE-11": {
+      "id": "CE-11",
+      "label": "cap_net_admin_present",
+      "description": "NET_ADMIN capability granted. Enables network interface manipulation, iptables modification, ARP spoofing.",
+      "evidence_hint": "docker inspect .HostConfig.CapAdd contains NET_ADMIN"
+    },
+    "CE-12": {
+      "id": "CE-12",
+      "label": "writable_host_path_mounted",
+      "description": "Host path mounted with read-write access, enabling host filesystem modification from within the container.",
+      "evidence_hint": "docker inspect .Mounts[] where RW == true and Source is a host path"
+    },
+    "CE-13": {
+      "id": "CE-13",
+      "label": "host_ipc_namespace_shared",
+      "description": "Container shares host IPC namespace (--ipc=host). Enables shared memory attacks against host processes.",
+      "evidence_hint": "docker inspect .HostConfig.IpcMode == 'host'"
+    },
+    "CE-14": {
+      "id": "CE-14",
+      "label": "no_user_namespace_remapping",
+      "description": "User namespace remapping not configured. UID 0 inside container maps directly to UID 0 on host.",
+      "evidence_hint": "docker info | grep userns, or absence of --userns-remap in daemon config"
+    }
+  },
+  "attack_paths": {
+    "container_escape_privileged_v1": {
+      "id": "container_escape_privileged_v1",
+      "description": "Escape via privileged container. Full host capability set, no seccomp/AppArmor. Mount host filesystem via cgroup release_agent or direct /dev access.",
+      "required_wickets": ["CE-01", "CE-02", "CE-09", "CE-10", "CE-14"],
+      "references": ["CVE-2019-5736", "https://blog.trailofbits.com/2019/07/19/understanding-docker-container-escapes/"]
+    },
+    "container_escape_socket_v1": {
+      "id": "container_escape_socket_v1",
+      "description": "Escape via mounted Docker socket. Create privileged container or exec into host via Docker API.",
+      "required_wickets": ["CE-01", "CE-03", "CE-14"],
+      "references": ["https://book.hacktricks.xyz/linux-hardening/privilege-escalation/docker-security/docker-breakout-privilege-escalation#mounted-docker-socket-escape"]
+    },
+    "container_escape_sys_admin_v1": {
+      "id": "container_escape_sys_admin_v1",
+      "description": "Escape via SYS_ADMIN capability. Mount host cgroup filesystem, write malicious release_agent, trigger via OOM or manual notification.",
+      "required_wickets": ["CE-01", "CE-04", "CE-09", "CE-14"],
+      "references": ["https://blog.trailofbits.com/2019/07/19/understanding-docker-container-escapes/"]
+    },
+    "container_escape_ptrace_v1": {
+      "id": "container_escape_ptrace_v1",
+      "description": "Escape via SYS_PTRACE + host PID namespace. Attach to host process, inject shellcode.",
+      "required_wickets": ["CE-01", "CE-05", "CE-06", "CE-14"],
+      "references": ["https://book.hacktricks.xyz/linux-hardening/privilege-escalation/docker-security/docker-breakout-privilege-escalation#pid-namespace"]
+    },
+    "container_escape_host_mount_v1": {
+      "id": "container_escape_host_mount_v1",
+      "description": "Escape via sensitive host path mounted read-write. Modify host /etc/cron*, /root/.ssh, or overwrite binaries.",
+      "required_wickets": ["CE-01", "CE-08", "CE-12", "CE-14"],
+      "references": ["https://book.hacktricks.xyz/linux-hardening/privilege-escalation/docker-security/docker-breakout-privilege-escalation#rw-hostpath-mount"]
+    }
+  }
+}

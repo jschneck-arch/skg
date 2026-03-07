@@ -1,0 +1,224 @@
+{
+  "version": "1.0.0",
+  "description": "AD lateral movement attack preconditions catalog. Covers Kerberoasting, AS-REP roasting, delegation abuse, ACL abuse, DCSync, password in description, and AdminSDHolder abuse. Evidence sources: BloodHound (v4/v5), ldapdomaindump, raw LDAP, manual JSON.",
+  "wickets": {
+    "AD-01": {
+      "id": "AD-01",
+      "label": "kerberoastable_accounts_exist",
+      "description": "Service accounts with SPNs exist that are not machine accounts, making them candidates for Kerberoasting.",
+      "evidence_hint": "BloodHound users.json: hasspn=true, enabled=true, not a computer account"
+    },
+    "AD-02": {
+      "id": "AD-02",
+      "label": "kerberoastable_no_aes_enforcement",
+      "description": "Kerberoastable accounts do not enforce AES-only encryption, allowing RC4 ticket requests which are faster to crack.",
+      "evidence_hint": "BloodHound users.json: hasspn=true, supportedencryptiontypes does not include AES256 only"
+    },
+    "AD-03": {
+      "id": "AD-03",
+      "label": "no_kerberoast_detection",
+      "description": "No indication of Kerberoast detection controls (honeypot SPNs, alerting on RC4 TGS requests).",
+      "evidence_hint": "Absence of known honeypot SPN naming conventions in user set"
+    },
+    "AD-04": {
+      "id": "AD-04",
+      "label": "asrep_roastable_accounts_exist",
+      "description": "User accounts exist with Kerberos pre-authentication disabled, allowing AS-REP roasting without credentials.",
+      "evidence_hint": "BloodHound users.json: dontreqpreauth=true, enabled=true"
+    },
+    "AD-05": {
+      "id": "AD-05",
+      "label": "asrep_accounts_have_privileges",
+      "description": "AS-REP roastable accounts have elevated privileges or group memberships worth targeting.",
+      "evidence_hint": "BloodHound group memberships for dontreqpreauth accounts — DA, admin groups"
+    },
+    "AD-06": {
+      "id": "AD-06",
+      "label": "unconstrained_delegation_non_dc",
+      "description": "Non-DC computer accounts have unconstrained delegation enabled. Any user authenticating to these systems has their TGT cached and stealable.",
+      "evidence_hint": "BloodHound computers.json: unconstraineddelegation=true, not a domain controller"
+    },
+    "AD-07": {
+      "id": "AD-07",
+      "label": "unconstrained_delegation_reachable",
+      "description": "Unconstrained delegation hosts are reachable/active (not stale, not disabled).",
+      "evidence_hint": "BloodHound computers.json: enabled=true, lastlogontimestamp recent"
+    },
+    "AD-08": {
+      "id": "AD-08",
+      "label": "constrained_delegation_protocol_transition",
+      "description": "Accounts with constrained delegation have protocol transition enabled (TrustedToAuthForDelegation), allowing S4U2Self impersonation of any user.",
+      "evidence_hint": "BloodHound users/computers: allowedtodelegate not empty, trustedtoauthfordelegation=true"
+    },
+    "AD-09": {
+      "id": "AD-09",
+      "label": "constrained_delegation_target_is_sensitive",
+      "description": "Constrained delegation targets include sensitive services (CIFS, LDAP, HOST on DCs or tier-0 assets).",
+      "evidence_hint": "BloodHound allowedtodelegate SPNs reference DC hostnames or sensitive services"
+    },
+    "AD-10": {
+      "id": "AD-10",
+      "label": "acl_genericall_on_high_value",
+      "description": "Non-admin principals have GenericAll rights over high-value targets (DA group, domain object, DC computer accounts).",
+      "evidence_hint": "BloodHound ACL edges: GenericAll where target is high-value node"
+    },
+    "AD-11": {
+      "id": "AD-11",
+      "label": "acl_genericwrite_on_high_value",
+      "description": "Non-admin principals have GenericWrite over high-value targets, enabling attribute manipulation (e.g. msDS-KeyCredentialLink for shadow credentials).",
+      "evidence_hint": "BloodHound ACL edges: GenericWrite where target is high-value node"
+    },
+    "AD-12": {
+      "id": "AD-12",
+      "label": "acl_writedacl_on_high_value",
+      "description": "Non-admin principals have WriteDACL over high-value targets, allowing self-granting of any permission.",
+      "evidence_hint": "BloodHound ACL edges: WriteDacl where target is high-value node"
+    },
+    "AD-13": {
+      "id": "AD-13",
+      "label": "acl_writeowner_on_high_value",
+      "description": "Non-admin principals have WriteOwner over high-value targets, allowing ownership takeover and subsequent DACL modification.",
+      "evidence_hint": "BloodHound ACL edges: WriteOwner where target is high-value node"
+    },
+    "AD-14": {
+      "id": "AD-14",
+      "label": "acl_forcechangepassword_on_privileged",
+      "description": "Non-admin principals have ForceChangePassword rights over privileged accounts.",
+      "evidence_hint": "BloodHound ACL edges: ForceChangePassword where target is admin/DA member"
+    },
+    "AD-15": {
+      "id": "AD-15",
+      "label": "dcsync_rights_outside_da",
+      "description": "Accounts outside Domain Admins/Domain Controllers hold both Replicating Directory Changes and Replicating Directory Changes All rights on the domain object, enabling DCSync.",
+      "evidence_hint": "BloodHound ACL edges: GetChanges + GetChangesAll on domain node from non-DA principals"
+    },
+    "AD-16": {
+      "id": "AD-16",
+      "label": "dcsync_account_is_enabled",
+      "description": "The account holding DCSync rights is enabled and not a legitimate sync account.",
+      "evidence_hint": "BloodHound users.json: enabled=true for accounts with GetChanges+GetChangesAll"
+    },
+    "AD-17": {
+      "id": "AD-17",
+      "label": "password_in_description",
+      "description": "User or computer accounts have plaintext credentials or password hints stored in the description field.",
+      "evidence_hint": "BloodHound/ldapdomaindump: description field contains password-related keywords"
+    },
+    "AD-18": {
+      "id": "AD-18",
+      "label": "password_in_description_account_enabled",
+      "description": "Accounts with passwords in descriptions are enabled and have not been rotated.",
+      "evidence_hint": "BloodHound users.json: enabled=true, pwdlastset old, description contains credential"
+    },
+    "AD-19": {
+      "id": "AD-19",
+      "label": "adminsdholder_unexpected_principals",
+      "description": "Unexpected non-admin principals have permissions on the AdminSDHolder object, which propagates to all protected accounts via SDProp.",
+      "evidence_hint": "BloodHound ACL edges on AdminSDHolder node from non-standard principals"
+    },
+    "AD-20": {
+      "id": "AD-20",
+      "label": "adminsdholder_propagation_active",
+      "description": "SDProp is running (default: every 60 min), meaning AdminSDHolder ACL changes will propagate to protected groups.",
+      "evidence_hint": "Absence of evidence it is disabled; assumed active unless explicitly blocked"
+    },
+    "AD-21": {
+      "id": "AD-21",
+      "label": "stale_privileged_accounts",
+      "description": "Privileged accounts (DA, EA, BA members) have not logged in recently but remain enabled — lower detection risk when abused.",
+      "evidence_hint": "BloodHound users.json: group member of high-value group, lastlogontimestamp > 90 days, enabled=true"
+    },
+    "AD-22": {
+      "id": "AD-22",
+      "label": "no_privileged_account_tiering",
+      "description": "Privileged accounts are used on non-tier-0 systems (no tiering model enforced), increasing exposure.",
+      "evidence_hint": "BloodHound: DA/EA accounts have sessions on workstations or member servers"
+    },
+    "AD-23": {
+      "id": "AD-23",
+      "label": "spn_on_da_account",
+      "description": "A Domain Admin account has an SPN set, making it directly Kerberoastable with immediate DA-level impact.",
+      "evidence_hint": "BloodHound: hasspn=true on account that is member of Domain Admins"
+    },
+    "AD-24": {
+      "id": "AD-24",
+      "label": "weak_password_policy",
+      "description": "Domain password policy allows short or non-complex passwords, increasing likelihood of offline crack success.",
+      "evidence_hint": "ldapdomaindump domain_policy.json: minPwdLength < 12, complexity not enforced"
+    },
+    "AD-25": {
+      "id": "AD-25",
+      "label": "no_laps_on_workstations",
+      "description": "Local Administrator Password Solution (LAPS) not deployed on workstations, meaning shared local admin passwords enable lateral movement.",
+      "evidence_hint": "BloodHound computers.json: haslaps=false on workstation-class machines"
+    }
+  },
+  "attack_paths": {
+    "ad_kerberoast_v1": {
+      "id": "ad_kerberoast_v1",
+      "description": "Offline password cracking via Kerberoasting. Request TGS tickets for SPN-linked accounts, crack RC4-encrypted tickets offline.",
+      "required_wickets": ["AD-01", "AD-02", "AD-03", "AD-24"],
+      "references": ["https://attack.mitre.org/techniques/T1558/003/"]
+    },
+    "ad_kerberoast_da_v1": {
+      "id": "ad_kerberoast_da_v1",
+      "description": "Kerberoasting targeting a Domain Admin account directly. Highest-impact variant.",
+      "required_wickets": ["AD-23", "AD-02", "AD-24"],
+      "references": ["https://attack.mitre.org/techniques/T1558/003/"]
+    },
+    "ad_asrep_roast_v1": {
+      "id": "ad_asrep_roast_v1",
+      "description": "Offline password cracking via AS-REP roasting. No credentials required. Targets accounts with pre-auth disabled.",
+      "required_wickets": ["AD-04", "AD-05", "AD-24"],
+      "references": ["https://attack.mitre.org/techniques/T1558/004/"]
+    },
+    "ad_unconstrained_delegation_v1": {
+      "id": "ad_unconstrained_delegation_v1",
+      "description": "TGT theft via unconstrained delegation. Coerce authentication from high-value accounts to delegation host, extract cached TGTs.",
+      "required_wickets": ["AD-06", "AD-07", "AD-22"],
+      "references": ["https://attack.mitre.org/techniques/T1558/"]
+    },
+    "ad_constrained_delegation_s4u_v1": {
+      "id": "ad_constrained_delegation_s4u_v1",
+      "description": "Privilege escalation via S4U2Self/S4U2Proxy abuse on accounts with protocol transition enabled.",
+      "required_wickets": ["AD-08", "AD-09"],
+      "references": ["https://attack.mitre.org/techniques/T1558/"]
+    },
+    "ad_acl_abuse_v1": {
+      "id": "ad_acl_abuse_v1",
+      "description": "Privilege escalation via abusable ACL edges (GenericAll, GenericWrite, WriteDACL, WriteOwner) on high-value AD objects.",
+      "required_wickets": ["AD-10", "AD-11", "AD-12", "AD-13"],
+      "references": ["https://attack.mitre.org/techniques/T1222/001/"]
+    },
+    "ad_acl_forcechangepw_v1": {
+      "id": "ad_acl_forcechangepw_v1",
+      "description": "Account takeover via ForceChangePassword ACL edge on privileged accounts.",
+      "required_wickets": ["AD-14", "AD-24"],
+      "references": ["https://attack.mitre.org/techniques/T1098/"]
+    },
+    "ad_dcsync_v1": {
+      "id": "ad_dcsync_v1",
+      "description": "Credential dumping via DCSync. Non-DC account replicates domain secrets including krbtgt hash.",
+      "required_wickets": ["AD-15", "AD-16"],
+      "references": ["https://attack.mitre.org/techniques/T1003/006/"]
+    },
+    "ad_password_in_description_v1": {
+      "id": "ad_password_in_description_v1",
+      "description": "Credential harvesting from AD description fields. Plaintext passwords stored as admin convenience.",
+      "required_wickets": ["AD-17", "AD-18"],
+      "references": ["https://attack.mitre.org/techniques/T1552/004/"]
+    },
+    "ad_adminsdholder_v1": {
+      "id": "ad_adminsdholder_v1",
+      "description": "Persistence via AdminSDHolder ACL abuse. Grants persistent access to all protected accounts via SDProp propagation.",
+      "required_wickets": ["AD-19", "AD-20"],
+      "references": ["https://attack.mitre.org/techniques/T1078/002/"]
+    },
+    "ad_laps_absent_v1": {
+      "id": "ad_laps_absent_v1",
+      "description": "Lateral movement via shared local admin credentials. No LAPS means cracking one machine's local admin unlocks many.",
+      "required_wickets": ["AD-25", "AD-22"],
+      "references": ["https://attack.mitre.org/techniques/T1550/002/"]
+    }
+  }
+}

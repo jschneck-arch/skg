@@ -1,0 +1,21 @@
+[Unit]
+Description=SKG Red Team Intelligence Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Environment=SKG_HOME=/opt/skg
+Environment=SKG_STATE_DIR=/var/lib/skg
+Environment=SKG_CONFIG_DIR=/etc/skg
+Environment=PATH=/opt/skg/.venv/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/opt/skg
+ExecStart=/opt/skg/.venv/bin/python -m uvicorn skg.core.daemon:app     --host 127.0.0.1 --port 5055     --log-level warning
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skg
+
+[Install]
+WantedBy=default.target

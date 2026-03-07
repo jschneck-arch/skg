@@ -1,0 +1,165 @@
+{
+  "domain": "web",
+  "version": "1.0.0",
+  "description": "Web surface attack preconditions. HTTP/HTTPS/Onion targets.",
+  "wickets": {
+    "WB-01": {
+      "label": "web_reachable",
+      "description": "Web target reachable",
+      "evidence_hint": "HTTP GET root returns any status",
+      "default_rank": 3
+    },
+    "WB-02": {
+      "label": "server_version_leaked",
+      "description": "Server header discloses software version",
+      "evidence_hint": "Server: Apache/2.4.49, nginx/1.18.0",
+      "default_rank": 3
+    },
+    "WB-03": {
+      "label": "stack_leaked",
+      "description": "X-Powered-By discloses technology stack",
+      "evidence_hint": "X-Powered-By: PHP/7.4.3, ASP.NET",
+      "default_rank": 3
+    },
+    "WB-04": {
+      "label": "security_headers_absent",
+      "description": "Missing critical security headers",
+      "evidence_hint": "Absence of HSTS, CSP, X-Frame-Options",
+      "default_rank": 3
+    },
+    "WB-05": {
+      "label": "admin_interface_exposed",
+      "description": "Admin interface accessible without auth",
+      "evidence_hint": "HTTP 200 on /admin, /manager/html, /wp-admin",
+      "default_rank": 2
+    },
+    "WB-06": {
+      "label": "api_docs_exposed",
+      "description": "Swagger/OpenAPI docs publicly accessible",
+      "evidence_hint": "HTTP 200 on /swagger-ui, /openapi.json",
+      "default_rank": 3
+    },
+    "WB-07": {
+      "label": "debug_endpoint_exposed",
+      "description": "Debug/actuator endpoint exposed",
+      "evidence_hint": "HTTP 200 on /actuator/env, /metrics",
+      "default_rank": 2
+    },
+    "WB-08": {
+      "label": "git_exposure",
+      "description": ".git directory accessible, source extractable",
+      "evidence_hint": "HTTP 200 on /.git/HEAD returns ref: refs/",
+      "default_rank": 2
+    },
+    "WB-09": {
+      "label": "env_file_exposed",
+      "description": ".env or config file with credentials accessible",
+      "evidence_hint": "HTTP 200 on /.env with KEY=value content",
+      "default_rank": 1
+    },
+    "WB-10": {
+      "label": "default_credentials",
+      "description": "Application uses default credentials",
+      "evidence_hint": "Auth succeeds with admin:admin, vendor defaults",
+      "default_rank": 1
+    },
+    "WB-11": {
+      "label": "tls_weak_or_missing",
+      "description": "TLS not enforced, weak protocol, or cert expired",
+      "evidence_hint": "HTTP-only, TLS 1.0/1.1, or cert expired",
+      "default_rank": 3
+    },
+    "WB-12": {
+      "label": "cors_wildcard",
+      "description": "CORS allows any origin (*)",
+      "evidence_hint": "Access-Control-Allow-Origin: *",
+      "default_rank": 3
+    },
+    "WB-13": {
+      "label": "cve_version_match",
+      "description": "Server version matches known CVE pattern",
+      "evidence_hint": "Server header matches CVE-mapped regex",
+      "default_rank": 3
+    },
+    "WB-14": {
+      "label": "auth_surface_present",
+      "description": "Auth surface exists (login, 401/403 endpoints)",
+      "evidence_hint": "HTTP 401/403 or login form at auth paths",
+      "default_rank": 3
+    },
+    "WB-15": {
+      "label": "cms_detected",
+      "description": "CMS detected (WordPress, Drupal, Joomla)",
+      "evidence_hint": "wp-content, Drupal.settings in body/headers",
+      "default_rank": 3
+    },
+    "WB-16": {
+      "label": "onion_service_active",
+      "description": "Onion service reachable via Tor",
+      "evidence_hint": "HTTP response through socks5h://127.0.0.1:9050",
+      "default_rank": 2
+    },
+    "WB-17": {
+      "label": "sensitive_path_exposed",
+      "description": "Sensitive file accessible (backup, sql, key)",
+      "evidence_hint": "HTTP 200 on /backup.zip, /db.sql, /id_rsa",
+      "default_rank": 1
+    },
+    "WB-18": {
+      "label": "redirect_chain_present",
+      "description": "Multiple redirects \u2014 potential open redirect",
+      "evidence_hint": ">2 redirects in chain to final URL",
+      "default_rank": 3
+    },
+    "WB-19": {
+      "label": "elasticsearch_unauth",
+      "description": "Elasticsearch API accessible without auth",
+      "evidence_hint": "HTTP 200 on /_cat/indices without credentials",
+      "default_rank": 1
+    },
+    "WB-20": {
+      "label": "jenkins_script_console",
+      "description": "Jenkins script console endpoint accessible",
+      "evidence_hint": "HTTP 200/403 on /script or /scriptText",
+      "default_rank": 1
+    }
+  },
+  "attack_paths": {
+    "web_initial_access_v1": {
+      "label": "Web Initial Access",
+      "description": "Exploit exposed admin/auth surface",
+      "required_wickets": [
+        "WB-01",
+        "WB-05"
+      ],
+      "ordered": false
+    },
+    "web_credential_exposure_v1": {
+      "label": "Web Credential Exposure",
+      "description": "Extract credentials from exposed config",
+      "required_wickets": [
+        "WB-01",
+        "WB-09"
+      ],
+      "ordered": false
+    },
+    "web_info_disclosure_v1": {
+      "label": "Web Information Disclosure",
+      "description": "Gather intel from headers/endpoints",
+      "required_wickets": [
+        "WB-01",
+        "WB-02"
+      ],
+      "ordered": false
+    },
+    "web_cve_exploitation_v1": {
+      "label": "Web CVE Exploitation",
+      "description": "Exploit CVE-mapped server version",
+      "required_wickets": [
+        "WB-01",
+        "WB-13"
+      ],
+      "ordered": false
+    }
+  }
+}

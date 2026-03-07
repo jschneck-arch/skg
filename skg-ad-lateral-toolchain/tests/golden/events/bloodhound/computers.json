@@ -1,0 +1,31 @@
+{
+  "meta": {"type": "computers", "count": 2, "version": 5},
+  "data": [
+    {
+      "Properties": {
+        "name": "WEB01.CONTOSO.LOCAL",
+        "enabled": true,
+        "unconstraineddelegation": true,
+        "isdc": false,
+        "haslaps": false,
+        "lastlogontimestamp": 1700000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-2001",
+      "AllowedToDelegate": [],
+      "Aces": []
+    },
+    {
+      "Properties": {
+        "name": "DC01.CONTOSO.LOCAL",
+        "enabled": true,
+        "unconstraineddelegation": true,
+        "isdc": true,
+        "haslaps": false,
+        "lastlogontimestamp": 1700000000
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-1000",
+      "AllowedToDelegate": [],
+      "Aces": []
+    }
+  ]
+}

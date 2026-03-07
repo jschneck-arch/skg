@@ -1,0 +1,9 @@
+{
+  "attack_path_id": "host_linux_privesc_sudo_v1",
+  "required_wickets": ["HO-03", "HO-06"],
+  "realized": ["HO-03", "HO-06"],
+  "blocked": [],
+  "unknown": [],
+  "host_score": 1.0,
+  "classification": "realized"
+}

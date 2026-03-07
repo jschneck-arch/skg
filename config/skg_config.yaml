@@ -1,0 +1,58 @@
+# SKG Platform Configuration — /etc/skg/skg_config.yaml
+sensors:
+  enabled:
+    - usb
+    - ssh
+    - agent
+    - msf
+    - cve
+    - bloodhound
+    - web
+  usb:
+    drops_dir: /var/lib/skg/usb_drops
+  ssh:
+    timeout_s: 30
+    collect_interval_s: 300
+  agent:
+    queue_dir: /var/lib/skg/agent_queue
+  msf:
+    host: 127.0.0.1
+    port: 55553
+    user: msf
+    password: "${MSF_PASSWORD}"
+    loot_dir: ~/.msf4/loot
+  cve:
+    nvd_api_key: "${NIST_NVD_API_KEY}"
+    packages:
+      - log4j
+      - log4j2
+      - docker
+      - containerd
+      - runc
+      - openssl
+      - spring-core
+      - apache-struts
+  bloodhound:
+    # BloodHound CE REST API (primary)
+    url: "http://localhost:8080"
+    username: "admin"
+    password: "${BH_PASSWORD}"
+    # Optional: filter to specific domain
+    # domain_sid: "S-1-5-21-..."
+    collect_interval_s: 900
+    attack_path_id: ad_kerberoast_v1
+    # Fallback: Neo4j bolt direct
+    # neo4j_url: "bolt://localhost:7687"
+    # neo4j_user: "neo4j"
+    # neo4j_password: "${NEO4J_PASSWORD}"
+
+resonance:
+  ollama:
+    url: "http://localhost:11434"
+    # model: "llama3.2:3b"   # auto-selected if omitted
+    temperature: 0.1
+
+  web:
+    timeout_s: 15
+    collect_interval_s: 600
+    max_probe_paths: 60

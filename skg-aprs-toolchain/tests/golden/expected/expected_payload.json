@@ -1,0 +1,36 @@
+{
+  "attack_path_id": "log4j_jndi_rce_v1",
+  "required_wickets": [
+    "AP-L4",
+    "AP-L8",
+    "AP-L9",
+    "AP-L10",
+    "AP-L11",
+    "AP-L12",
+    "AP-L7"
+  ],
+  "latest_status": {
+    "AP-L4": "realized",
+    "AP-L8": "unknown",
+    "AP-L9": "unknown",
+    "AP-L10": "unknown",
+    "AP-L11": "realized",
+    "AP-L12": "unknown",
+    "AP-L7": "blocked"
+  },
+  "realized": [
+    "AP-L4",
+    "AP-L11"
+  ],
+  "blocked": [
+    "AP-L7"
+  ],
+  "unknown": [
+    "AP-L8",
+    "AP-L9",
+    "AP-L10",
+    "AP-L12"
+  ],
+  "aprs": 0.285714,
+  "classification": "indeterminate"
+}

@@ -1,0 +1,39 @@
+# SKG Target Configuration — /etc/skg/targets.yaml
+targets:
+  - host: 192.168.1.10
+    method: ssh
+    user: ops
+    key: ~/.ssh/id_rsa
+    workload_id: linux-web-01
+    attack_path_id: log4j_jndi_rce_v1
+    enabled: true
+    tags: [linux, web]
+
+  # Web targets (HTTP/HTTPS/Onion):
+  #
+  # - url: https://target.example.com
+  #   method: https
+  #   workload_id: target-web-01
+  #   enabled: true
+  #   verify_tls: true
+  #   timeout_s: 15
+  #
+  # - url: http://target.example.com:8080
+  #   method: http
+  #   workload_id: target-web-02
+  #   enabled: true
+  #
+  # - url: http://example.onion
+  #   method: onion
+  #   workload_id: target-onion-01
+  #   enabled: true
+  #   proxy: socks5h://127.0.0.1:9050
+  #
+  # With HTTP basic auth:
+  # - url: https://target.example.com
+  #   method: https
+  #   workload_id: target-auth-01
+  #   enabled: true
+  #   auth:
+  #     user: admin
+  #     password: "${TARGET_PASSWORD}"
