@@ -63,6 +63,13 @@ KNOWN_CVE_WICKETS: dict[str, list[tuple]] = {
     "CVE-2022-0492":  [("container_escape", "CE-05", "sys_admin_capability_present", True, 6)],
     "CVE-2019-5736":  [("container_escape", "CE-08", "runc_version_vulnerable",      True, 6)],
     "CVE-2020-15257": [("container_escape", "CE-10", "containerd_socket_exposed",    True, 6)],
+    # Supply chain / host packages
+    "CVE-2020-14343": [("host", "HO-11", "vuln_packages_installed", True, 6)],  # pyyaml RCE
+    "CVE-2020-1747":  [("host", "HO-11", "vuln_packages_installed", True, 6)],  # pyyaml RCE
+    "CVE-2019-20477": [("host", "HO-11", "vuln_packages_installed", True, 6)],  # pyyaml RCE
+    "CVE-2017-18342": [("host", "HO-11", "vuln_packages_installed", True, 6)],  # pyyaml RCE
+    "CVE-2023-32681": [("host", "HO-11", "vuln_packages_installed", True, 6)],  # requests
+    "CVE-2023-49083": [("host", "HO-11", "vuln_packages_installed", True, 6)],  # cryptography
     # Kerberos / AD
     "CVE-2020-1472":  [("ad_lateral", "AD-22", "zerologon_unpatched",   True, 6)],
     "CVE-2021-42287": [("ad_lateral", "AD-23", "sameaccountname_path",  True, 6)],
@@ -80,6 +87,16 @@ CPE_DOMAIN_HINTS = {
     "kerberos":      "ad_lateral",
     "active_directory": "ad_lateral",
     "windows_server": "ad_lateral",
+    # Supply chain / host packages
+    "pyyaml":        "host",
+    "yaml":          "host",
+    "requests":      "host",
+    "paramiko":      "host",
+    "cryptography":  "host",
+    "pillow":        "host",
+    "openssl":       "host",
+    "spring":        "aprs",
+    "struts":        "aprs",
 }
 
 

@@ -42,8 +42,8 @@ from typing import Any
 log = logging.getLogger("skg.resonance.ollama")
 
 DEFAULT_URL   = "http://localhost:11434"
-MODEL_PREFS   = ["llama3.2:3b", "llama3.2", "mistral:7b", "mistral",
-                 "gemma2:2b", "gemma2", "phi3:mini", "phi3"]
+MODEL_PREFS   = ["tinyllama:latest", "tinyllama", "tinydolphin:latest", "tinydolphin",
+                 "phi3:mini", "phi3", "llama3.2:3b", "llama3.2", "mistral:7b", "mistral"]
 
 SCHEMA_EXAMPLE = """{
   "domain": "example_domain",
