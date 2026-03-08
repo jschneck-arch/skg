@@ -338,7 +338,7 @@ class SensorLoop:
         # Import sensor modules to trigger registration
         from skg.sensors import (  # noqa: F401
             usb_sensor, ssh_sensor, msf_sensor, cve_sensor, agent_sensor,
-            bloodhound_sensor, web_sensor, web_sensor
+            bloodhound_sensor, web_sensor, net_sensor
         )
 
         enabled = sensor_cfg.get("enabled", list(_SENSOR_REGISTRY.keys()))
