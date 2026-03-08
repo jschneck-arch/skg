@@ -1,0 +1,231 @@
+{
+  "version": "1.0.0",
+  "domain": "web",
+  "description": "Web application attack-path realizability: recon through initial access.",
+  "wickets": {
+    "WB-01": {
+      "id": "WB-01",
+      "label": "http_service_reachable",
+      "description": "Target exposes an HTTP/HTTPS service on at least one port.",
+      "evidence_hint": "Evidence rank 1 (runtime): TCP connect + HTTP response received."
+    },
+    "WB-02": {
+      "id": "WB-02",
+      "label": "server_version_disclosed",
+      "description": "HTTP response headers or body disclose server software and version.",
+      "evidence_hint": "Evidence rank 1 (runtime): Server, X-Powered-By, or Via header contains version string."
+    },
+    "WB-03": {
+      "id": "WB-03",
+      "label": "verbose_error_pages",
+      "description": "Application returns stack traces, SQL errors, or debug output on malformed input.",
+      "evidence_hint": "Evidence rank 1 (runtime): Response to malformed request contains traceback, SQL syntax error, or framework debug page."
+    },
+    "WB-04": {
+      "id": "WB-04",
+      "label": "directory_listing_enabled",
+      "description": "At least one directory returns an auto-generated index listing.",
+      "evidence_hint": "Evidence rank 1 (runtime): Response body matches directory listing pattern (Index of /, Parent Directory)."
+    },
+    "WB-05": {
+      "id": "WB-05",
+      "label": "sensitive_paths_exposed",
+      "description": "Sensitive files or paths are accessible without authentication (.git, .env, backup files, admin panels).",
+      "evidence_hint": "Evidence rank 1 (runtime): HTTP 200 on /.git/HEAD, /.env, /backup, /admin, /phpmyadmin, or similar."
+    },
+    "WB-06": {
+      "id": "WB-06",
+      "label": "login_form_present",
+      "description": "Application exposes a login form or authentication endpoint.",
+      "evidence_hint": "Evidence rank 1 (runtime): Response contains <form> with password-type input or known auth endpoint returns 200/401."
+    },
+    "WB-07": {
+      "id": "WB-07",
+      "label": "no_rate_limiting",
+      "description": "Login or input endpoints accept rapid repeated requests without throttling or lockout.",
+      "evidence_hint": "Evidence rank 1 (runtime): 10+ sequential requests to auth endpoint return consistent timing and status codes, no CAPTCHA or 429."
+    },
+    "WB-08": {
+      "id": "WB-08",
+      "label": "default_credentials_accepted",
+      "description": "Application accepts known default username/password combinations.",
+      "evidence_hint": "Evidence rank 1 (runtime): Login with default creds (admin/admin, admin/password, etc.) returns authenticated response."
+    },
+    "WB-09": {
+      "id": "WB-09",
+      "label": "injectable_parameter_found",
+      "description": "At least one input parameter exhibits behavior consistent with SQL injection (error-based, blind, or time-based).",
+      "evidence_hint": "Evidence rank 1 (runtime): Single-quote payload triggers SQL error, boolean condition changes response, or time-delay payload causes measurable delay."
+    },
+    "WB-10": {
+      "id": "WB-10",
+      "label": "sqli_data_extraction_confirmed",
+      "description": "SQL injection yields actual data extraction (table names, column names, row data).",
+      "evidence_hint": "Evidence rank 1 (runtime): UNION-based or error-based extraction returns database content in response."
+    },
+    "WB-11": {
+      "id": "WB-11",
+      "label": "reflected_xss_present",
+      "description": "User input is reflected in the response without sanitization, allowing script injection.",
+      "evidence_hint": "Evidence rank 1 (runtime): Injected payload appears unescaped in response body."
+    },
+    "WB-12": {
+      "id": "WB-12",
+      "label": "path_traversal_present",
+      "description": "Application is vulnerable to directory traversal, exposing files outside the web root.",
+      "evidence_hint": "Evidence rank 1 (runtime): ../../etc/passwd or equivalent payload returns file contents."
+    },
+    "WB-13": {
+      "id": "WB-13",
+      "label": "file_upload_unrestricted",
+      "description": "Application accepts file uploads without adequate type/extension validation.",
+      "evidence_hint": "Evidence rank 1 (runtime): Upload of .php/.jsp/.aspx file accepted and accessible at predictable path."
+    },
+    "WB-14": {
+      "id": "WB-14",
+      "label": "command_injection_present",
+      "description": "User input is passed to a system command without sanitization.",
+      "evidence_hint": "Evidence rank 1 (runtime): Command separator payload (;, |, &&) causes measurable side effect (time delay, DNS lookup, or output change)."
+    },
+    "WB-15": {
+      "id": "WB-15",
+      "label": "ssrf_present",
+      "description": "Application can be induced to make requests to attacker-controlled or internal endpoints.",
+      "evidence_hint": "Evidence rank 1 (runtime): URL parameter pointing to internal address or callback server triggers request from target."
+    },
+    "WB-16": {
+      "id": "WB-16",
+      "label": "session_token_predictable",
+      "description": "Session tokens lack sufficient entropy or follow a predictable pattern.",
+      "evidence_hint": "Evidence rank 1 (runtime): Multiple session tokens collected show low entropy or sequential pattern."
+    },
+    "WB-17": {
+      "id": "WB-17",
+      "label": "tls_misconfigured",
+      "description": "TLS configuration is weak: expired cert, self-signed, weak ciphers, or SSLv3/TLS1.0 supported.",
+      "evidence_hint": "Evidence rank 1 (runtime): TLS handshake reveals weak cipher suite, old protocol, or cert validation failure."
+    },
+    "WB-18": {
+      "id": "WB-18",
+      "label": "cors_misconfigured",
+      "description": "CORS policy allows arbitrary origins or reflects the Origin header with credentials allowed.",
+      "evidence_hint": "Evidence rank 1 (runtime): Access-Control-Allow-Origin reflects attacker origin with Access-Control-Allow-Credentials: true."
+    },
+    "WB-19": {
+      "id": "WB-19",
+      "label": "security_headers_missing",
+      "description": "Response lacks critical security headers (CSP, X-Frame-Options, HSTS, X-Content-Type-Options).",
+      "evidence_hint": "Evidence rank 1 (runtime): Response headers do not include one or more of CSP, X-Frame-Options, Strict-Transport-Security."
+    },
+    "WB-20": {
+      "id": "WB-20",
+      "label": "database_user_privileged",
+      "description": "The database user behind the application has elevated privileges (FILE, DBA, xp_cmdshell, SUPER).",
+      "evidence_hint": "Evidence rank 1 (runtime): SQLi-based privilege check reveals FILE_PRIV=Y, DBA role, or ability to execute OS commands."
+    },
+    "WB-21": {
+      "id": "WB-21",
+      "label": "webshell_upload_achieved",
+      "description": "A webshell or reverse shell payload has been uploaded and is executable on the target.",
+      "evidence_hint": "Evidence rank 1 (runtime): Uploaded payload responds to command execution request."
+    },
+    "WB-22": {
+      "id": "WB-22",
+      "label": "ssti_present",
+      "description": "Server-side template injection allows execution of template expressions in the response.",
+      "evidence_hint": "Evidence rank 1 (runtime): Template expression (e.g. {{7*7}} returning 49) is evaluated and returned in response."
+    },
+    "WB-23": {
+      "id": "WB-23",
+      "label": "api_endpoint_unauthenticated",
+      "description": "API endpoints return sensitive data or accept mutations without authentication.",
+      "evidence_hint": "Evidence rank 1 (runtime): GET/POST to /api/* paths returns data or accepts changes with no auth header."
+    },
+    "WB-24": {
+      "id": "WB-24",
+      "label": "robots_sitemap_disclosure",
+      "description": "robots.txt or sitemap.xml reveals hidden paths, admin endpoints, or internal structure.",
+      "evidence_hint": "Evidence rank 1 (runtime): robots.txt Disallow entries or sitemap URLs point to non-obvious paths."
+    }
+  },
+  "attack_paths": {
+    "web_sqli_to_shell_v1": {
+      "id": "web_sqli_to_shell_v1",
+      "description": "SQL injection leading to OS command execution or file write, achieving remote code execution.",
+      "required_wickets": ["WB-01", "WB-09", "WB-10", "WB-20"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1190/",
+        "https://owasp.org/Top10/A03_2021-Injection/"
+      ]
+    },
+    "web_sqli_data_theft_v1": {
+      "id": "web_sqli_data_theft_v1",
+      "description": "SQL injection leading to extraction of credentials, PII, or application secrets.",
+      "required_wickets": ["WB-01", "WB-09", "WB-10"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1190/",
+        "https://owasp.org/Top10/A03_2021-Injection/"
+      ]
+    },
+    "web_upload_to_shell_v1": {
+      "id": "web_upload_to_shell_v1",
+      "description": "Unrestricted file upload leading to webshell execution.",
+      "required_wickets": ["WB-01", "WB-06", "WB-13", "WB-21"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1505.003/",
+        "https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload"
+      ]
+    },
+    "web_cmdi_to_shell_v1": {
+      "id": "web_cmdi_to_shell_v1",
+      "description": "Command injection through web input leading to OS command execution.",
+      "required_wickets": ["WB-01", "WB-14"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1059/",
+        "https://owasp.org/Top10/A03_2021-Injection/"
+      ]
+    },
+    "web_ssti_to_rce_v1": {
+      "id": "web_ssti_to_rce_v1",
+      "description": "Server-side template injection escalated to remote code execution.",
+      "required_wickets": ["WB-01", "WB-22"],
+      "references": [
+        "https://portswigger.net/web-security/server-side-template-injection"
+      ]
+    },
+    "web_path_traversal_cred_theft_v1": {
+      "id": "web_path_traversal_cred_theft_v1",
+      "description": "Path traversal used to read sensitive files containing credentials or keys.",
+      "required_wickets": ["WB-01", "WB-12"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1083/",
+        "https://owasp.org/www-community/attacks/Path_Traversal"
+      ]
+    },
+    "web_default_creds_to_admin_v1": {
+      "id": "web_default_creds_to_admin_v1",
+      "description": "Default credentials grant administrative access to the application.",
+      "required_wickets": ["WB-01", "WB-06", "WB-07", "WB-08"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1078.001/"
+      ]
+    },
+    "web_ssrf_internal_access_v1": {
+      "id": "web_ssrf_internal_access_v1",
+      "description": "SSRF used to access internal services, metadata endpoints, or pivot to internal network.",
+      "required_wickets": ["WB-01", "WB-15"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1090/",
+        "https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/"
+      ]
+    },
+    "web_source_disclosure_to_foothold_v1": {
+      "id": "web_source_disclosure_to_foothold_v1",
+      "description": "Exposed source code, git repositories, or config files reveal credentials or internal architecture enabling further attack.",
+      "required_wickets": ["WB-01", "WB-05"],
+      "references": [
+        "https://attack.mitre.org/techniques/T1213/"
+      ]
+    }
+  }
+}

@@ -1,0 +1,837 @@
+"""
+skg :: gravity_field.py
+
+Gravity Field Engine — the operating principle of the substrate.
+
+Gravity is not a scheduler. It is the field dynamics that gives
+energy direction. Every sensor, adapter, and tool is an instrument
+for introducing energy into the telemetry field. Gravity determines
+which instrument to route to which region based on the entropy
+gradient — not rules, not priority lists.
+
+Physics:
+  - Unknown wickets are high-entropy regions (superposition)
+  - Observation collapses unknowns to realized or blocked (measurement)
+  - Collapse is reversible — changing the instrument can re-emerge projections
+  - Each instrument has observational reach (wavelength) — some regions
+    are only visible to certain instruments
+  - When an instrument fails to reduce entropy, gravity shifts to
+    a different instrument rather than retrying
+  - The system follows geodesics through the entropy landscape
+
+Field energy: E = H(π | T) — Shannon entropy of projection given telemetry
+  High E = many unknowns = strong gravitational pull
+  Low E = mostly realized/blocked = weak pull
+  E = 0 = fully determined = no pull
+
+The gravity loop is continuous field dynamics:
+  observation → energy change → entropy shift → gravity redirects → next observation
+
+Usage:
+  python gravity_field.py --auto --cycles 5
+  python gravity_field.py --surface /var/lib/skg/discovery/surface_*.json
+"""
+
+import json
+import sys
+import os
+import time
+import uuid
+import math
+import glob
+import re
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Optional
+from collections import defaultdict
+from dataclasses import dataclass, field as dc_field
+
+# Instrument paths
+WEB_ADAPTER = Path("/opt/skg/skg-web-toolchain/adapters/web_active")
+FEEDS_PATH = Path("/opt/skg/feeds")
+DISCOVERY_DIR = Path("/var/lib/skg/discovery")
+CVE_DIR = Path("/var/lib/skg/cve")
+
+if WEB_ADAPTER.exists():
+    sys.path.insert(0, str(WEB_ADAPTER))
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ── Instruments ──────────────────────────────────────────────────────────
+# Each instrument has:
+#   - name: identifier
+#   - wavelength: what regions of state space it can observe
+#   - cost: time/resource cost per observation
+#   - reach: what wickets it can potentially resolve
+#   - available: whether the instrument exists on this system
+
+@dataclass
+class Instrument:
+    name: str
+    description: str
+    wavelength: list  # What kinds of unknowns it can resolve
+    cost: float       # Relative cost (1.0 = baseline HTTP request)
+    available: bool = False
+    last_used_on: dict = dc_field(default_factory=dict)  # ip → timestamp
+    entropy_history: dict = dc_field(default_factory=dict)  # ip → [entropy_before, entropy_after]
+
+    def failed_to_reduce(self, ip: str) -> bool:
+        """Did this instrument fail to reduce entropy on this target?"""
+        history = self.entropy_history.get(ip, [])
+        if len(history) >= 2:
+            return history[-1] >= history[-2]  # Entropy didn't decrease
+        return False
+
+
+def detect_instruments() -> dict:
+    """Detect which instruments are available on the system."""
+    instruments = {}
+
+    # HTTP collector — unauthenticated web scanning
+    instruments["http_collector"] = Instrument(
+        name="http_collector",
+        description="Unauthenticated HTTP recon — headers, paths, forms, basic injection",
+        wavelength=["WB-01", "WB-02", "WB-03", "WB-04", "WB-05", "WB-06",
+                     "WB-09", "WB-11", "WB-12", "WB-17", "WB-18", "WB-19",
+                     "WB-22", "WB-24"],
+        cost=1.0,
+        available=(WEB_ADAPTER / "collector.py").exists(),
+    )
+
+    # Authenticated scanner — post-auth surface with CSRF handling
+    instruments["auth_scanner"] = Instrument(
+        name="auth_scanner",
+        description="Authenticated scanning — CSRF-aware login, post-auth injection testing",
+        wavelength=["WB-06", "WB-07", "WB-08", "WB-09", "WB-10", "WB-11",
+                     "WB-12", "WB-13", "WB-14", "WB-15", "WB-22"],
+        cost=3.0,
+        available=(WEB_ADAPTER / "auth_scanner.py").exists(),
+    )
+
+    # NVD feed — CVE intelligence for discovered services
+    instruments["nvd_feed"] = Instrument(
+        name="nvd_feed",
+        description="NVD CVE lookup — maps service versions to known vulnerabilities",
+        wavelength=["CVE-*", "WB-20"],  # CVE wickets + db privilege indicators
+        cost=2.0,
+        available=(FEEDS_PATH / "nvd_ingester.py").exists() and bool(os.environ.get("NIST_NVD_API_KEY")),
+    )
+
+    # Metasploit — exploitation framework
+    msf_available = bool(subprocess.run(
+        ["which", "msfconsole"], capture_output=True).returncode == 0)
+    instruments["metasploit"] = Instrument(
+        name="metasploit",
+        description="Metasploit auxiliary/exploit modules — can bypass app-layer defenses",
+        wavelength=["WB-09", "WB-10", "WB-14", "WB-20", "WB-21",
+                     "CE-*", "HO-*", "AD-*"],
+        cost=5.0,
+        available=msf_available,
+    )
+
+    # Tshark/pcap — network-layer observation
+    tshark_available = bool(subprocess.run(
+        ["which", "tshark"], capture_output=True).returncode == 0)
+    instruments["pcap"] = Instrument(
+        name="pcap",
+        description="Packet capture — observes interactions from the wire, bypasses app-layer opacity",
+        wavelength=["WB-09", "WB-15", "WB-16", "WB-18",
+                     "HO-*", "AD-*"],
+        cost=2.0,
+        available=tshark_available,
+    )
+
+    # SSH sensor — direct host access
+    instruments["ssh_sensor"] = Instrument(
+        name="ssh_sensor",
+        description="SSH remote enumeration — kernel, SUID, sudo, creds, services",
+        wavelength=["HO-*", "CE-*"],
+        cost=2.0,
+        available=Path("/opt/skg/skg/sensors/ssh_sensor.py").exists(),
+    )
+
+    # Nmap — network scanner
+    nmap_available = bool(subprocess.run(
+        ["which", "nmap"], capture_output=True).returncode == 0)
+    instruments["nmap"] = Instrument(
+        name="nmap",
+        description="Network scanner — service detection, version fingerprinting, NSE scripts",
+        wavelength=["WB-01", "WB-02", "WB-17", "HO-*"],
+        cost=3.0,
+        available=nmap_available,
+    )
+
+    return instruments
+
+
+# ── Field energy computation ─────────────────────────────────────────────
+
+def load_wicket_states(ip: str) -> dict:
+    """Load all wicket observations for a target from event files."""
+    states = {}
+    # Discovery events
+    for ef in glob.glob(f"{DISCOVERY_DIR}/web_events_{ip}_*.ndjson"):
+        _load_events_file(ef, states)
+    # Gravity events
+    for ef in glob.glob(f"{DISCOVERY_DIR}/gravity_events_{ip}_*.ndjson"):
+        _load_events_file(ef, states)
+    # Auth events
+    for ef in glob.glob(f"/tmp/*auth*events*.ndjson"):
+        _load_events_file(ef, states, filter_ip=ip)
+    # CVE events
+    for ef in glob.glob(f"{CVE_DIR}/cve_events_*.ndjson"):
+        _load_events_file(ef, states, filter_ip=ip)
+    return states
+
+
+def _load_events_file(path: str, states: dict, filter_ip: str = None):
+    """Load events from an NDJSON file into states dict."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                payload = event.get("payload", {})
+
+                # Filter by IP if specified
+                if filter_ip:
+                    wid_ip = payload.get("workload_id", "")
+                    target_ip = payload.get("target_ip", "")
+                    if filter_ip not in wid_ip and filter_ip not in target_ip:
+                        continue
+
+                wid = payload.get("wicket_id")
+                status = payload.get("status")
+                detail = payload.get("detail", "")
+                ts = event.get("ts", "")
+
+                if wid and status:
+                    prev_ts = states.get(wid, {}).get("ts", "")
+                    if ts >= prev_ts:
+                        states[wid] = {
+                            "status": status,
+                            "detail": detail,
+                            "ts": ts,
+                        }
+    except Exception:
+        pass
+
+
+def field_entropy(states: dict, applicable_wickets: set) -> float:
+    """
+    Compute field energy E = H(π | T) for a target.
+    Shannon entropy over the tri-state distribution of applicable wickets.
+
+    E = uncertainty about attack surface state.
+
+    All unknown = maximum entropy (maximum gravitational pull).
+    All resolved (realized or blocked) = zero entropy.
+    Mixed = proportional to unknowns weighted by total surface size.
+
+    This is NOT Shannon entropy of the distribution — a system where
+    all wickets are in the same state (all unknown) has MAXIMUM
+    uncertainty about the attack surface, not minimum.
+    """
+    if not applicable_wickets:
+        return 0.0
+
+    n = len(applicable_wickets)
+    unknown_count = 0
+
+    for wid in applicable_wickets:
+        s = states.get(wid, {})
+        # Handle both dict and string formats
+        if isinstance(s, dict):
+            status = s.get("status", "unknown")
+        elif isinstance(s, str):
+            status = s
+        else:
+            status = "unknown"
+
+        if status == "unknown" or status == "":
+            unknown_count += 1
+
+    # Field energy = unknowns as proportion of total, scaled by surface size
+    # E ranges from 0 (fully determined) to n (fully unknown)
+    return float(unknown_count)
+
+
+def entropy_reduction_potential(instrument: Instrument, states: dict,
+                                 applicable_wickets: set,
+                                 target_ip: str = "") -> float:
+    """
+    Estimate how much entropy this instrument could reduce.
+    Based on how many unknown wickets fall within the instrument's wavelength.
+    Penalizes instruments that previously failed to reduce entropy on this target.
+    """
+    unknown_in_reach = 0
+    for wid in applicable_wickets:
+        s = states.get(wid, {})
+        if isinstance(s, dict):
+            status = s.get("status", "unknown")
+        elif isinstance(s, str):
+            status = s
+        else:
+            status = "unknown"
+
+        if status != "unknown":
+            continue
+        # Check if this wicket is in the instrument's wavelength
+        for pattern in instrument.wavelength:
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                if wid.startswith(prefix):
+                    unknown_in_reach += 1
+                    break
+            elif wid == pattern:
+                unknown_in_reach += 1
+                break
+
+    if unknown_in_reach == 0:
+        return 0.0
+
+    # Potential reduction = unknowns resolvable / cost
+    # Penalize instruments that previously failed on this specific target
+    penalty = 1.0
+    if target_ip and instrument.failed_to_reduce(target_ip):
+        penalty = 0.2  # Heavy penalty — try something else
+
+    return (unknown_in_reach / instrument.cost) * penalty
+
+
+# ── Catalog loading ──────────────────────────────────────────────────────
+
+def load_all_wicket_ids() -> dict:
+    """Load wicket IDs from all catalogs, grouped by domain."""
+    domain_wickets = {}
+    for catalog_file in glob.glob("/opt/skg/skg-*-toolchain/contracts/catalogs/*.json"):
+        try:
+            data = json.loads(Path(catalog_file).read_text())
+            domain = data.get("domain", "unknown")
+            wickets = set(data.get("wickets", {}).keys())
+            domain_wickets[domain] = wickets
+        except Exception:
+            continue
+    return domain_wickets
+
+
+# ── Instrument execution ────────────────────────────────────────────────
+
+def execute_instrument(instrument: Instrument, target: dict,
+                       run_id: str, out_dir: Path) -> dict:
+    """
+    Execute an instrument against a target.
+    Returns dict with results and entropy change.
+    """
+    ip = target["ip"]
+    result = {
+        "instrument": instrument.name,
+        "target": ip,
+        "events_before": 0,
+        "events_after": 0,
+        "new_findings": [],
+        "success": False,
+    }
+
+    # Count events before
+    states_before = load_wicket_states(ip)
+    unknown_before = sum(1 for s in states_before.values() if s.get("status") == "unknown")
+
+    if instrument.name == "http_collector":
+        result = _exec_http_collector(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "auth_scanner":
+        result = _exec_auth_scanner(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "nvd_feed":
+        result = _exec_nvd_feed(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "metasploit":
+        result = _exec_metasploit(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "pcap":
+        result = _exec_pcap(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "nmap":
+        result = _exec_nmap(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "ssh_sensor":
+        result = _exec_ssh_sensor(ip, target, run_id, out_dir, result)
+
+    # Count events after
+    states_after = load_wicket_states(ip)
+    unknown_after = sum(1 for s in states_after.values() if s.get("status") == "unknown")
+    result["unknowns_resolved"] = unknown_before - unknown_after
+
+    # Track entropy history for this instrument
+    instrument.entropy_history.setdefault(ip, []).append(unknown_after)
+    instrument.last_used_on[ip] = iso_now()
+
+    return result
+
+
+def _exec_http_collector(ip, target, run_id, out_dir, result):
+    """Run the web collector."""
+    web_ports = target.get("web_ports", [])
+    if not web_ports:
+        # Infer from services
+        for svc in target.get("services", []):
+            if svc["service"] in ("http", "https", "http-alt", "https-alt"):
+                scheme = "https" if "https" in svc["service"] else "http"
+                web_ports.append((svc["port"], scheme))
+
+    for port, scheme in web_ports[:2]:
+        url = f"{scheme}://{ip}:{port}"
+        events_file = out_dir / f"gravity_http_{ip}_{port}.ndjson"
+        try:
+            from collector import collect
+            collect(target=url, out_path=str(events_file),
+                    attack_path_id="web_sqli_to_shell_v1",
+                    run_id=run_id, workload_id=f"web::{ip}:{port}",
+                    timeout=8.0)
+            result["success"] = True
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
+
+
+def _exec_auth_scanner(ip, target, run_id, out_dir, result):
+    """Run the authenticated scanner."""
+    web_ports = []
+    for svc in target.get("services", []):
+        if svc["service"] in ("http", "https", "http-alt", "https-alt"):
+            scheme = "https" if "https" in svc["service"] else "http"
+            web_ports.append((svc["port"], scheme))
+
+    for port, scheme in web_ports[:1]:
+        url = f"{scheme}://{ip}:{port}"
+        events_file = out_dir / f"gravity_auth_{ip}_{port}.ndjson"
+        try:
+            from auth_scanner import auth_scan
+            auth_scan(target=url, out_path=str(events_file),
+                      attack_path_id="web_sqli_to_shell_v1",
+                      try_defaults=True, run_id=run_id,
+                      workload_id=f"web::{ip}:{port}",
+                      timeout=10.0)
+            result["success"] = True
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
+
+
+def _exec_nvd_feed(ip, target, run_id, out_dir, result):
+    """Run NVD CVE lookup for discovered services."""
+    api_key = os.environ.get("NIST_NVD_API_KEY", "")
+    if not api_key:
+        result["error"] = "No NVD API key"
+        return result
+
+    # Extract service versions from events
+    states = load_wicket_states(ip)
+    wb02 = states.get("WB-02", {})
+    detail = wb02.get("detail", "")
+
+    services_to_check = []
+    try:
+        headers = json.loads(detail)
+        for val in headers.values():
+            services_to_check.append(val)
+    except (json.JSONDecodeError, TypeError):
+        if detail:
+            services_to_check.append(detail)
+
+    if not services_to_check:
+        result["error"] = "No service versions discovered"
+        return result
+
+    try:
+        sys.path.insert(0, str(FEEDS_PATH))
+        from nvd_ingester import ingest_service
+        CVE_DIR.mkdir(parents=True, exist_ok=True)
+        events_file = CVE_DIR / f"cve_events_{ip}_{run_id[:8]}.ndjson"
+
+        total_candidates = 0
+        for svc in services_to_check:
+            candidates = ingest_service(svc, ip, events_file, api_key, run_id)
+            total_candidates += len(candidates)
+
+        result["success"] = True
+        result["cve_candidates"] = total_candidates
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _exec_metasploit(ip, target, run_id, out_dir, result):
+    """
+    Use Metasploit for targeted auxiliary scanning.
+    Generates an RC script for specific modules based on discovered services.
+    """
+    web_ports = [svc["port"] for svc in target.get("services", [])
+                 if svc["service"] in ("http", "https", "http-alt", "https-alt")]
+
+    if not web_ports:
+        result["error"] = "No web ports for MSF modules"
+        return result
+
+    # Build RC script for relevant auxiliary modules
+    rc_lines = [
+        f"setg RHOSTS {ip}",
+        f"setg RPORT {web_ports[0]}",
+        "setg THREADS 4",
+        "",
+        "# SQL injection scanner",
+        "use auxiliary/scanner/http/sql_injection",
+        f"set RHOSTS {ip}",
+        f"set RPORT {web_ports[0]}",
+        "set TARGETURI /",
+        "run",
+        "",
+        "# Directory scanner",
+        "use auxiliary/scanner/http/dir_scanner",
+        f"set RHOSTS {ip}",
+        f"set RPORT {web_ports[0]}",
+        "run",
+        "",
+        "exit",
+    ]
+
+    rc_file = out_dir / f"msf_{ip}_{run_id[:8]}.rc"
+    rc_file.write_text("\n".join(rc_lines))
+
+    print(f"    [MSF] RC script written: {rc_file}")
+    print(f"    [MSF] Run manually: msfconsole -r {rc_file}")
+    print(f"    [MSF] Or: msfconsole -q -x 'resource {rc_file}'")
+
+    # Don't auto-execute MSF — suggest to operator
+    result["success"] = True
+    result["action"] = "operator"
+    result["rc_file"] = str(rc_file)
+    result["suggestion"] = f"Run: msfconsole -r {rc_file}"
+
+    return result
+
+
+def _exec_pcap(ip, target, run_id, out_dir, result):
+    """
+    Start a targeted packet capture during other instrument execution.
+    Captures traffic to/from the target for offline analysis.
+    """
+    pcap_file = out_dir / f"capture_{ip}_{run_id[:8]}.pcap"
+    duration = 30  # Capture for 30 seconds
+
+    print(f"    [PCAP] Capturing traffic to/from {ip} for {duration}s...")
+    print(f"    [PCAP] Output: {pcap_file}")
+
+    try:
+        # Non-blocking capture
+        proc = subprocess.Popen(
+            ["tshark", "-i", "any", "-f", f"host {ip}",
+             "-w", str(pcap_file), "-a", f"duration:{duration}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        result["success"] = True
+        result["pcap_file"] = str(pcap_file)
+        result["pid"] = proc.pid
+        result["suggestion"] = f"Analyze: tshark -r {pcap_file} -Y 'http || mysql || smb'"
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _exec_nmap(ip, target, run_id, out_dir, result):
+    """Run targeted nmap scan with version detection and NSE scripts."""
+    xml_file = out_dir / f"nmap_{ip}_{run_id[:8]}.xml"
+
+    ports = [str(svc["port"]) for svc in target.get("services", [])]
+    port_arg = ",".join(ports) if ports else "1-1024"
+
+    print(f"    [NMAP] Scanning {ip} ports {port_arg} with version detection...")
+
+    try:
+        subprocess.run(
+            ["nmap", "-sV", "--script=default,vuln", "-p", port_arg,
+             "-oX", str(xml_file), ip],
+            capture_output=True, timeout=120
+        )
+        result["success"] = True
+        result["nmap_xml"] = str(xml_file)
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def _exec_ssh_sensor(ip, target, run_id, out_dir, result):
+    """Trigger the SSH sensor for host enumeration."""
+    sensor_path = Path("/opt/skg/skg/sensors/ssh_sensor.py")
+    if not sensor_path.exists():
+        result["error"] = "SSH sensor not found"
+        return result
+
+    print(f"    [SSH] Triggering sensor for {ip}...")
+    print(f"    [SSH] Suggestion: skg collect --target {ip}")
+    result["success"] = True
+    result["action"] = "operator"
+    result["suggestion"] = f"skg collect --target {ip}"
+
+    return result
+
+
+# ── The Field ────────────────────────────────────────────────────────────
+
+def gravity_field_cycle(surface_path: str, out_dir: str,
+                        cycle_num: int, instruments: dict) -> dict:
+    """
+    One cycle of the gravity field dynamics.
+
+    Not observe-orient-decide-act. Continuous field dynamics:
+    1. Compute entropy landscape across all targets
+    2. Follow the gradient — highest entropy region
+    3. Select instrument that maximizes entropy reduction potential
+    4. If that instrument previously failed here, shift to next best
+    5. Execute and measure entropy change
+    6. The changed entropy reshapes the landscape for next cycle
+    """
+    surface = json.loads(Path(surface_path).read_text())
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    run_id = str(uuid.uuid4())
+
+    domain_wickets = load_all_wicket_ids()
+    all_wickets = set()
+    for wids in domain_wickets.values():
+        all_wickets.update(wids)
+
+    print(f"\n{'='*70}")
+    print(f"  GRAVITY FIELD — CYCLE {cycle_num}")
+    print(f"  {iso_now()}")
+    print(f"{'='*70}")
+
+    # ── Compute entropy landscape ──
+    print("\n  [FIELD] Computing entropy landscape...\n")
+
+    landscape = []
+    for target in surface.get("targets", []):
+        ip = target["ip"]
+        states = load_wicket_states(ip)
+
+        # Determine applicable wickets based on target domains
+        applicable = set()
+        for domain in target.get("domains", []):
+            applicable.update(domain_wickets.get(domain, set()))
+
+        E = field_entropy(states, applicable)
+
+        unknowns = sum(1 for w in applicable
+                       if states.get(w, {}).get("status", "unknown") == "unknown")
+        realized = sum(1 for w in applicable
+                       if states.get(w, {}).get("status") == "realized")
+        blocked = sum(1 for w in applicable
+                      if states.get(w, {}).get("status") == "blocked")
+
+        landscape.append({
+            "ip": ip,
+            "entropy": E,
+            "unknowns": unknowns,
+            "realized": realized,
+            "blocked": blocked,
+            "total_wickets": len(applicable),
+            "applicable_wickets": applicable,
+            "states": states,
+            "domains": target.get("domains", []),
+            "services": target.get("services", []),
+            "target": target,
+        })
+
+    # Sort by entropy — follow the gradient
+    landscape.sort(key=lambda x: x["entropy"], reverse=True)
+
+    # Display field
+    print(f"  {'IP':18s} {'Entropy':>8s} {'Unknown':>8s} {'Realized':>8s} {'Blocked':>8s} {'Total':>6s}")
+    print(f"  {'-'*18} {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*6}")
+    for t in landscape:
+        print(f"  {t['ip']:18s} {t['entropy']:8.2f} {t['unknowns']:8d} "
+              f"{t['realized']:8d} {t['blocked']:8d} {t['total_wickets']:6d}")
+
+    # ── Available instruments ──
+    print(f"\n  [INSTRUMENTS]")
+    for name, inst in instruments.items():
+        status = "ready" if inst.available else "unavailable"
+        print(f"    {name:20s} [{status:12s}] {inst.description[:50]}")
+
+    # ── Follow the gradient ──
+    print(f"\n  [GRADIENT] Following entropy gradient...\n")
+
+    actions_taken = 0
+    entropy_reduced = 0.0
+
+    for t in landscape:
+        if t["entropy"] == 0:
+            continue  # Fully determined — no gravitational pull
+
+        ip = t["ip"]
+        print(f"  → {ip} (E={t['entropy']:.2f}, {t['unknowns']} unknowns)")
+
+        # Score each available instrument by entropy reduction potential
+        candidates = []
+        for name, inst in instruments.items():
+            if not inst.available:
+                continue
+
+            potential = entropy_reduction_potential(
+                inst, t["states"], t["applicable_wickets"], target_ip=ip)
+
+            # Show penalty status
+            if inst.failed_to_reduce(ip):
+                print(f"    {name:20s} potential={potential:.1f} (penalized — no entropy reduction last time)")
+            elif potential > 0:
+                print(f"    {name:20s} potential={potential:.1f}")
+
+            if potential > 0:
+                candidates.append((potential, name, inst))
+
+        if not candidates:
+            print(f"    No instruments can reduce entropy here")
+            continue
+
+        # Select highest potential
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _, best_name, best_inst = candidates[0]
+
+        print(f"    Selected: {best_name} (potential={candidates[0][0]:.1f})")
+
+        # Execute
+        E_before = t["entropy"]
+        result = execute_instrument(best_inst, t["target"], run_id, out_path)
+
+        # Measure entropy change
+        new_states = load_wicket_states(ip)
+        E_after = field_entropy(new_states, t["applicable_wickets"])
+        delta_E = E_before - E_after
+
+        if result.get("success"):
+            actions_taken += 1
+            entropy_reduced += delta_E
+
+            if delta_E > 0:
+                print(f"    ✓ Entropy reduced: {E_before:.2f} → {E_after:.2f} (ΔE={delta_E:+.2f})")
+                resolved = result.get("unknowns_resolved", 0)
+                if resolved:
+                    print(f"      {resolved} unknowns collapsed")
+            elif result.get("action") == "operator":
+                print(f"    ⊕ Operator action suggested: {result.get('suggestion', '')}")
+            else:
+                print(f"    ○ No entropy change (E={E_after:.2f})")
+                # Force failure memory so gravity shifts instruments next cycle
+                best_inst.entropy_history.setdefault(ip, []).append(E_after)
+                best_inst.entropy_history[ip].append(E_after)
+
+            # Track for MSF/operator suggestions
+            if result.get("suggestion"):
+                pass  # Already printed
+
+        else:
+            error = result.get("error", "unknown")
+            print(f"    ✗ Failed: {error}")
+            # Track failure so gravity shifts instruments
+            best_inst.entropy_history.setdefault(ip, []).append(999)
+
+        # Only process top 3 targets per cycle to avoid rate limits
+        if actions_taken >= 3:
+            break
+
+    # ── Cycle summary ──
+    print(f"\n{'='*70}")
+    print(f"  CYCLE {cycle_num} COMPLETE")
+    print(f"  Actions: {actions_taken}")
+    print(f"  Entropy reduced: {entropy_reduced:+.2f}")
+    total_unknown = sum(t["unknowns"] for t in landscape)
+    total_entropy = sum(t["entropy"] for t in landscape)
+    print(f"  Field state: {total_unknown} total unknowns, total E={total_entropy:.2f}")
+    print(f"{'='*70}")
+
+    return {
+        "cycle": cycle_num,
+        "actions_taken": actions_taken,
+        "entropy_reduced": entropy_reduced,
+        "total_entropy": total_entropy,
+        "total_unknowns": total_unknown,
+    }
+
+
+# ── Main loop ────────────────────────────────────────────────────────────
+
+def gravity_field_loop(surface_path: str, out_dir: str, max_cycles: int = 5):
+    """
+    Run the gravity field dynamics.
+    Continues until entropy stabilizes or max cycles reached.
+    """
+    instruments = detect_instruments()
+
+    print(f"[SKG-GRAVITY] Gravity Field Engine v2")
+    print(f"[SKG-GRAVITY] Surface: {surface_path}")
+    print(f"[SKG-GRAVITY] Instruments: {sum(1 for i in instruments.values() if i.available)} available")
+    print(f"[SKG-GRAVITY] Max cycles: {max_cycles}")
+
+    prev_entropy = float('inf')
+
+    for i in range(1, max_cycles + 1):
+        result = gravity_field_cycle(surface_path, out_dir, i, instruments)
+
+        current_entropy = result["total_entropy"]
+
+        # Check for convergence — entropy stabilized
+        if result["actions_taken"] == 0:
+            print(f"\n[SKG-GRAVITY] No actions possible — field stabilized.")
+            break
+
+        if abs(current_entropy - prev_entropy) < 0.01 and i > 1:
+            print(f"\n[SKG-GRAVITY] Entropy converged (ΔE < 0.01) — field stable.")
+            break
+
+        prev_entropy = current_entropy
+
+        if i < max_cycles:
+            print(f"\n[SKG-GRAVITY] Pausing 2s before next cycle...")
+            time.sleep(2)
+
+    print(f"\n[SKG-GRAVITY] Field dynamics complete.")
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="SKG Gravity Field Engine — entropy-driven field dynamics")
+    parser.add_argument("--surface", default=None)
+    parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--cycles", type=int, default=5)
+    parser.add_argument("--out-dir", dest="out_dir",
+                        default="/var/lib/skg/discovery")
+    args = parser.parse_args()
+
+    surface_path = args.surface
+    if args.auto or not surface_path:
+        surfaces = sorted(glob.glob("/var/lib/skg/discovery/surface_*.json"), key=os.path.getmtime)
+        if not surfaces:
+            print("[!] No surface files. Run discovery first.")
+            sys.exit(1)
+        surface_path = surfaces[-1]
+        print(f"[SKG-GRAVITY] Using: {surface_path}")
+
+    gravity_field_loop(surface_path, args.out_dir, max_cycles=args.cycles)
+
+
+if __name__ == "__main__":
+    main()
