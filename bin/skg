@@ -152,6 +152,40 @@ def cmd_field(a):
                   f"{h.get('classification','?')[:4].upper()}")
     print(f"{'='*64}\n")
 
+
+
+def cmd_catalog(a):
+    """Catalog subcommands: compile"""
+    subcmd = getattr(a, "catalog_cmd", None)
+    if subcmd == "compile":
+        import subprocess, sys
+        cmd = [
+            "/opt/skg/.venv/bin/python3", "-m", "skg.forge.compiler",
+            "--domain",      a.domain,
+            "--description", a.description,
+            "--min-cvss",    str(a.min_cvss),
+            "--max-wickets", str(a.max_wickets),
+        ]
+        if a.packages:  cmd += ["--packages", a.packages]
+        if a.keywords:  cmd += ["--keywords", a.keywords]
+        if a.prefix:    cmd += ["--prefix",   a.prefix]
+        if a.api_key:   cmd += ["--api-key",  a.api_key]
+        if a.out:
+            cmd += ["--out", a.out]
+        else:
+            # Default output path inside toolchain contracts
+            import re
+            slug = re.sub(r"[^a-z0-9_]", "_", a.domain.lower())
+            out  = f"/opt/skg/skg-{slug}-toolchain/contracts/catalogs/attack_preconditions_catalog.{slug}.v1.json"
+            import pathlib
+            pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+            cmd += ["--out", out]
+            print(f"Output: {out}")
+        sys.exit(subprocess.call(cmd))
+    else:
+        print("usage: skg catalog compile --domain DOMAIN --description DESC [options]")
+        sys.exit(1)
+
 def cmd_status(a):
     d = _api("GET", "/status")
     print(f"  Status  : {d['status']}")
@@ -415,6 +449,18 @@ def main():
     rps.add_parser("drafts")
 
     # aprs
+    catp = sub.add_parser("catalog", help="catalog management")
+    cats = catp.add_subparsers(dest="catalog_cmd", required=True)
+    catc = cats.add_parser("compile", help="compile catalog from CVE/NVD data")
+    catc.add_argument("--domain",      required=True)
+    catc.add_argument("--description", required=True)
+    catc.add_argument("--packages",    default="")
+    catc.add_argument("--keywords",    default="")
+    catc.add_argument("--prefix",      default=None)
+    catc.add_argument("--api-key",     default=None)
+    catc.add_argument("--min-cvss",    type=float, default=6.0)
+    catc.add_argument("--max-wickets", type=int,   default=20)
+    catc.add_argument("--out",         default=None)
     fp  = sub.add_parser("field", help="projection engine field state (not a findings list)")
     fp.add_argument("workload_id", help="workload ID (e.g. archbox_self)")
     fp.add_argument("domain", nargs="?", default="host",
@@ -504,6 +550,7 @@ def main():
         "aprs":      cmd_aprs,
         "escape":    cmd_escape,
         "lateral":   cmd_lateral,
+        "catalog":   cmd_catalog,
         "field":     cmd_field,
     }
     dispatch.get(a.command, lambda _: p.print_help())(a)
