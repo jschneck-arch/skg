@@ -44,8 +44,8 @@ SKG_HOME = Path("/opt/skg")
 
 def _api(method, path, data=None, params=None):
     if params:
-        import urllib.parse
-        url = f"{API}{path}?" + urllib.parse.urlencode({k:v for k,v in params.items() if v is not None})
+        import urllib.parse as _uparse
+        url = f"{API}{path}?" + _uparse.urlencode({k:v for k,v in params.items() if v is not None})
     else:
         url  = f"{API}{path}"
     body = json.dumps(data).encode() if data else None
@@ -178,6 +178,7 @@ def cmd_status(a):
           f"coherence={i['coherence']} | sessions={i['sessions']}")
     fs = d.get("field_state", {})
     if fs:
+        import math as _math
         E_max = _math.log2(3)
         print(f"  Field state ({len(fs)} paths):")
         for k, v in sorted(fs.items()):
