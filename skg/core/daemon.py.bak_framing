@@ -514,24 +514,21 @@ def ingest(req: IngestRequest):
 @app.get("/projections/{workload_id}/field")
 def get_projection_field(workload_id: str, domain: str = "host"):
     """
-    Field state view — E, state history, resolution requirements.
-    This is the primary endpoint for the projection engine.
-    Use /projections/{workload_id} for the raw interp data.
+    Field state view of a projection — E, state history, resolution requirements.
+    This is the primary endpoint. Use /projections/{workload_id} for raw interp data.
     """
-    import math, json
+    import math
     from pathlib import Path as _P
-    from fastapi import HTTPException as _H
 
     interp_dir = _P("/var/lib/skg/interp")
-    files = sorted(
-        interp_dir.glob(f"{domain}_{workload_id}_*.json"),
-        key=lambda f: f.stat().st_mtime
-    )
+    prefix = f"{domain}_{workload_id}_"
+    files = sorted(interp_dir.glob(f"{prefix}*.json"), key=lambda f: f.stat().st_mtime)
     if not files:
+        from fastapi import HTTPException as _H
         raise _H(404, f"No projection data for {domain}/{workload_id}")
 
+    # Build state transition history from all interp files (append-only record)
     history = []
-    import math as _math
     for f in files:
         try:
             d = json.loads(f.read_text())
@@ -543,7 +540,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
             if 0 < p_u < 1:
                 for p in [p_d, p_u]:
                     if p > 0:
-                        E -= _math.log2(p) * p
+                        E -= p * math.log2(p)
             history.append({
                 "run_id":         d.get("run_id", ""),
                 "computed_at":    d.get("computed_at", ""),
@@ -556,6 +553,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
         except Exception:
             continue
 
+    # Latest state
     latest = json.loads(files[-1].read_text())
     required = latest.get("required_wickets", [])
     unknown  = latest.get("unknown", [])
@@ -566,30 +564,31 @@ def get_projection_field(workload_id: str, domain: str = "host"):
     if 0 < p_u < 1:
         for p in [p_d, p_u]:
             if p > 0:
-                E -= _math.log2(p) * p
+                E -= p * math.log2(p)
 
     return {
-        "substrate": "SKG projection engine — not a findings list",
+        "substrate": "SKG projection engine — this is not a findings list",
         "framing": (
-            "Tri-state: R=realized (telemetry confirms), B=blocked (constraint prevents), "
-            "U=unknown (unmeasured — E>0 while any remain). "
-            "E=H(projection|T): entropy of projection outcome given current telemetry. "
-            "E=0 means fully determined. E>0 identifies the observational deficit."
+            "Each node encodes a required precondition. "
+            "Tri-state: realized (telemetry confirms), blocked (constraint prevents), "
+            "unknown (not yet measured — requires specific telemetry to resolve). "
+            "E = field energy = Shannon entropy of projection outcome given current telemetry. "
+            "E = 0 means the projection is fully determined. E > 0 identifies the observational deficit."
         ),
-        "workload_id":              workload_id,
-        "attack_path_id":           latest.get("attack_path_id", ""),
-        "classification":           latest.get("classification", ""),
-        "E":                        round(E, 4),
-        "n_required":               n,
-        "n_realized":               len(latest.get("realized", [])),
-        "n_blocked":                len(latest.get("blocked", [])),
-        "n_unknown":                len(unknown),
-        "realized_nodes":           latest.get("realized", []),
-        "blocked_nodes":            latest.get("blocked", []),
-        "unknown_nodes":            unknown,
-        "resolution_required":      {w: _resolution_hint(w) for w in unknown},
+        "workload_id":      workload_id,
+        "attack_path_id":   latest.get("attack_path_id", ""),
+        "classification":   latest.get("classification", ""),
+        "E":                round(E, 4),
+        "n_required":       n,
+        "n_realized":       len(latest.get("realized", [])),
+        "n_blocked":        len(latest.get("blocked", [])),
+        "n_unknown":        len(unknown),
+        "realized_nodes":   latest.get("realized", []),
+        "blocked_nodes":    latest.get("blocked", []),
+        "unknown_nodes":    unknown,
+        "resolution_required": {w: _resolution_hint(w) for w in unknown},
         "state_transition_history": history,
-        "computed_at":              latest.get("computed_at", ""),
+        "computed_at":      latest.get("computed_at", ""),
     }
 
 

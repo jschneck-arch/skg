@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/skg/.venv/bin/python3
 """
 skg — Unified CLI for Semantic Kernel Gravity
 
@@ -11,22 +11,8 @@ RESONANCE (runs directly, no daemon needed):
   skg resonance status
   skg resonance ingest
   skg resonance query <text> [--type all|wickets|adapters|domains] [--k N]
-  skg resonance draft-prompt <domain> <description>
-  skg resonance draft-accept <domain> <response.json|->
+  skg resonance draft <domain> <description> [--api-key KEY]
   skg resonance drafts
-
-HOST COLLECTION (active target assessment):
-  skg host ingest ssh --host <ip> --user <user> [--key <path>|--password <pw>] --out <file>
-  skg host ingest winrm --host <ip> --user <user> --password <pw> --out <file>
-  skg host ingest nmap [--xml <file>|--target <cidr>] --out <file>
-  skg host ingest msf_session [--rpc-host <ip>|--json-dump <file>] --out <file>
-  skg host project --in <events> --out <interp> --attack-path-id <id>
-  skg host latest --interp <file> --attack-path-id <id>
-  skg host paths
-
-COLLECT (daemon-driven sweep):
-  skg collect                          # sweep all targets.yaml
-  skg collect --target <ip> [options]  # single host
 
 APRS:
   skg aprs ingest config_effective --root <path> --out <file> [options]
@@ -53,11 +39,15 @@ import json, sys, argparse, subprocess, urllib.request, urllib.error
 from pathlib import Path
 
 API      = "http://127.0.0.1:5055"
-SKG_HOME = Path(__file__).resolve().parent.parent
+SKG_HOME = Path("/opt/skg")
 
 
-def _api(method, path, data=None):
-    url  = f"{API}{path}"
+def _api(method, path, data=None, params=None):
+    if params:
+        import urllib.parse
+        url = f"{API}{path}?" + urllib.parse.urlencode({k:v for k,v in params.items() if v is not None})
+    else:
+        url  = f"{API}{path}"
     body = json.dumps(data).encode() if data else None
     hdrs = {"Content-Type": "application/json"} if body else {}
     req  = urllib.request.Request(url, data=body, headers=hdrs, method=method)
@@ -85,7 +75,6 @@ def _tc(tc_name, cli_script, *args):
 def _aprs(*args):    return _tc("skg-aprs-toolchain",             "skg.py",         *args)
 def _escape(*args):  return _tc("skg-container-escape-toolchain", "skg_escape.py",  *args)
 def _lateral(*args): return _tc("skg-ad-lateral-toolchain",       "skg_lateral.py", *args)
-def _host(*args):    return _tc("skg-host-toolchain",             "skg_host.py",    *args)
 
 
 def _resonance_engine():
@@ -100,6 +89,68 @@ def _resonance_engine():
 # ---------------------------------------------------------------------------
 # Daemon commands
 # ---------------------------------------------------------------------------
+
+
+
+def cmd_field(a):
+    """Display projection engine field state for a workload — not a findings list."""
+    import math as _math
+    wid    = a.workload_id
+    domain = getattr(a, "domain", "host") or "host"
+    try:
+        d = _api("GET", f"/projections/{wid}/field", params={"domain": domain})
+    except Exception as exc:
+        print(f"  Error: {exc}")
+        print(f"  Tip: try 'skg status' to confirm daemon is running")
+        sys.exit(1)
+
+    E     = d.get("E", 0.0)
+    E_max = _math.log2(3)
+    fill  = int((1.0 - min(E, E_max) / E_max) * 30)
+    bar   = "#" * fill + "-" * (30 - fill)
+
+    cls_map = {
+        "realized":      "EMERGENT      — all preconditions satisfied",
+        "collapsed":     "COLLAPSED     — structural constraint prevents realization",
+        "indeterminate": "INDETERMINATE — unknown nodes prevent determination",
+    }
+    cls       = d.get("classification", "?")
+    cls_label = cls_map.get(cls.lower(), cls.upper())
+
+    print(f"\n{'='*64}")
+    print(f"  SKG Projection Engine  —  not a findings list")
+    print(f"{'-'*64}")
+    print(f"  Path     : {d.get('attack_path_id','?')}")
+    print(f"  Workload : {wid}  |  Domain: {domain}")
+    print(f"  Outcome  : {cls_label}")
+    print(f"{'-'*64}")
+    print(f"  E = {E:.4f}  (field energy; 0.000 = fully determined)")
+    print(f"  [{bar}]  {d.get('n_realized',0)}R {d.get('n_blocked',0)}B {d.get('n_unknown',0)}U / {d.get('n_required',0)} required")
+    print(f"{'-'*64}")
+
+    for w in d.get("realized_nodes", []):
+        print(f"    [R]  {w}")
+    for w in d.get("blocked_nodes", []):
+        print(f"    [B]  {w}")
+
+    hints = d.get("resolution_required", {})
+    for w in d.get("unknown_nodes", []):
+        print(f"    [U]  {w}")
+        print(f"         -> {hints.get(w, 'sensor sweep required')}")
+
+    history = d.get("state_transition_history", [])
+    if len(history) > 1:
+        print(f"{'-'*64}")
+        print(f"  History ({len(history)} sweeps, last 5):")
+        for h in history[-5:]:
+            ts   = h.get("computed_at", "")[:19].replace("T", " ")
+            e_h  = h.get("E", 0.0)
+            fill2 = int((1.0 - min(e_h, E_max) / E_max) * 15)
+            e_bar = "#" * fill2 + "-" * (15 - fill2)
+            print(f"    {ts}  E={e_h:.3f} [{e_bar}]  "
+                  f"{h.get('n_realized',0)}R {h.get('n_blocked',0)}B {h.get('n_unknown',0)}U  "
+                  f"{h.get('classification','?')[:4].upper()}")
+    print(f"{'='*64}\n")
 
 def cmd_status(a):
     d = _api("GET", "/status")
@@ -125,12 +176,27 @@ def cmd_status(a):
     i = d['identity']
     print(f"  Identity: {i['name']} v{i['version']} | "
           f"coherence={i['coherence']} | sessions={i['sessions']}")
-
+    fs = d.get("field_state", {})
+    if fs:
+        E_max = _math.log2(3)
+        print(f"  Field state ({len(fs)} paths):")
+        for k, v in sorted(fs.items()):
+            E = v.get("E", 0.0)
+            fill = int((1.0 - min(E, E_max) / E_max) * 20)
+            bar = "#" * fill + "-" * (20 - fill)
+            cls = v.get("classification", "?")[:4].upper()
+            nu  = v.get("n_unknown", 0)
+            nr  = v.get("n_realized", 0)
+            nb  = v.get("n_blocked", 0)
+            print(f"    [{bar}] E={E:.3f} {cls}  {nr}R {nb}B {nu}U  {k}")
+            for w in v.get("unknown_nodes", []):
+                hint = v.get("resolution_required", {}).get(w, "")
+                print(f"      [U] {w} -> {hint}")
 
 def cmd_mode(a):
     if a.set_mode:
         t = _api("POST", "/mode", {"mode": a.set_mode, "reason": a.reason or ""})["transition"]
-        print(f"  Mode: {t['from']} → {t['to']}" +
+        print(f"  Mode: {t['from']} -> {t['to']}" +
               (f"\n  Reason: {t['reason']}" if t.get("reason") else ""))
     else:
         d = _api("GET", "/mode")
@@ -189,53 +255,27 @@ def cmd_resonance(a):
             for rec, score in results:
                 print(f"  [{score:.3f}] {rec.domain} — {rec.description[:80]}")
 
-    elif subcmd == "draft-prompt":
-        from skg.resonance.drafter import draft_prompt
+    elif subcmd == "draft":
+        from skg.resonance.drafter import draft_catalog
         engine = _resonance_engine()
-        print(f"[*] Building grounded prompt for: {a.domain}")
-        result = draft_prompt(engine, a.domain, a.description)
-        ctx = result["context_used"]
-        print(f"[*] Memory context: {ctx['wickets_surfaced']} wickets, "
-              f"{ctx['adapters_surfaced']} adapters, "
-              f"{ctx['domains_surfaced']} domains surfaced")
-        print(f"\n[*] Prompt written to:")
-        print(f"    {result['prompt_path']}")
-        print(f"\n[*] Pending draft marker:")
-        print(f"    {result['pending_path']}")
-        print(f"\n{'='*60}")
-        print("PASTE THE FOLLOWING INTO CLAUDE.AI:")
-        print('='*60)
-        print(result["prompt"])
-        print('='*60)
-        print(f"\nThen run:")
-        print(f"  skg resonance draft-accept {a.domain} <path-to-response.json>")
-        print(f"  # or pipe the JSON directly:")
-        print(f"  skg resonance draft-accept {a.domain} -")
-
-    elif subcmd == "draft-accept":
-        from skg.resonance.drafter import draft_accept
-        import sys as _sys
-        engine = _resonance_engine()
-        # Read from file path or stdin (-)
-        source = a.response
-        if source == "-":
-            print("[*] Reading JSON from stdin (paste response, then Ctrl+D)...")
-            response_json = _sys.stdin.read()
-        else:
-            response_json = source  # draft_accept handles file path or raw JSON
-        result = draft_accept(engine, a.domain, response_json)
+        print(f"[*] Drafting catalog for: {a.domain}")
+        print(f"[*] Description: {a.description}")
+        result = draft_catalog(engine, a.domain, a.description,
+                               api_key=getattr(a, "api_key", None))
         errors = result["validation_errors"]
         if errors:
             print(f"\n[WARN] Validation issues ({len(errors)}):")
             for e in errors:
                 print(f"  - {e}")
         else:
-            print("[OK] Draft passed validation")
-        print(f"[*] Wickets:      {len(result['catalog'].get('wickets', {}))}")
-        print(f"[*] Attack paths: {len(result['catalog'].get('attack_paths', {}))}")
-        print(f"[*] Draft saved:  {result['draft_path']}")
-        print(f"\nTo promote to a toolchain:")
-        print(f"  cp {result['draft_path']} /opt/skg/skg-{a.domain}-toolchain/contracts/catalogs/")
+            print("\n[OK] Draft passed validation")
+        ctx = result["context_used"]
+        print(f"\n[*] Context: {ctx['wickets_surfaced']} wickets, "
+              f"{ctx['adapters_surfaced']} adapters, "
+              f"{ctx['domains_surfaced']} domains surfaced")
+        print(f"[*] Wickets proposed:      {len(result['catalog'].get('wickets', {}))}")
+        print(f"[*] Attack paths proposed: {len(result['catalog'].get('attack_paths', {}))}")
+        print(f"\n[*] Draft saved: {result['draft_path']}")
 
     elif subcmd == "drafts":
         engine = _resonance_engine()
@@ -251,500 +291,10 @@ def cmd_resonance(a):
             print(f"    drafted: {meta.get('drafted_at', '?')}")
             print(f"    status:  {meta.get('status', '?')}")
 
-    elif subcmd == "draft-generate":
-        # Fully local: resonance context → ollama → catalog draft
-        from skg.resonance.drafter import draft_catalog
-        engine = _resonance_engine()
-        print(f"[*] Generating catalog for: {a.domain}")
-        print(f"[*] Using local ollama backend")
-        result = draft_catalog(engine, a.domain, a.description)
-        backend = result.get("backend", "api")
-        model   = result.get("model", "")
-        ctx     = result.get("context_used", {})
-        errors  = result.get("validation_errors", [])
-        print(f"[*] Backend:      {backend}" + (f" ({model})" if model else ""))
-        print(f"[*] Context:      {ctx.get('wickets_surfaced',0)} wickets, "
-              f"{ctx.get('adapters_surfaced',0)} adapters, "
-              f"{ctx.get('domains_surfaced',0)} domains")
-        if errors:
-            print(f"[WARN] Validation issues:")
-            for e in errors:
-                print(f"  - {e}")
-        else:
-            print("[OK] Draft passed validation")
-        print(f"[*] Wickets:      {len(result['catalog'].get('wickets', {}))}")
-        print(f"[*] Attack paths: {len(result['catalog'].get('attack_paths', {}))}")
-        print(f"[*] Draft saved:  {result['draft_path']}")
-        print(f"\nReview with:  cat {result['draft_path']}")
-        print(f"Promote with: cp {result['draft_path']} /opt/skg/skg-{a.domain}-toolchain/contracts/catalogs/")
-
-    elif subcmd == "ollama":
-        from skg.resonance.ollama_backend import OllamaBackend
-        backend = OllamaBackend()
-        status  = backend.status()
-        print(f"Ollama available: {status['available']}")
-        print(f"URL:              {status['url']}")
-        if status['available']:
-            print(f"Models:           {', '.join(status['models']) or 'none'}")
-            print(f"Selected:         {status['selected_model'] or 'none'}")
-            print(f"Temperature:      {status['temperature']}")
-        else:
-            print()
-            print("To enable local catalog generation:")
-            print("  ollama serve")
-            print("  ollama pull llama3.2:3b   # ~2GB, fast, good for structured output")
-            print("  ollama pull mistral:7b    # ~4GB, better reasoning")
-
-
-# ---------------------------------------------------------------------------
-# Train — corpus management and fine-tune scheduling
-# ---------------------------------------------------------------------------
-
-def cmd_train(a):
-    """Training corpus and fine-tune pipeline."""
-    subcmd = a.train_cmd
-
-    if subcmd == "status":
-        from skg.training.trainer import training_status
-        from skg.training.scheduler import scheduler_status
-        ts = training_status()
-        ss = scheduler_status()
-        hw = ts["hardware"]
-
-        print("\n=== SKG Training System ===\n")
-        print(f"Hardware:")
-        print(f"  GPU:       {hw.get('gpu') or 'none (CPU only)'}")
-        if hw.get('gpu'):
-            print(f"  GPU mem:   {hw.get('gpu_mem_gb')}GB")
-        print(f"  Backend:   {hw.get('backend')}")
-        print(f"  CPU cores: {hw.get('cpu_cores')}")
-        print(f"  Unsloth:   {'installed' if ts['has_unsloth'] else 'not installed'}")
-        print()
-
-        corpus = ts["corpus"]
-        print(f"Corpus:")
-        print(f"  Total examples:    {corpus['total']}")
-        print(f"  Positive:          {corpus['positive']}")
-        print(f"  Negative:          {corpus['negative']}")
-        print(f"  New since run:     {corpus['examples_since_last_run']}")
-        print(f"  Min for run:       {corpus['min_required']}")
-        print(f"  Ready:             {'YES' if corpus['ready_for_run'] else 'no'}")
-        if corpus.get("by_kind"):
-            print(f"  By kind:           {corpus['by_kind']}")
-        if corpus.get("by_source"):
-            print(f"  By source:         {corpus['by_source']}")
-        print()
-
-        print(f"Scheduler:")
-        print(f"  Last run:          {ss['last_triggered_at'] or 'never'}")
-        print(f"  Hours since:       {ss['hours_since_last']}")
-        print(f"  On battery:        {ss['on_battery']}")
-        print(f"  System load:       {ss['system_load']}")
-        print(f"  Ready to run:      {'YES' if ss['ready'] else 'no'}")
-        if not ss['ready']:
-            print(f"  Reason:            {ss['next_condition']}")
-        print()
-
-        print(f"Model:")
-        print(f"  Active:            {ts['active_model']}")
-        if ts.get("last_run"):
-            lr = ts["last_run"]
-            print(f"  Last run:          {lr.get('run_id')}")
-            print(f"  Last eval score:   {lr.get('eval_score')}")
-            print(f"  Model swapped:     {lr.get('model_swapped')}")
-        print()
-
-        if not ts["has_unsloth"]:
-            print("  Install unsloth for fine-tuning:")
-            print("    pip install unsloth")
-            print("    # or for CPU-only:")
-            print("    pip install unsloth[cpu]")
-
-    elif subcmd == "run":
-        wait = getattr(a, "wait", False)
-        force = getattr(a, "force", False)
-        if wait:
-            from skg.training.scheduler import trigger_sync
-            print("[*] Running training synchronously (this may take hours)...")
-            result = trigger_sync(force=force)
-        else:
-            from skg.training.scheduler import trigger
-            result = trigger(force=force)
-        print(json.dumps(result, indent=2))
-
-    elif subcmd == "corpus":
-        from skg.training.corpus import load_all_examples, corpus_status
-        sub2 = getattr(a, "corpus_cmd", "status")
-
-        if sub2 == "list":
-            examples = load_all_examples(
-                label=getattr(a, "label", None),
-                kind=getattr(a, "kind", None),
-            )
-            for ex in examples[-20:]:
-                print(f"  [{ex['id'][:8]}] {ex['label']:8s} {ex['kind']:12s} "
-                      f"{ex['domain']:15s} {ex['source']:20s} {ex['ts'][:16]}")
-            print(f"\n  Total: {len(examples)}")
-
-        elif sub2 == "add":
-            # Manual positive example add
-            from skg.training.corpus import add_example
-            eid = add_example(
-                kind=a.kind, label="positive",
-                source="manual", domain=a.domain,
-                input_text=open(a.input_file).read(),
-                output_text=open(a.output_file).read(),
-                metadata={"note": "manually added"},
-            )
-            print(f"[OK] Added example: {eid[:8]}")
-
-        elif sub2 == "clear":
-            # Clear corpus (confirmation required)
-            resp = input("Clear entire training corpus? [y/N] ")
-            if resp.lower() == "y":
-                from skg.training.corpus import EXAMPLES_DIR
-                import shutil
-                if EXAMPLES_DIR.exists():
-                    shutil.rmtree(EXAMPLES_DIR)
-                    EXAMPLES_DIR.mkdir(parents=True)
-                print("[OK] Corpus cleared.")
-
-    elif subcmd == "install-unsloth":
-        import subprocess, sys
-        hw = __import__("skg.training.trainer", fromlist=["detect_hardware"]).detect_hardware()
-        if hw["backend"] == "nvidia":
-            pkg = "unsloth[colab-new]"
-        elif hw["backend"] == "amd":
-            pkg = "unsloth[cpu]"
-        else:
-            pkg = "unsloth[cpu]"
-        venv_pip = Path("/opt/skg/.venv/bin/pip")
-        pip = str(venv_pip) if venv_pip.exists() else "pip"
-        print(f"[*] Installing {pkg}...")
-        subprocess.run([pip, "install", pkg, "--no-cache-dir"])
-
-    elif subcmd == "rollback":
-        # TODO: restore previous model tag in ollama backend config
-        print("[!] Rollback: set previous model tag in ollama backend config")
-        print("    skg resonance ollama  — see current model")
-
-
-# ---------------------------------------------------------------------------
-# Surface — operator picture
-# ---------------------------------------------------------------------------
-
-def cmd_surface(a):
-    """Full engagement surface: projection results + delta + gaps + proposals."""
-    import os
-    from skg.intel.surface import full_report, surface, delta_report, next_actions
-    from skg.intel.gap_detector import detect_from_events
-    from skg.forge.proposals import list_proposals, format_proposal_list
-    from skg.core.paths import INTERP_DIR, EVENTS_DIR
-
-    subcmd = getattr(a, "surface_cmd", "report")
-
-    if subcmd == "report" or subcmd is None:
-        gaps   = detect_from_events(EVENTS_DIR)
-        report = full_report(interp_dir=INTERP_DIR, gaps=gaps)
-        surf   = report["surface"]
-        delta  = report["delta"]
-        acts   = report["next_actions"]
-        props  = list_proposals("pending")
-
-        print(f"\n{'='*60}")
-        print(f"  SKG ENGAGEMENT SURFACE")
-        print(f"  {report['generated_at'][:19]}")
-        print(f"{'='*60}\n")
-
-        # Summary
-        s = surf["summary"]
-        print(f"WORKLOADS:  {s['total_workloads']} evaluated  |  "
-              f"realized={s['realized_paths']}  "
-              f"indeterminate={s['indeterminate_paths']}  "
-              f"not_realized={s['not_realized_paths']}")
-
-        # Delta
-        dc = delta.get("counts", {})
-        print(f"DELTA 24h:  +{dc.get('expansions',0)} expansions  "
-              f"-{dc.get('remediations',0)} remediations  "
-              f"~{dc.get('regressions',0)} regressions")
-
-        # Coverage gaps
-        all_gaps = report.get("coverage_gaps", [])
-        print(f"GAPS:       {len(all_gaps)} uncovered service(s)")
-        print(f"PROPOSALS:  {len(props)} pending")
-        print()
-
-        # Realized paths
-        if s["top_realized"]:
-            print("REALIZED ATTACK PATHS:")
-            for r in s["top_realized"]:
-                print(f"  ● {r['workload_id']:30s} {r['domain']:25s} "
-                      f"score={r['score']:.2f}")
-            print()
-
-        # Next actions
-        if acts:
-            print("NEXT ACTIONS (ranked):")
-            for i, act in enumerate(acts[:8], 1):
-                priority_label = {1:"EXPLOIT",2:"COLLECT",3:"FORGE",4:"INVESTIGATE"}.get(
-                    act["priority"], "ACTION")
-                if act["action"] == "exploit":
-                    print(f"  {i}. [{priority_label}] {act['workload_id']} — "
-                          f"{act['domain']} ({act['attack_path']})")
-                elif act["action"] == "collect":
-                    print(f"  {i}. [{priority_label}] {act['workload_id']} — "
-                          f"{len(act.get('unknown_wickets',[]))} unknown wickets")
-                elif act["action"] == "generate_toolchain":
-                    print(f"  {i}. [{priority_label}] {act['service']} on "
-                          f"{len(act.get('hosts',[]))} host(s) — {act['detail'][:50]}")
-                    print(f"          → {act.get('forge_cmd','')}")
-                elif act["action"] == "investigate_control":
-                    print(f"  {i}. [{priority_label}] {act['workload_id']} — "
-                          f"single block: {act.get('blocked_wicket','')}")
-            print()
-
-        # Pending proposals
-        if props:
-            print("PENDING TOOLCHAIN PROPOSALS:")
-            for p in props[:5]:
-                val_icon = "✓" if p.get("validation",{}).get("passed") else "⚠"
-                print(f"  {val_icon} [{p['id'][:8]}] {p['domain']:20s} "
-                      f"{p.get('wicket_count',0)}w  "
-                      f"{len(p.get('hosts',[]))} host(s)  "
-                      f"{p.get('attack_surface','')[:45]}")
-            print()
-            print("  skg proposals list    — full proposal list")
-            print("  skg proposals accept <id>  — install toolchain")
-
-        # Workload detail if --verbose
-        if getattr(a, "verbose", False):
-            print("\nALL WORKLOADS:")
-            for w in surf["workloads"]:
-                sym = {"realized":"●","indeterminate":"◐","not_realized":"○"}.get(
-                    w["classification"], "?")
-                print(f"  {sym} {w['workload_id']:35s} {w['domain_label']:20s} "
-                      f"score={w['score']:.2f}  realized={len(w['realized'])}  "
-                      f"blocked={len(w['blocked'])}  unknown={len(w['unknown'])}")
-
-        # Surface expansions
-        if delta.get("surface_expansions"):
-            print("\nSURFACE EXPANSIONS (24h):")
-            for t in delta["surface_expansions"][:5]:
-                print(f"  + {t['workload_id']:30s} {t['wicket_id']}  "
-                      f"{t['ts'][:16]}")
-
-    elif subcmd == "json":
-        gaps   = detect_from_events(EVENTS_DIR)
-        report = full_report(interp_dir=INTERP_DIR, gaps=gaps)
-        print(json.dumps(report, indent=2))
-
-    elif subcmd == "gaps":
-        from skg.core.paths import EVENTS_DIR
-        gaps = detect_from_events(EVENTS_DIR)
-        if not gaps:
-            print("No coverage gaps detected.")
-            return
-        print(f"{len(gaps)} coverage gap(s):\n")
-        for g in gaps:
-            print(f"  {g['service']:20s} [{g['category']}]  "
-                  f"hosts: {', '.join(g['hosts'][:3])}")
-            print(f"    {g['attack_surface'][:72]}")
-            print(f"    forge: skg forge generate {g['service']}")
-            print()
-
-    elif subcmd == "workloads":
-        surf = surface(INTERP_DIR)
-        for w in surf["workloads"]:
-            sym = {"realized":"●","indeterminate":"◐","not_realized":"○"}.get(
-                w["classification"], "?")
-            print(f"{sym} {w['workload_id']}  [{w['domain_label']}]  "
-                  f"score={w['score']}  {w['classification']}")
-            if getattr(a, "verbose", False):
-                if w["realized"]:
-                    print(f"  realized: {', '.join(w['realized'])}")
-                if w["blocked"]:
-                    print(f"  blocked:  {', '.join(w['blocked'])}")
-                if w["unknown"]:
-                    print(f"  unknown:  {', '.join(w['unknown'])}")
-
-
-# ---------------------------------------------------------------------------
-# Proposals
-# ---------------------------------------------------------------------------
-
-def cmd_proposals(a):
-    """Toolchain proposal queue — review and accept/reject generated toolchains."""
-    from skg.forge.proposals import (
-        list_proposals, get, accept, reject, defer,
-        format_proposal_list, format_proposal_detail,
-    )
-
-    subcmd = a.proposals_cmd
-
-    if subcmd == "list":
-        status = getattr(a, "status", "pending") or "pending"
-        props  = list_proposals(status)
-        print(format_proposal_list(props, verbose=getattr(a, "verbose", False)))
-
-    elif subcmd == "show":
-        proposal = get(a.id)
-        if not proposal:
-            print(f"Proposal not found: {a.id}")
-            return
-        print(format_proposal_detail(proposal))
-
-    elif subcmd == "accept":
-        try:
-            result = accept(a.id)
-            print(f"[OK] Installed: {result['domain']}")
-            print(f"     Path:      {result['installed_path']}")
-            print(f"     Wickets:   {result['wicket_count']}")
-            print(f"     Paths:     {result['path_count']}")
-            print(f"\n     {result['next']}")
-        except Exception as exc:
-            print(f"[ERR] {exc}")
-
-    elif subcmd == "reject":
-        reason = getattr(a, "reason", "") or ""
-        try:
-            result = reject(a.id, reason=reason)
-            print(f"[OK] Rejected: {result['domain']}")
-            print(f"     Cooldown until: {result['cooldown_until']}")
-        except Exception as exc:
-            print(f"[ERR] {exc}")
-
-    elif subcmd == "defer":
-        days = getattr(a, "days", 7) or 7
-        try:
-            result = defer(a.id, days=days)
-            print(f"[OK] Deferred: {result['domain']} until {result['until']}")
-        except Exception as exc:
-            print(f"[ERR] {exc}")
-
-
-# ---------------------------------------------------------------------------
-# Forge — manual toolchain generation
-# ---------------------------------------------------------------------------
-
-def cmd_forge(a):
-    """Toolchain forge — manually trigger generation for a service/domain."""
-    subcmd = a.forge_cmd
-
-    if subcmd == "generate":
-        from skg.forge.generator import generate_toolchain
-        from skg.forge.validator import validate, validation_summary
-        from skg.forge.proposals import create
-        from skg.intel.gap_detector import KNOWN_SERVICES, _collection_hints
-
-        domain = a.domain.lower().replace(" ", "_").replace("-", "_")
-        description = getattr(a, "description", None) or             next((v[1] for k,v in KNOWN_SERVICES.items() if v[0] == domain), domain)
-
-        # Build a synthetic gap record
-        gap = {
-            "service":          domain,
-            "category":         "manual",
-            "hosts":            getattr(a, "hosts", "").split(",") if getattr(a, "hosts", "") else [],
-            "attack_surface":   description,
-            "evidence":         "manual generation request",
-            "detail":           f"Operator-requested toolchain for {domain}",
-            "collection_hints": _collection_hints(domain),
-            "forge_ready":      True,
-        }
-
-        print(f"[*] Generating toolchain: {domain}")
-        print(f"[*] Description: {description[:72]}")
-
-        try:
-            engine = _resonance_engine()
-        except Exception:
-            engine = None
-            print("[!] Resonance engine unavailable — generating without context grounding")
-
-        result = generate_toolchain(domain, description, gap,
-                                     resonance_engine=engine,
-                                     force=getattr(a, "force", False))
-
-        if not result.get("success"):
-            print(f"[ERR] Generation failed:")
-            for e in result.get("errors", []):
-                print(f"      {e}")
-            return
-
-        print(f"[OK] Generated: {result['tc_name']}")
-        print(f"     Wickets:   {result.get('wicket_count', 0)}")
-        print(f"     Paths:     {result.get('path_count', 0)}")
-        print(f"     Backend:   {result.get('generation_backend','')}")
-        print(f"     Staged:    {result['staging_path']}")
-
-        if result.get("errors"):
-            print(f"[!] Warnings:")
-            for e in result["errors"]:
-                print(f"    {e}")
-
-        # Validate
-        print(f"\n[*] Validating...")
-        val = validate(Path(result["staging_path"]))
-        print(validation_summary(val))
-
-        # Create proposal
-        if not getattr(a, "no_propose", False):
-            from skg.forge.proposals import create as create_proposal
-            proposal = create_proposal(
-                domain=domain, description=description, gap=gap,
-                generation_result=result, validation_result=val,
-            )
-            print(f"\n[*] Proposal created: {proposal['id'][:8]}")
-            print(f"    skg proposals accept {proposal['id'][:8]}")
-            print(f"    skg proposals show   {proposal['id'][:8]}")
-
-    elif subcmd == "list-staged":
-        from skg.forge.generator import FORGE_STAGING
-        if not FORGE_STAGING.exists():
-            print("No staged toolchains.")
-            return
-        for d in sorted(FORGE_STAGING.iterdir()):
-            if d.is_dir():
-                meta_f = d / "forge_meta.json"
-                if meta_f.exists():
-                    try:
-                        meta = json.loads(meta_f.read_text())
-                        print(f"  {d.name}")
-                        print(f"    generated: {meta.get('generated_at','')[:19]}")
-                        print(f"    backend:   {meta.get('generation_backend','')}")
-                    except Exception:
-                        print(f"  {d.name}")
-                else:
-                    print(f"  {d.name}")
-
-    elif subcmd == "pipeline":
-        # Manually run the full forge pipeline
-        from skg.forge.pipeline import run_forge_pipeline
-        from skg.core.paths import EVENTS_DIR
-        print("[*] Running forge pipeline...")
-        try:
-            engine = _resonance_engine()
-        except Exception:
-            engine = None
-        summary = run_forge_pipeline(events_dir=EVENTS_DIR, resonance_engine=engine)
-        print(f"[*] Gaps detected:  {summary['gaps_detected']}")
-        print(f"[*] Gaps skipped:   {summary['gaps_skipped']}")
-        print(f"[*] Generated:      {summary['generated']}")
-        print(f"[*] Validated:      {summary['validated']}")
-        print(f"[*] Proposed:       {summary['proposed']}")
-        if summary["proposal_ids"]:
-            print(f"[*] Proposal IDs:   {[p[:8] for p in summary['proposal_ids']]}")
-        if summary["errors"]:
-            print(f"[!] Errors:")
-            for e in summary["errors"]:
-                print(f"    {e}")
-
 
 # ---------------------------------------------------------------------------
 # APRS
 # ---------------------------------------------------------------------------
-
-
 
 def cmd_aprs(a):
     subcmd = a.aprs_cmd
@@ -828,75 +378,6 @@ def cmd_lateral(a):
 
 
 # ---------------------------------------------------------------------------
-# Host collection
-# ---------------------------------------------------------------------------
-
-def cmd_host(a):
-    subcmd = a.host_cmd
-    if subcmd == "paths":
-        sys.exit(_host("paths"))
-    elif subcmd == "latest":
-        args = ["latest", "--interp", a.interp, "--attack-path-id", a.attack_path_id]
-        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
-        sys.exit(_host(*args))
-    elif subcmd == "project":
-        args = ["project", "--in", a.infile, "--out", a.outfile,
-                "--attack-path-id", a.attack_path_id]
-        if getattr(a, "run_id",      None): args += ["--run-id",      a.run_id]
-        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
-        sys.exit(_host(*args))
-    elif subcmd == "ingest":
-        adapter = a.host_adapter
-        args = ["ingest", adapter, "--out", a.out, "--attack-path-id", a.attack_path_id]
-        if getattr(a, "run_id",      None): args += ["--run-id",      a.run_id]
-        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
-        if adapter == "ssh":
-            args += ["--host", a.host, "--user", a.user, "--port", str(a.port)]
-            if getattr(a, "key",      None): args += ["--key",      a.key]
-            if getattr(a, "password", None): args += ["--password", a.password]
-            if getattr(a, "timeout",  None): args += ["--timeout",  str(a.timeout)]
-        elif adapter == "winrm":
-            args += ["--host", a.host, "--user", a.user, "--password", a.password,
-                     "--port", str(a.port)]
-            if getattr(a, "ssl", False): args += ["--ssl"]
-        elif adapter == "nmap":
-            if getattr(a, "xml",    None): args += ["--xml",    a.xml]
-            if getattr(a, "target", None): args += ["--target", a.target]
-            if getattr(a, "ports",  None): args += ["--ports",  a.ports]
-            if getattr(a, "nmap_flags", None): args += ["--nmap-flags", a.nmap_flags]
-        elif adapter == "msf_session":
-            if getattr(a, "rpc_host",  None): args += ["--rpc-host",   a.rpc_host]
-            if getattr(a, "json_dump", None): args += ["--json-dump",  a.json_dump]
-            args += ["--rpc-port", str(a.rpc_port), "--rpc-password", a.rpc_password]
-            if getattr(a, "rpc_ssl", False): args += ["--rpc-ssl"]
-        sys.exit(_host(*args))
-
-
-def cmd_collect(a):
-    """POST /collect to the daemon — trigger a collection sweep."""
-    data = {}
-    if getattr(a, "target", None):
-        data["target"] = a.target
-        data["method"] = getattr(a, "method", "ssh")
-        if getattr(a, "user",           None): data["user"]           = a.user
-        if getattr(a, "password",       None): data["password"]       = a.password
-        if getattr(a, "key",            None): data["key"]            = a.key
-        if getattr(a, "port",           None): data["port"]           = a.port
-        if getattr(a, "workload_id",    None): data["workload_id"]    = a.workload_id
-        if getattr(a, "attack_path_id", None): data["attack_path_id"] = a.attack_path_id
-        if getattr(a, "auto_project",   False): data["auto_project"]  = True
-    r = _api("POST", "/collect", data if data else None)
-    print(f"  run_id : {r.get('run_id', '?')}")
-    print(f"  ok     : {r.get('ok', '?')}")
-    if r.get("target"):
-        print(f"  target : {r['target']}")
-    if r.get("events_file"):
-        print(f"  events : {r['events_file']}")
-    if r.get("interp_file"):
-        print(f"  interp : {r['interp_file']}")
-
-
-# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -926,89 +407,18 @@ def main():
     rq.add_argument("--type", default="all",
                     choices=["all","wickets","adapters","domains"])
     rq.add_argument("--k", type=int, default=5)
-    rdp = rps.add_parser("draft-prompt")
-    rdp.add_argument("domain")
-    rdp.add_argument("description")
-
-    rda = rps.add_parser("draft-accept")
-    rda.add_argument("domain")
-    rda.add_argument("response", help="Path to JSON file, raw JSON string, or - for stdin")
-
+    rd = rps.add_parser("draft")
+    rd.add_argument("domain")
+    rd.add_argument("description")
+    rd.add_argument("--api-key", dest="api_key", default=None)
     rps.add_parser("drafts")
 
-    rdg = rps.add_parser("draft-generate",
-                          help="Generate catalog via local ollama (no API key needed)")
-    rdg.add_argument("domain")
-    rdg.add_argument("description")
-
-    rps.add_parser("ollama", help="Check ollama backend status")
-
-    # train
-    trp = sub.add_parser("train", help="Training corpus and fine-tune pipeline")
-    trs = trp.add_subparsers(dest="train_cmd", required=True)
-    trs.add_parser("status", help="Training system status")
-    trr = trs.add_parser("run", help="Trigger fine-tune run")
-    trr.add_argument("--wait",  action="store_true", help="Block until complete")
-    trr.add_argument("--force", action="store_true", help="Ignore readiness checks")
-    trc = trs.add_parser("corpus", help="Corpus management")
-    trcs = trc.add_subparsers(dest="corpus_cmd")
-    trcl = trcs.add_parser("list", help="List examples")
-    trcl.add_argument("--label", choices=["positive","negative"], default=None)
-    trcl.add_argument("--kind",  choices=["catalog","adapter","wicket_map"], default=None)
-    trca = trcs.add_parser("add", help="Manually add a positive example")
-    trca.add_argument("kind",        choices=["catalog","adapter","wicket_map"])
-    trca.add_argument("domain")
-    trca.add_argument("input_file",  help="File containing prompt/input")
-    trca.add_argument("output_file", help="File containing expected output")
-    trcs.add_parser("clear", help="Clear all corpus examples")
-    trs.add_parser("install-unsloth", help="Install unsloth fine-tuning library")
-    trs.add_parser("rollback",        help="Rollback to previous model")
-
-    # surface
-    sfp = sub.add_parser("surface", help="Engagement surface summary")
-    sfs = sfp.add_subparsers(dest="surface_cmd")
-    sfr = sfs.add_parser("report", help="Full engagement report (default)")
-    sfr.add_argument("--verbose", "-v", action="store_true")
-    sfj = sfs.add_parser("json",    help="Full report as JSON")
-    sfg = sfs.add_parser("gaps",    help="Coverage gap list")
-    sfw = sfs.add_parser("workloads", help="Per-workload projection state")
-    sfw.add_argument("--verbose", "-v", action="store_true")
-    sfp.set_defaults(surface_cmd="report")
-
-    # proposals
-    prp = sub.add_parser("proposals", help="Toolchain proposal queue")
-    prs = prp.add_subparsers(dest="proposals_cmd", required=True)
-    prl = prs.add_parser("list",   help="List pending proposals")
-    prl.add_argument("--status",  default="pending",
-                     choices=["pending","accepted","rejected","all"])
-    prl.add_argument("--verbose", "-v", action="store_true")
-    prsh = prs.add_parser("show",   help="Show proposal detail")
-    prsh.add_argument("id")
-    prac = prs.add_parser("accept", help="Accept and install toolchain")
-    prac.add_argument("id")
-    prre = prs.add_parser("reject", help="Reject with cooldown")
-    prre.add_argument("id")
-    prre.add_argument("--reason", default="")
-    prde = prs.add_parser("defer",  help="Defer proposal")
-    prde.add_argument("id")
-    prde.add_argument("--days", type=int, default=7)
-
-    # forge
-    fgp = sub.add_parser("forge", help="Toolchain generation")
-    fgs = fgp.add_subparsers(dest="forge_cmd", required=True)
-    fgg = fgs.add_parser("generate", help="Generate toolchain for a domain")
-    fgg.add_argument("domain")
-    fgg.add_argument("--description", default=None)
-    fgg.add_argument("--hosts", default="",
-                     help="Comma-separated host list for context")
-    fgg.add_argument("--force", action="store_true",
-                     help="Regenerate even if staging dir exists")
-    fgg.add_argument("--no-propose", action="store_true",
-                     help="Generate without creating a proposal")
-    fgs.add_parser("list-staged", help="List staged (uninstalled) toolchains")
-    fgs.add_parser("pipeline",    help="Manually run gap detection + generation pipeline")
-
     # aprs
+    fp  = sub.add_parser("field", help="projection engine field state (not a findings list)")
+    fp.add_argument("workload_id", help="workload ID (e.g. archbox_self)")
+    fp.add_argument("domain", nargs="?", default="host",
+                    choices=["host", "container_escape", "ad_lateral", "aprs", "web", "supply_chain"],
+                    help="domain (default: host)")
     ap  = sub.add_parser("aprs")
     aps = ap.add_subparsers(dest="aprs_cmd", required=True)
     aps.add_parser("paths")
@@ -1084,198 +494,16 @@ def main():
     ll2.add_argument("--attack-path-id", required=True)
     ll2.add_argument("--workload-id",    default=None)
 
-    # host
-    hp  = sub.add_parser("host")
-    hps = hp.add_subparsers(dest="host_cmd", required=True)
-    hps.add_parser("paths")
-    hhi = hps.add_parser("ingest")
-    hhs = hhi.add_subparsers(dest="host_adapter", required=True)
-
-    # host ingest ssh
-    hs = hhs.add_parser("ssh")
-    hs.add_argument("--host",           required=True)
-    hs.add_argument("--user",           required=True)
-    hs.add_argument("--key",            default=None)
-    hs.add_argument("--password",       default=None)
-    hs.add_argument("--port",           type=int, default=22)
-    hs.add_argument("--timeout",        type=int, default=15)
-    hs.add_argument("--out",            required=True)
-    hs.add_argument("--attack-path-id", default="host_ssh_initial_access_v1")
-    hs.add_argument("--run-id",         default=None)
-    hs.add_argument("--workload-id",    default=None)
-
-    # host ingest winrm
-    hw = hhs.add_parser("winrm")
-    hw.add_argument("--host",           required=True)
-    hw.add_argument("--user",           required=True)
-    hw.add_argument("--password",       required=True)
-    hw.add_argument("--port",           type=int, default=5985)
-    hw.add_argument("--ssl",            action="store_true", default=False)
-    hw.add_argument("--out",            required=True)
-    hw.add_argument("--attack-path-id", default="host_winrm_initial_access_v1")
-    hw.add_argument("--run-id",         default=None)
-    hw.add_argument("--workload-id",    default=None)
-
-    # host ingest nmap
-    hn = hhs.add_parser("nmap")
-    hn_grp = hn.add_mutually_exclusive_group(required=True)
-    hn_grp.add_argument("--xml",    default=None)
-    hn_grp.add_argument("--target", default=None)
-    hn.add_argument("--ports",          default=None)
-    hn.add_argument("--nmap-flags",     dest="nmap_flags", default=None)
-    hn.add_argument("--out",            required=True)
-    hn.add_argument("--attack-path-id", default="host_network_exploit_v1")
-    hn.add_argument("--run-id",         default=None)
-    hn.add_argument("--workload-id",    default=None)
-
-    # host ingest msf_session
-    hm = hhs.add_parser("msf_session")
-    hm_grp = hm.add_mutually_exclusive_group(required=True)
-    hm_grp.add_argument("--rpc-host",   dest="rpc_host",  default=None)
-    hm_grp.add_argument("--json-dump",  dest="json_dump", default=None)
-    hm.add_argument("--rpc-port",       dest="rpc_port",  type=int, default=55553)
-    hm.add_argument("--rpc-password",   dest="rpc_password", default="msf")
-    hm.add_argument("--rpc-ssl",        dest="rpc_ssl",   action="store_true", default=False)
-    hm.add_argument("--out",            required=True)
-    hm.add_argument("--attack-path-id", default="host_msf_post_exploitation_v1")
-    hm.add_argument("--run-id",         default=None)
-    hm.add_argument("--workload-id",    default="msf_workspace")
-
-    # host project / latest
-    hpr = hps.add_parser("project")
-    hpr.add_argument("--in",  dest="infile",  required=True)
-    hpr.add_argument("--out", dest="outfile", required=True)
-    hpr.add_argument("--attack-path-id", default="host_ssh_initial_access_v1")
-    hpr.add_argument("--run-id",         default=None)
-    hpr.add_argument("--workload-id",    default=None)
-    hla = hps.add_parser("latest")
-    hla.add_argument("--interp",         required=True)
-    hla.add_argument("--attack-path-id", required=True)
-    hla.add_argument("--workload-id",    default=None)
-
-    # collect (daemon-driven)
-    cp = sub.add_parser("collect")
-    cp.add_argument("--target",           default=None)
-    cp.add_argument("--method",           default="ssh", choices=["ssh","winrm","nmap"])
-    cp.add_argument("--user",             default=None)
-    cp.add_argument("--password",         default=None)
-    cp.add_argument("--key",              default=None)
-    cp.add_argument("--port",             type=int, default=22)
-    cp.add_argument("--workload-id",      dest="workload_id",    default=None)
-    cp.add_argument("--attack-path-id",   dest="attack_path_id", default="host_ssh_initial_access_v1")
-    cp.add_argument("--auto-project",     dest="auto_project",   action="store_true", default=False)
-
-    # catalog subcommand
-    catp = sub.add_parser("catalog", help="YAML catalog authoring tools")
-    cat_subs = catp.add_subparsers(dest="catalog_cmd", required=True)
-    cc = cat_subs.add_parser("compile",  help="Compile YAML → JSON")
-    cc.add_argument("yaml_file")
-    cc.add_argument("--out", default=None, help="Output directory")
-    cv = cat_subs.add_parser("validate", help="Validate YAML catalog")
-    cv.add_argument("yaml_file")
-    cs = cat_subs.add_parser("scaffold", help="Generate YAML template")
-    cs.add_argument("domain")
-    cs.add_argument("--out", default=None)
-    cl = cat_subs.add_parser("lint",     help="Lint existing catalog JSON")
-    cl.add_argument("catalog_json")
-
-    # sensors status subcommand
-    sp = sub.add_parser("sensors", help="Sensor status and control")
-    sp.add_argument("sensor_cmd", nargs="?", choices=["status", "trigger"], default="status")
-
     a = p.parse_args()
-
-    def cmd_catalog(a):
-        sys.path.insert(0, str(SKG_HOME))
-        from skg.catalog.compiler import main as cat_main
-        argv = [a.catalog_cmd]
-        if a.catalog_cmd == "compile":
-            argv += [a.yaml_file]
-            if a.out: argv += ["--out", a.out]
-        elif a.catalog_cmd == "validate":
-            argv += [a.yaml_file]
-        elif a.catalog_cmd == "scaffold":
-            argv += [a.domain]
-            if a.out: argv += ["--out", a.out]
-        elif a.catalog_cmd == "lint":
-            argv += [a.catalog_json]
-        cat_main(argv)
-
-    def cmd_sensors(a):
-        cmd = getattr(a, "sensor_cmd", "status")
-        if cmd == "trigger":
-            d = _api("POST", "/sensors/trigger")
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-        else:
-            d = _api("GET", "/sensors")
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-
-    # feedback subcommand
-    fbp = sub.add_parser("feedback", help="Temporal delta, workload graph, observation memory")
-    fb_subs = fbp.add_subparsers(dest="feedback_cmd", required=True)
-    fb_subs.add_parser("status",  help="Show delta/graph/obs memory status")
-    fb_subs.add_parser("process", help="Process unprocessed projection results")
-    fb_surface = fb_subs.add_parser("surface", help="High-signal transitions across all workloads")
-    fb_surface.add_argument("--min-weight", type=float, default=0.8, dest="min_weight")
-    fb_timeline = fb_subs.add_parser("timeline", help="State history for a workload")
-    fb_timeline.add_argument("workload_id")
-    fb_timeline.add_argument("--path", default=None, dest="attack_path_id")
-    fb_graph = fb_subs.add_parser("graph", help="Manage workload relationships")
-    fb_graph_subs = fb_graph.add_subparsers(dest="graph_cmd", required=True)
-    fb_graph_subs.add_parser("status")
-    fb_ge = fb_graph_subs.add_parser("add-edge")
-    fb_ge.add_argument("source")
-    fb_ge.add_argument("target")
-    fb_ge.add_argument("relationship",
-        choices=["same_domain","same_subnet","trust_relationship","credential_overlap","network_adjacent"])
-    fb_graph_subs.add_parser("workloads")
-
-    def cmd_feedback(a):
-        cmd = a.feedback_cmd
-        if cmd == "status":
-            d = _api("GET", "/feedback/status")
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-        elif cmd == "process":
-            d = _api("POST", "/feedback/process")
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-        elif cmd == "surface":
-            d = _api("GET", f"/feedback/surface?min_weight={a.min_weight}")
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-        elif cmd == "timeline":
-            url = f"/feedback/timeline/{a.workload_id}"
-            if a.attack_path_id:
-                url += f"?attack_path_id={a.attack_path_id}"
-            d = _api("GET", url)
-            print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-        elif cmd == "graph":
-            gc = a.graph_cmd
-            if gc == "status":
-                d = _api("GET", "/graph/status")
-                print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-            elif gc == "add-edge":
-                d = _api("POST", f"/graph/edge?source={a.source}&target={a.target}&relationship={a.relationship}")
-                print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-            elif gc == "workloads":
-                d = _api("GET", "/delta/workloads")
-                print(json.dumps(d, indent=2) if d else "✗ daemon unreachable")
-
     dispatch = {
         "status":    cmd_status,
         "mode":      cmd_mode,
         "identity":  cmd_identity,
         "resonance": cmd_resonance,
-        "surface":   cmd_surface,
-        "proposals": cmd_proposals,
-        "forge":     cmd_forge,
         "aprs":      cmd_aprs,
         "escape":    cmd_escape,
         "lateral":   cmd_lateral,
-        "host":      cmd_host,
-        "collect":   cmd_collect,
-        "catalog":   cmd_catalog,
-        "sensors":   cmd_sensors,
-        "feedback":  cmd_feedback,
-        "train":     cmd_train,
+        "field":     cmd_field,
     }
     dispatch.get(a.command, lambda _: p.print_help())(a)
 
