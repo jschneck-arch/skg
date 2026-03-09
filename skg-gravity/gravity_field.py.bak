@@ -56,7 +56,6 @@ CVE_DIR = Path("/var/lib/skg/cve")
 if WEB_ADAPTER.exists():
     sys.path.insert(0, str(WEB_ADAPTER))
 
-from gravity_web import build_gravity_web, compute_neighbor_priors, display_web, display_priors
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -224,7 +223,7 @@ def _load_events_file(path: str, states: dict, filter_ip: str = None):
         pass
 
 
-def field_entropy(states: dict, applicable_wickets: set, neighbor_priors=None) -> float:
+def field_entropy(states: dict, applicable_wickets: set) -> float:
     """
     Compute field energy E = H(π | T) for a target.
     Shannon entropy over the tri-state distribution of applicable wickets.
@@ -260,8 +259,7 @@ def field_entropy(states: dict, applicable_wickets: set, neighbor_priors=None) -
 
     # Field energy = unknowns as proportion of total, scaled by surface size
     # E ranges from 0 (fully determined) to n (fully unknown)
-    prior_boost = sum(neighbor_priors.get(w, 0) for w in applicable_wickets if (states.get(w, {}).get("status", "unknown") if isinstance(states.get(w, {}), dict) else states.get(w, "unknown")) == "unknown") if neighbor_priors else 0.0
-    return float(unknown_count) + prior_boost
+    return float(unknown_count)
 
 
 def entropy_reduction_potential(instrument: Instrument, states: dict,
@@ -609,9 +607,6 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid.uuid4())
-    targets_list = surface.get("targets", [])
-    gravity_bonds = build_gravity_web(targets_list)
-    all_target_states = {t["ip"]: load_wicket_states(t["ip"]) for t in targets_list}
 
     domain_wickets = load_all_wicket_ids()
     all_wickets = set()
@@ -636,8 +631,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         for domain in target.get("domains", []):
             applicable.update(domain_wickets.get(domain, set()))
 
-        priors = compute_neighbor_priors(ip, gravity_bonds, all_target_states)
-        E = field_entropy(states, applicable, neighbor_priors=priors)
+        E = field_entropy(states, applicable)
 
         unknowns = sum(1 for w in applicable
                        if states.get(w, {}).get("status", "unknown") == "unknown")
@@ -671,8 +665,6 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
               f"{t['realized']:8d} {t['blocked']:8d} {t['total_wickets']:6d}")
 
     # ── Available instruments ──
-    display_web(gravity_bonds)
-    display_priors(landscape, gravity_bonds, all_target_states)
     print(f"\n  [INSTRUMENTS]")
     for name, inst in instruments.items():
         status = "ready" if inst.available else "unavailable"
