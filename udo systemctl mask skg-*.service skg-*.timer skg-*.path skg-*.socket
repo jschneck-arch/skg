@@ -1,0 +1,22 @@
+[0;1;32m●[0m skg.service - SKG Red Team Intelligence Daemon
+     Loaded: loaded (]8;;file://archbox/home/gristlefist/.config/systemd/user/skg.service\/home/gristlefist/.config/systemd/user/skg.service]8;;\; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;32mactive (running)[0m since Sat 2026-03-07 23:01:40 CST; 1 day 11h ago
+ Invocation: 8ea57cd50e384d1bbd7cc53f230ae58f
+   Main PID: 547211 (python)
+      Tasks: 17[0;38;5;245m (limit: 8656)[0m
+     Memory: 575.4M (peak: 757M)
+        CPU: 1min 17.969s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/skg.service
+             ├─[0;38;5;245m547211 /opt/skg/.venv/bin/python /opt/skg/skg/core/daemon.py[0m
+             └─[0;38;5;245m547369 /opt/skg/.venv/bin/python -c "from multiprocessing.resource_tracker import main;main(5)"[0m
+
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: [122B blob data]
+Mar 07 23:19:27 archbox skg[547211]: 2026-03-07 23:19:27,390 [INFO] skg.resonance.ingester:   supply_chain: +12 wickets, +0 adapters
+Mar 07 23:19:27 archbox skg[547211]: 2026-03-07 23:19:27,391 [INFO] skg.resonance.ingester: Ingesting domain: web from attack_preconditions_catalog.web.v1.json
+Mar 07 23:19:27 archbox skg[547211]: 2026-03-07 23:19:27,392 [INFO] skg.resonance.ingester:   web: +0 wickets, +0 adapters

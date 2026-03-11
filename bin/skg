@@ -444,6 +444,82 @@ def cmd_target(a):
 
 
 # ── Observation commands ─────────────────────────────────────────────────
+def _queue_msf_proposal(ip: str):
+    sys.path.insert(0, "/opt/skg")
+    from skg.forge.proposals import create_action
+
+    out_dir = DISCOVERY_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    surface_path = _latest_surface()
+    port = _find_web_port(ip)
+
+    if not port:
+        print(f"  No web port found for {ip}")
+        return
+
+    import uuid
+    run_id = str(uuid.uuid4())[:8]
+
+    rc_lines = [
+        f"setg RHOSTS {ip}",
+        f"setg RPORT {port}",
+        "setg THREADS 4",
+        "",
+        "# SQL injection scanner",
+        "use auxiliary/scanner/http/sql_injection",
+        f"set RHOSTS {ip}",
+        f"set RPORT {port}",
+        "set TARGETURI /",
+        "run",
+        "",
+        "# Directory scanner",
+        "use auxiliary/scanner/http/dir_scanner",
+        f"set RHOSTS {ip}",
+        f"set RPORT {port}",
+        "run",
+        "",
+        "exit",
+    ]
+
+    rc_file = out_dir / f"observe_msf_{ip}_{run_id}.rc"
+    rc_file.write_text("\\n".join(rc_lines))
+
+    proposal = create_action(
+        domain="web",
+        description=f"Metasploit follow-on observation for {ip}:{port}",
+        attack_surface=f"{ip}:{port}",
+        hosts=[ip],
+        category="runtime_observation",
+        evidence=f"Operator requested MSF follow-on observation for {ip}:{port}",
+        action={
+            "instrument": "msf",
+            "target_ip": ip,
+            "port": port,
+            "rc_file": str(rc_file),
+            "module_candidates": [
+                {
+                    "module": "auxiliary/scanner/http/sql_injection",
+                    "confidence": 0.80,
+                    "module_class": "auxiliary",
+                },
+                {
+                    "module": "auxiliary/scanner/http/dir_scanner",
+                    "confidence": 0.60,
+                    "module_class": "auxiliary",
+                },
+            ],
+            "dispatch": {
+                "kind": "msf_rc_script",
+                "command_hint": f"msfconsole -r {rc_file}",
+            },
+        },
+    )
+
+    print(f"  [MSF] Proposal queued: {proposal['id']}")
+    print(f"  [MSF] RC script: {rc_file}")
+    print(f"  [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
+
 
 def cmd_observe(a):
     """Trigger observation on a target — gravity selects instrument, or operator specifies."""
@@ -489,8 +565,8 @@ def cmd_observe(a):
                          "-p", str(port), "-oX", str(events_file), ip])
 
     elif instrument == "msf":
-        print(f"  [MSF] Generating RC script for {ip}")
-        # TODO: generate and suggest RC script
+        print(f"  [MSF] Queuing operator-reviewable field action for {ip}")
+        _queue_msf_proposal(ip)
 
     elif instrument == "pcap":
         pcap_file = DISCOVERY_DIR / f"observe_pcap_{ip}.pcap"
@@ -829,6 +905,67 @@ def cmd_catalog(a):
 
 
 # ── Parser ───────────────────────────────────────────────────────────────
+def cmd_proposals(a):
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.forge import proposals as _props
+
+    subcmd = a.proposal_cmd
+
+    if subcmd == "list":
+        items = _props.list_proposals(status=getattr(a, "status", "pending"))
+        if not items:
+            print("  No proposals.")
+            return
+        for pr in items:
+            kind = pr.get("proposal_kind", "toolchain_generation")
+            print(f"  {pr['id']}  [{kind}]  {pr.get('domain','?')}  {pr.get('status','?')}  {pr.get('description','')}")
+        return
+
+    if subcmd == "show":
+        pr = _props.get(a.proposal_id)
+        if not pr:
+            print(f"  Proposal not found: {a.proposal_id}")
+            return
+        print(json.dumps(pr, indent=2))
+        return
+
+    if subcmd == "trigger":
+        pr = _props.trigger_action(a.proposal_id)
+        action = pr.get("action", {})
+        instrument = action.get("instrument")
+
+        if instrument == "msf":
+            rc_file = action.get("rc_file", "")
+            if not rc_file:
+                print("  Proposal triggered, but no rc_file present.")
+                return
+            print(f"  Triggered field action: {pr['id']}")
+            print(f"  Instrument: msf")
+            print(f"  RC script:   {rc_file}")
+            print(f"  Run now:     msfconsole -r {rc_file}")
+            return
+
+        print(f"  Triggered field action: {pr['id']}")
+        print(f"  Instrument: {instrument or 'unknown'}")
+        return
+
+    if subcmd == "accept":
+        result = _props.accept(a.proposal_id)
+        print(json.dumps(result, indent=2))
+        return
+
+    if subcmd == "reject":
+        result = _props.reject(a.proposal_id, reason=getattr(a, "reason", ""))
+        print(json.dumps(result, indent=2))
+        return
+
+    if subcmd == "defer":
+        result = _props.defer(a.proposal_id, defer_days=getattr(a, "days", 7))
+        print(json.dumps(result, indent=2))
+        return
+
+    print("  Usage: skg proposals [list|show|trigger|accept|reject|defer]")
+
 
 def main():
     p = argparse.ArgumentParser(prog="skg",
@@ -874,6 +1011,21 @@ def main():
                     choices=["web", "ssh", "nmap", "msf", "pcap"])
     op.add_argument("--auth", action="store_true",
                     help="authenticated scan (for --with web)")
+
+    # ── Proposals
+    pp = sub.add_parser("proposals", help="operator proposal queue")
+    pps = pp.add_subparsers(dest="proposal_cmd", required=True)
+    ppl = pps.add_parser("list", help="list proposals")
+    ppl.add_argument("--status", default="pending")
+    pps.add_parser("show", help="show proposal").add_argument("proposal_id")
+    pps.add_parser("trigger", help="trigger field_action proposal").add_argument("proposal_id")
+    pps.add_parser("accept", help="accept toolchain proposal").add_argument("proposal_id")
+    prj = pps.add_parser("reject", help="reject proposal")
+    prj.add_argument("proposal_id")
+    prj.add_argument("--reason", default="")
+    pdf = pps.add_parser("defer", help="defer proposal")
+    pdf.add_argument("proposal_id")
+    pdf.add_argument("days", nargs="?", type=int, default=7)
 
     # ── Gravity
     gp = sub.add_parser("gravity", help="run the gravity field loop")
@@ -1015,6 +1167,7 @@ def main():
         "target":    cmd_target,
         "observe":   cmd_observe,
         "gravity":   cmd_gravity,
+        "proposals": cmd_proposals,
         "mode":      cmd_mode,
         "feed":      cmd_feed,
         "resonance": cmd_resonance,
@@ -1030,3 +1183,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

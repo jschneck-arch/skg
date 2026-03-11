@@ -42,14 +42,13 @@ import glob
 import re
 import subprocess
 from pathlib import Path
-
-import sys
-sys.path.insert(0, "/opt/skg")
-from skg.forge.proposals import create_action
 from datetime import datetime, timezone
 from typing import Optional
 from collections import defaultdict
 from dataclasses import dataclass, field as dc_field
+
+sys.path.insert(0, "/opt/skg/skg-gravity")
+from exploit_proposals import create_from_nvd_candidates
 
 # Instrument paths
 WEB_ADAPTER = Path("/opt/skg/skg-web-toolchain/adapters/web_active")
@@ -60,6 +59,7 @@ CVE_DIR = Path("/var/lib/skg/cve")
 if WEB_ADAPTER.exists():
     sys.path.insert(0, str(WEB_ADAPTER))
 
+from gravity_web import build_gravity_web, compute_neighbor_priors, display_web, display_priors
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -227,7 +227,7 @@ def _load_events_file(path: str, states: dict, filter_ip: str = None):
         pass
 
 
-def field_entropy(states: dict, applicable_wickets: set) -> float:
+def field_entropy(states: dict, applicable_wickets: set, neighbor_priors=None) -> float:
     """
     Compute field energy E = H(π | T) for a target.
     Shannon entropy over the tri-state distribution of applicable wickets.
@@ -263,7 +263,8 @@ def field_entropy(states: dict, applicable_wickets: set) -> float:
 
     # Field energy = unknowns as proportion of total, scaled by surface size
     # E ranges from 0 (fully determined) to n (fully unknown)
-    return float(unknown_count)
+    prior_boost = sum(neighbor_priors.get(w, 0) for w in applicable_wickets if (states.get(w, {}).get("status", "unknown") if isinstance(states.get(w, {}), dict) else states.get(w, "unknown")) == "unknown") if neighbor_priors else 0.0
+    return float(unknown_count) + prior_boost
 
 
 def entropy_reduction_potential(instrument: Instrument, states: dict,
@@ -444,33 +445,27 @@ def _exec_nvd_feed(ip, target, run_id, out_dir, result):
     detail = wb02.get("detail", "")
 
     services_to_check = []
-    try:
-        headers = json.loads(detail)
-        for val in headers.values():
-            services_to_check.append(val)
-    except (json.JSONDecodeError, TypeError):
-        if detail:
-            services_to_check.append(detail)
+    total_candidates = 0
+    total_proposals = 0
 
-    if not services_to_check:
-        result["error"] = "No service versions discovered"
-        return result
+    for svc in services_to_check:
+        candidates = ingest_service(svc, ip, events_file, api_key, run_id)
+        total_candidates += len(candidates)
 
-    try:
-        sys.path.insert(0, str(FEEDS_PATH))
-        from nvd_ingester import ingest_service
-        CVE_DIR.mkdir(parents=True, exist_ok=True)
-        events_file = CVE_DIR / f"cve_events_{ip}_{run_id[:8]}.ndjson"
+        proposal = create_from_nvd_candidates(
+            target_ip=ip,
+            service=svc,
+            domain="web" if any(x in str(svc).lower() for x in ["http", "apache", "nginx", "php", "tomcat"]) else "host",
+            cve_candidates=candidates,
+            source="gravity_field.nvd_feed",
+        )
+        if proposal:
+            total_proposals += 1
+            print(f"    [proposal] exploit candidate queued: {proposal['id']}")
 
-        total_candidates = 0
-        for svc in services_to_check:
-            candidates = ingest_service(svc, ip, events_file, api_key, run_id)
-            total_candidates += len(candidates)
-
-        result["success"] = True
-        result["cve_candidates"] = total_candidates
-    except Exception as e:
-        result["error"] = str(e)
+    result["success"] = True
+    result["cve_candidates"] = total_candidates
+    result["exploit_proposals"] = total_proposals
 
     return result
 
@@ -478,7 +473,7 @@ def _exec_nvd_feed(ip, target, run_id, out_dir, result):
 def _exec_metasploit(ip, target, run_id, out_dir, result):
     """
     Use Metasploit for targeted auxiliary scanning.
-    Generates an RC script and creates an operator-triggerable field_action proposal.
+    Generates an RC script for specific modules based on discovered services.
     """
     web_ports = [svc["port"] for svc in target.get("services", [])
                  if svc["service"] in ("http", "https", "http-alt", "https-alt")]
@@ -486,75 +481,6 @@ def _exec_metasploit(ip, target, run_id, out_dir, result):
     if not web_ports:
         result["error"] = "No web ports for MSF modules"
         return result
-
-    port = web_ports[0]
-
-    rc_lines = [
-        f"setg RHOSTS {ip}",
-        f"setg RPORT {port}",
-        "setg THREADS 4",
-        "",
-        "# SQL injection scanner",
-        "use auxiliary/scanner/http/sql_injection",
-        f"set RHOSTS {ip}",
-        f"set RPORT {port}",
-        "set TARGETURI /",
-        "run",
-        "",
-        "# Directory scanner",
-        "use auxiliary/scanner/http/dir_scanner",
-        f"set RHOSTS {ip}",
-        f"set RPORT {port}",
-        "run",
-        "",
-        "exit",
-    ]
-
-    rc_file = out_dir / f"msf_{ip}_{run_id[:8]}.rc"
-    rc_file.write_text("\n".join(rc_lines))
-
-    proposal = create_action(
-        domain="web",
-        description=f"Metasploit follow-on observation for {ip}:{port}",
-        attack_surface=f"{ip}:{port}",
-        hosts=[ip],
-        category="runtime_observation",
-        evidence=f"Gravity selected metasploit as follow-on instrument for {ip}:{port}",
-        action={
-            "instrument": "msf",
-            "target_ip": ip,
-            "port": port,
-            "rc_file": str(rc_file),
-            "module_candidates": [
-                {
-                    "module": "auxiliary/scanner/http/sql_injection",
-                    "confidence": 0.80,
-                    "module_class": "auxiliary",
-                },
-                {
-                    "module": "auxiliary/scanner/http/dir_scanner",
-                    "confidence": 0.60,
-                    "module_class": "auxiliary",
-                },
-            ],
-            "dispatch": {
-                "kind": "msf_rc_script",
-                "command_hint": f"msfconsole -r {rc_file}",
-            },
-        },
-    )
-
-    print(f"    [MSF] RC script written: {rc_file}")
-    print(f"    [MSF] Proposal queued: {proposal['id']}")
-    print(f"    [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
-
-    result["success"] = True
-    result["action"] = "operator"
-    result["rc_file"] = str(rc_file)
-    result["proposal_id"] = proposal["id"]
-    result["suggestion"] = f"skg proposals trigger {proposal['id']}"
-
-    return result
 
     # Build RC script for relevant auxiliary modules
     rc_lines = [
@@ -580,6 +506,7 @@ def _exec_metasploit(ip, target, run_id, out_dir, result):
 
     rc_file = out_dir / f"msf_{ip}_{run_id[:8]}.rc"
     rc_file.write_text("\n".join(rc_lines))
+
     print(f"    [MSF] RC script written: {rc_file}")
     print(f"    [MSF] Run manually: msfconsole -r {rc_file}")
     print(f"    [MSF] Or: msfconsole -q -x 'resource {rc_file}'")
@@ -679,6 +606,9 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid.uuid4())
+    targets_list = surface.get("targets", [])
+    gravity_bonds = build_gravity_web(targets_list)
+    all_target_states = {t["ip"]: load_wicket_states(t["ip"]) for t in targets_list}
 
     domain_wickets = load_all_wicket_ids()
     all_wickets = set()
@@ -703,7 +633,8 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         for domain in target.get("domains", []):
             applicable.update(domain_wickets.get(domain, set()))
 
-        E = field_entropy(states, applicable)
+        priors = compute_neighbor_priors(ip, gravity_bonds, all_target_states)
+        E = field_entropy(states, applicable, neighbor_priors=priors)
 
         unknowns = sum(1 for w in applicable
                        if states.get(w, {}).get("status", "unknown") == "unknown")
@@ -737,6 +668,8 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
               f"{t['realized']:8d} {t['blocked']:8d} {t['total_wickets']:6d}")
 
     # ── Available instruments ──
+    display_web(gravity_bonds)
+    display_priors(landscape, gravity_bonds, all_target_states)
     print(f"\n  [INSTRUMENTS]")
     for name, inst in instruments.items():
         status = "ready" if inst.available else "unavailable"

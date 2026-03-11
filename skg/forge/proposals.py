@@ -72,6 +72,7 @@ def create(
 
     proposal = {
         "id":                proposal_id,
+        "proposal_kind":     "toolchain_generation",
         "domain":            domain,
         "description":       description,
         "attack_surface":    gap.get("attack_surface", ""),
@@ -384,3 +385,69 @@ def format_proposal_detail(proposal: dict) -> str:
     lines.append(f"skg proposals accept {proposal['id'][:8]}")
     lines.append(f"skg proposals reject {proposal['id'][:8]}")
     return "\n".join(lines)
+
+
+def create_action(
+    domain: str,
+    description: str,
+    action: dict,
+    attack_surface: str = "",
+    hosts: list[str] | None = None,
+    category: str = "runtime_observation",
+    evidence: str = "",
+) -> dict:
+    """
+    Create a runtime field-action proposal.
+    This is operator-reviewable work, not a staged toolchain install.
+    """
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+
+    proposal_id = str(uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    hosts = hosts or []
+
+    proposal = {
+        "id":             proposal_id,
+        "proposal_kind":  "field_action",
+        "domain":         domain,
+        "description":    description,
+        "attack_surface": attack_surface,
+        "hosts":          hosts,
+        "hosts_count":    len(hosts),
+        "category":       category,
+        "evidence":       evidence,
+        "action":         action,
+        "generated_at":   now,
+        "status":         "pending",
+        "cooldown_until": None,
+        "defer_until":    None,
+        "reviewed_at":    None,
+    }
+
+    _proposal_path(proposal_id).write_text(json.dumps(proposal, indent=2))
+    log.info(f"[proposals] created field_action: {proposal_id} ({domain}, {hosts})")
+    return proposal
+
+
+def trigger_action(proposal_id: str) -> dict:
+    """
+    Mark a field-action proposal as operator-triggered.
+    Returns the proposal payload for the caller to dispatch.
+    Does NOT execute anything itself.
+    """
+    proposal = get(proposal_id)
+    if not proposal:
+        raise ValueError(f"Proposal not found: {proposal_id}")
+
+    if proposal.get("proposal_kind") != "field_action":
+        raise ValueError(f"Proposal {proposal_id} is not a field_action proposal")
+
+    if proposal.get("status") != "pending":
+        raise ValueError(f"Proposal {proposal_id} is {proposal.get('status')}, not pending")
+
+    proposal["status"] = "triggered"
+    proposal["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+    _proposal_path(proposal["id"]).write_text(json.dumps(proposal, indent=2))
+
+    log.info(f"[proposals] triggered field_action: {proposal_id}")
+    return proposal

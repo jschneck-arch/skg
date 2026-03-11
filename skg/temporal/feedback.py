@@ -1,37 +1,7 @@
-"""
-skg.temporal.feedback
-=====================
-Feedback ingester — closes the loop from INTERP_DIR back into the
-temporal delta model, workload graph, and observation memory.
-
-This is the component that makes SKG learn from its own projections.
-
-Pipeline
---------
-1. Watch INTERP_DIR for new projection files
-2. For each new file:
-   a. Parse the projection result
-   b. Ingest into DeltaStore → compute wicket transitions
-   c. For each high-signal transition, propagate via WorkloadGraph
-   d. For each confirmed wicket state, record outcomes in ObservationMemory
-   e. Auto-discover workload relationships from the event stream
-3. Record processed files in state to avoid re-processing
-
-Called by the daemon's sensor loop tick (after sensors run, after projection):
-  feedback_ingester.process_new_interps()
-
-Can also be called manually:
-  skg feedback process          # process any unprocessed interp files
-  skg feedback status           # show delta/graph/obs memory stats
-  skg feedback timeline <wid>   # show state history for a workload
-  skg feedback surface          # show high-signal transitions across all workloads
-  skg feedback graph add-edge <w1> <w2> <rel>  # manually add relationship
-"""
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,6 +25,7 @@ def _infer_domain(interp: dict, filename: str) -> str:
     for key, domain in DOMAIN_FROM_SCORE_KEY.items():
         if key in interp:
             return domain
+
     fname = filename.lower()
     if "lateral" in fname or "ad_" in fname:
         return "ad_lateral"
@@ -70,22 +41,51 @@ def _infer_domain(interp: dict, filename: str) -> str:
 def _extract_workload_run(filename: str) -> tuple[str, str]:
     """
     Extract workload_id and run_id from interp filename.
-    Convention: <domain>_<workload_id>_<run_id>.json
-    or: host_<workload_id>_<run_id>.json
+
+    Convention examples:
+      <domain>_<workload_id>_<run_id>.json
+      host_<workload_id>_<run_id>.json
     """
     stem = Path(filename).stem
     parts = stem.split("_")
     if len(parts) >= 3:
-        run_id     = parts[-1]
+        run_id = parts[-1]
         workload_id = "_".join(parts[1:-1])
         return workload_id, run_id
     return stem, "unknown"
+
+
+def _transition_subject_id(t: WicketTransition) -> str:
+    """
+    Backward-compatible alias:
+    existing graph code still expects wicket_id semantics,
+    but temporal transitions are now also node-compatible.
+    """
+    return getattr(t, "node_id", t.wicket_id)
+
+
+def _should_propagate_transition(t: WicketTransition) -> bool:
+    """
+    Conservative propagation rule.
+
+    Current behavior remains mostly the same:
+    - only high-signal transitions propagate
+
+    But richer metadata can now be used as tie-break context later.
+    """
+    if t.signal_weight >= 0.8:
+        return True
+    return False
 
 
 class FeedbackIngester:
     """
     Watches INTERP_DIR for new projection results and feeds them back
     into the temporal, graph, and observation memory systems.
+
+    Important boundary:
+    - feedback routes consequences
+    - feedback does not define truth
     """
 
     def __init__(
@@ -96,9 +96,9 @@ class FeedbackIngester:
         interp_dir: Path = INTERP_DIR,
         events_dir: Path = EVENTS_DIR,
     ):
-        self.delta  = delta_store
-        self.graph  = graph
-        self.obs    = obs_memory
+        self.delta = delta_store
+        self.graph = graph
+        self.obs = obs_memory
         self.interp_dir = interp_dir
         self.events_dir = events_dir
         self._state = self._load_state()
@@ -139,7 +139,10 @@ class FeedbackIngester:
                 total_propagations += result["propagations"]
                 processed_set.add(interp_file.name)
             except Exception as exc:
-                log.error(f"Feedback: failed to process {interp_file.name}: {exc}", exc_info=True)
+                log.error(
+                    f"Feedback: failed to process {interp_file.name}: {exc}",
+                    exc_info=True,
+                )
 
         self._state["processed_interps"] = list(processed_set)
         self._state["last_run"] = datetime.now(timezone.utc).isoformat()
@@ -178,15 +181,24 @@ class FeedbackIngester:
         # 2. WorkloadGraph: propagate high-signal transitions
         propagations = 0
         for t in transitions:
-            if t.signal_weight >= 0.8:  # only high-signal
+            if _should_propagate_transition(t):
+                subject_id = _transition_subject_id(t)
+
                 self.graph.propagate_transition(
                     source_workload=workload_id,
-                    wicket_id=t.wicket_id,
+                    wicket_id=subject_id,   # preserve current graph API
                     domain=domain,
                     to_state=t.to_state,
                     signal_weight=t.signal_weight,
                 )
                 propagations += 1
+
+                log.debug(
+                    f"[feedback.propagate] {workload_id} {subject_id} "
+                    f"{t.from_state}->{t.to_state} "
+                    f"Δconf={getattr(t, 'confidence_delta', 0.0):+.3f} "
+                    f"ΔE={getattr(t, 'local_energy_delta', 0.0):+.3f}"
+                )
 
         # Decay priors for this workload (it was just projected)
         self.graph.decay_priors(workload_id)
@@ -204,11 +216,11 @@ class FeedbackIngester:
 
     def _close_observations(self, workload_id: str, interp: dict, domain: str):
         """
-        For each wicket with a confirmed state in this projection,
+        For each wicket/node with a confirmed state in this projection,
         find matching pending observations and record outcomes.
         """
-        # Build realized/blocked/unknown maps from projection
         outcomes: dict[str, str] = {}
+
         for w in interp.get("realized", []):
             outcomes[w] = "realized"
         for w in interp.get("blocked", []):
@@ -216,7 +228,6 @@ class FeedbackIngester:
         for w in interp.get("unknown", []):
             outcomes[w] = "unknown"
 
-        # Walk pending observations and close any matching this workload
         if not self.obs.pending_path.exists():
             return
 
@@ -226,9 +237,12 @@ class FeedbackIngester:
                 continue
             try:
                 from skg.resonance.observation_memory import ObservationRecord
+
                 rec = ObservationRecord.from_dict(json.loads(line))
-                if rec.workload_id == workload_id and rec.wicket_id in outcomes:
-                    self.obs.record_outcome(rec.record_id, outcomes[rec.wicket_id])
+                rec_subject_id = getattr(rec, "node_id", getattr(rec, "wicket_id", ""))
+
+                if rec.workload_id == workload_id and rec_subject_id in outcomes:
+                    self.obs.record_outcome(rec.record_id, outcomes[rec_subject_id])
             except Exception:
                 pass
 
@@ -239,7 +253,7 @@ class FeedbackIngester:
         """
         if not self.events_dir.exists():
             return
-        # Read last 20 event files
+
         event_files = sorted(self.events_dir.glob("*.ndjson"))[-20:]
         events = []
         for f in event_files:
@@ -249,16 +263,17 @@ class FeedbackIngester:
                         events.append(json.loads(line))
                     except Exception:
                         pass
+
         if events:
             self.graph.infer_edges_from_events(events)
 
     def status(self) -> dict:
         return {
-            "last_run":          self._state.get("last_run", ""),
+            "last_run": self._state.get("last_run", ""),
             "processed_interps": len(self._state.get("processed_interps", [])),
-            "delta":   self.delta.environment_summary(),
-            "graph":   self.graph.status(),
-            "obs":     self.obs.status() if self.obs else None,
+            "delta": self.delta.environment_summary(),
+            "graph": self.graph.status(),
+            "obs": self.obs.status() if self.obs else None,
         }
 
     def timeline(self, workload_id: str, attack_path_id: str | None = None) -> dict:
@@ -267,10 +282,10 @@ class FeedbackIngester:
         transitions = self.delta.workload_transitions(workload_id)
 
         return {
-            "workload_id":   workload_id,
+            "workload_id": workload_id,
             "snapshot_count": len(history),
-            "snapshots":     [s.to_dict() for s in history],
-            "transitions":   [t.to_dict() for t in transitions],
+            "snapshots": [s.to_dict() for s in history],
+            "transitions": [t.to_dict() for t in transitions],
             "graph_neighbors": self.graph.neighbors(workload_id),
         }
 
@@ -279,5 +294,5 @@ class FeedbackIngester:
         transitions = self.delta.high_signal_transitions(min_weight=min_weight)
         return {
             "high_signal_transitions": [t.to_dict() for t in transitions[:50]],
-            "total":                   len(transitions),
+            "total": len(transitions),
         }

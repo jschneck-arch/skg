@@ -1,38 +1,7 @@
-"""
-skg.sensors
-===========
-Sensor layer — bridges raw collection (USB, SSH/WinRM, network agents, MSF, CVE feeds)
-into the SKG event envelope format consumed by toolchain projectors.
-
-Public API consumed by skg.core.daemon
----------------------------------------
-  SensorLoop(events_dir, interp_dir, config_dir, host_tc_dir, interval, auto_project)
-    .start()           — start background sensor polling thread
-    .stop()            — stop polling thread
-    .trigger()         — run one immediate sweep of all enabled sensors, return run_id
-    .status()          — return sensor status dict
-    ._interval         — polling interval in seconds (writable, daemon adjusts per mode)
-    ._auto_project     — if True, auto-project after each ingest sweep
-
-  collect_host(target, events_dir, tc_dir, run_id) → bool
-  project_host(ev_file, interp_dir, tc_dir, wid, attack_path_id, run_id) → Path|None
-  _load_targets(config_dir) → list[dict]
-
-Envelope factory
-----------------
-  envelope(...)    — build compliant skg.event.envelope.v1 dict
-  precondition_payload(...) — standard obs.attack.precondition payload
-
-Sensor registry
----------------
-  @register("name") — decorator to register a sensor class
-"""
-
 from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -40,7 +9,6 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 log = logging.getLogger("skg.sensors")
 
@@ -61,6 +29,10 @@ def available_sensors() -> list[str]:
     return list(_SENSOR_REGISTRY.keys())
 
 
+def _safe_condition_id(wicket_id: str | None = None, node_id: str | None = None) -> str:
+    return node_id or wicket_id or ""
+
+
 # ── Envelope factory ─────────────────────────────────────────────────────────
 
 def envelope(
@@ -74,55 +46,90 @@ def envelope(
     confidence: float = 1.0,
     version: str = "1.0.0",
     ts: str | None = None,
+    confidence_vector: list[float] | None = None,
+    local_energy: float | None = None,
+    phase: float | None = None,
+    is_latent: bool | None = None,
 ) -> dict:
     """
     Build a compliant skg.event.envelope.v1 dict.
-    evidence_rank: 1=runtime 2=build/classpath 3=config/filesystem
-                   4=network 5=static 6=scanner
+
+    evidence_rank:
+      1=runtime
+      2=build/classpath
+      3=config/filesystem
+      4=network
+      5=static
+      6=scanner
+
+    Backward compatible:
+    - old callers can ignore all richer fields
+    - newer callers can pass optional substrate hints
     """
     now = ts or datetime.now(timezone.utc).isoformat()
+
+    evidence = {
+        "source_kind": source_kind,
+        "pointer": pointer,
+        "collected_at": now,
+        "confidence": confidence,
+    }
+
+    if confidence_vector is not None:
+        evidence["confidence_vector"] = confidence_vector
+    if local_energy is not None:
+        evidence["local_energy"] = local_energy
+    if phase is not None:
+        evidence["phase"] = phase
+
+    payload = dict(payload)
+    if is_latent is not None and "is_latent" not in payload:
+        payload["is_latent"] = bool(is_latent)
+
     return {
-        "id":   str(uuid.uuid4()),
-        "ts":   now,
+        "id": str(uuid.uuid4()),
+        "ts": now,
         "type": event_type,
         "source": {
             "source_id": source_id,
             "toolchain": toolchain,
-            "version":   version,
+            "version": version,
         },
         "payload": payload,
         "provenance": {
             "evidence_rank": evidence_rank,
-            "evidence": {
-                "source_kind":  source_kind,
-                "pointer":      pointer,
-                "collected_at": now,
-                "confidence":   confidence,
-            },
+            "evidence": evidence,
         },
     }
 
 
 def precondition_payload(
-    wicket_id: str,
-    label: str,
-    domain: str,
-    workload_id: str,
-    realized: bool | None,
+    wicket_id: str | None = None,
+    label: str = "",
+    domain: str = "",
+    workload_id: str = "",
+    realized: bool | None = None,
     detail: str = "",
     attack_path_id: str = "",
+    node_id: str | None = None,
 ) -> dict:
     """
     Standard payload for obs.attack.precondition events.
+
     realized=None preserves the tri-state (unknown ≠ blocked).
+
+    Backward compatible with wicket_id while also carrying node_id alias.
     """
+    condition_id = _safe_condition_id(wicket_id=wicket_id, node_id=node_id)
+
     return {
-        "wicket_id":      wicket_id,
-        "label":          label,
-        "domain":         domain,
-        "workload_id":    workload_id,
-        "realized":       realized,
-        "detail":         detail,
+        "wicket_id": condition_id,
+        "node_id": condition_id,
+        "label": label,
+        "domain": domain,
+        "workload_id": workload_id,
+        "realized": realized,
+        "detail": detail,
         "attack_path_id": attack_path_id,
     }
 
@@ -135,24 +142,28 @@ class BaseSensor(ABC):
     def __init__(self, cfg: dict, events_dir: Path | None = None):
         self.cfg = cfg
         self._ctx = None  # injected by SensorLoop after daemon boot
-        # Allow override; fallback to SKG_STATE_DIR/events if not provided
+
         if events_dir:
             self.events_dir = events_dir
         else:
             from skg.core.paths import EVENTS_DIR
             self.events_dir = EVENTS_DIR
+
         self.events_dir.mkdir(parents=True, exist_ok=True)
 
     def emit(self, events: list[dict]) -> list[str]:
         if not events:
             return []
+
         slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out = self.events_dir / f"{self.name}_{slug}.ndjson"
         ids = []
+
         with out.open("w") as fh:
             for ev in events:
                 fh.write(json.dumps(ev) + "\n")
                 ids.append(ev["id"])
+
         log.info(f"[{self.name}] {len(ids)} events → {out.name}")
         return ids
 
@@ -171,19 +182,21 @@ def _load_targets(config_dir: Path) -> list[dict]:
     targets_file = config_dir / "targets.yaml"
     if not targets_file.exists():
         return []
+
     try:
         import yaml
         with targets_file.open() as fh:
             data = yaml.safe_load(fh)
+
         if isinstance(data, dict):
             return [t for t in data.get("targets", []) if t.get("enabled", True)]
         if isinstance(data, list):
             return [t for t in data if t.get("enabled", True)]
     except ImportError:
-        # YAML not available — try naive parse
         pass
     except Exception as exc:
         log.warning(f"targets.yaml parse error: {exc}")
+
     return []
 
 
@@ -217,12 +230,11 @@ def collect_host(
                  workload_id, attack_path_id, enabled
     Returns True on success.
     """
-    # Lazy import to avoid circular import at module level
     from skg.sensors.ssh_sensor import SshSensor
 
-    host   = target.get("host", "")
+    host = target.get("host", "")
     method = target.get("method", "ssh").lower()
-    wid    = target.get("workload_id", host)
+    wid = target.get("workload_id", host)
 
     if not host:
         log.warning("collect_host: no host in target dict")
@@ -231,11 +243,11 @@ def collect_host(
     sensor_cfg = {
         "targets": [target],
         "timeout_s": 30,
-        "collect_interval_s": 0,  # always collect (one-shot)
+        "collect_interval_s": 0,
     }
+
     try:
         sensor = SshSensor(sensor_cfg, events_dir=events_dir)
-        # Override state check for one-shot
         sensor._force_collect = True
         ids = sensor.run()
         log.info(f"collect_host: {host} → {len(ids)} events (run {run_id})")
@@ -295,10 +307,10 @@ class SensorLoop:
     Background sensor polling loop, driven by daemon mode transitions.
 
     Instantiated by SKGKernel. The daemon calls:
-      .start()   — begin background thread
-      .stop()    — stop background thread
-      .trigger() — one immediate sweep, returns run_id
-      .status()  — sensor health dict
+      .start()
+      .stop()
+      .trigger()
+      .status()
     """
 
     def __init__(
@@ -313,21 +325,21 @@ class SensorLoop:
         obs_memory=None,
         feedback=None,
     ):
-        self._events_dir    = events_dir
-        self._interp_dir    = interp_dir
-        self._config_dir    = config_dir
-        self._host_tc_dir   = host_tc_dir
-        self._interval      = interval
-        self._auto_project  = auto_project
-        self._running       = False
+        self._events_dir = events_dir
+        self._interp_dir = interp_dir
+        self._config_dir = config_dir
+        self._host_tc_dir = host_tc_dir
+        self._interval = interval
+        self._auto_project = auto_project
+        self._running = False
         self._thread: threading.Thread | None = None
         self._sensors: list[BaseSensor] = []
         self._last_run: str = ""
         self._run_count: int = 0
         self._cfg: dict = {}
-        self._graph     = graph
+        self._graph = graph
         self._obs_memory = obs_memory
-        self._feedback  = feedback
+        self._feedback = feedback
         self._load_sensors()
 
     def _load_sensors(self):
@@ -335,7 +347,6 @@ class SensorLoop:
         self._cfg = _load_skg_config(self._config_dir)
         sensor_cfg = self._cfg.get("sensors", {})
 
-        # Import sensor modules to trigger registration
         from skg.sensors import (  # noqa: F401
             usb_sensor, ssh_sensor, msf_sensor, cve_sensor, agent_sensor,
             bloodhound_sensor, web_sensor, net_sensor
@@ -343,6 +354,7 @@ class SensorLoop:
 
         enabled = sensor_cfg.get("enabled", list(_SENSOR_REGISTRY.keys()))
         self._sensors = []
+
         for name in enabled:
             if name not in _SENSOR_REGISTRY:
                 continue
@@ -354,8 +366,6 @@ class SensorLoop:
             except Exception as exc:
                 log.warning(f"Sensor '{name}' failed to load: {exc}")
 
-        # Inject intelligence context if graph/obs_memory are available
-        # Pass config_dir to web sensor for targets.yaml loading
         for s in self._sensors:
             if hasattr(s, "_config_dir"):
                 s._config_dir = self._config_dir
@@ -367,6 +377,7 @@ class SensorLoop:
         """Run all sensors once, optionally project, then run feedback loop."""
         log.info(f"[SensorLoop] sweep start (run={run_id})")
         total = 0
+
         for s in self._sensors:
             try:
                 ids = s.run()
@@ -380,7 +391,7 @@ class SensorLoop:
 
         if self._auto_project and total > 0:
             self._auto_project_all(run_id)
-            # Auto-trigger forge pipeline — gap detection + toolchain generation
+
             try:
                 from skg.forge.pipeline import run_forge_pipeline
                 resonance = getattr(self, "_resonance", None)
@@ -396,8 +407,6 @@ class SensorLoop:
             except Exception as _fe:
                 log.debug(f"[SensorLoop] forge pipeline error: {_fe}")
 
-        # Feedback loop: ingest any new projection results back into
-        # DeltaStore → WorkloadGraph → ObservationMemory
         if self._feedback is not None:
             try:
                 fb_result = self._feedback.process_new_interps()
@@ -412,6 +421,7 @@ class SensorLoop:
     def _auto_project_all(self, run_id: str):
         """Project all event files from this run across all toolchains."""
         from skg.sensors.projector import project_events_dir
+
         outputs = project_events_dir(
             self._events_dir, self._interp_dir,
             run_id=run_id, since_run_id=run_id
@@ -419,8 +429,8 @@ class SensorLoop:
         if outputs:
             log.info(f"[SensorLoop] projected {len(outputs)} workload+path pairs (run={run_id})")
         else:
-            # Fallback: project all event files (sensor naming may not embed run_id)
             from skg.sensors.projector import project_event_file
+
             count = 0
             for ev_file in sorted(self._events_dir.glob("*.ndjson"))[-20:]:
                 results = project_event_file(ev_file, self._interp_dir, run_id)
@@ -464,13 +474,13 @@ class SensorLoop:
 
     def status(self) -> dict:
         return {
-            "running":      self._running,
-            "interval_s":   self._interval,
+            "running": self._running,
+            "interval_s": self._interval,
             "auto_project": self._auto_project,
-            "sensors":      [s.name for s in self._sensors],
+            "sensors": [s.name for s in self._sensors],
             "sensor_count": len(self._sensors),
-            "run_count":    self._run_count,
-            "last_run":     self._last_run,
+            "run_count": self._run_count,
+            "last_run": self._last_run,
         }
 
 
@@ -496,18 +506,22 @@ def emit_events(events: list[dict], events_dir, source_tag: str = "sensor") -> l
     """
     import uuid as _uuid
     from datetime import datetime, timezone as _tz
+
     if events_dir is None:
         return []
+
     events_dir = Path(events_dir)
     events_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%S")
     tag = source_tag.replace("/", "_").replace(":", "_")[:40]
     out_path = events_dir / f"{ts}_{tag}.ndjson"
     ids = []
+
     with out_path.open("a") as fh:
         for ev in events:
             if "id" not in ev:
                 ev["id"] = str(_uuid.uuid4())
             fh.write(json.dumps(ev) + "\n")
             ids.append(ev["id"])
+
     return ids
