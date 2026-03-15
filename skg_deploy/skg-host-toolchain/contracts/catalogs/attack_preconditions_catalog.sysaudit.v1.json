@@ -1,0 +1,211 @@
+{
+  "version": "1.0.0",
+  "domain": "sysaudit",
+  "description": "System integrity audit preconditions — filesystem, process, and log integrity. These are not attack surface conditions. They are system health conditions whose violation indicates compromise, misconfiguration, or degradation. The same tri-state logic applies: REALIZED = condition confirmed good, BLOCKED = condition violated (constraint broken), UNKNOWN = not yet measured.",
+  "wickets": {
+    "FI-01": {
+      "id": "FI-01",
+      "label": "system_binary_integrity_confirmed",
+      "description": "Key system binaries (/bin/sh, /usr/bin/sudo, /sbin/sshd, etc.) match their recorded hashes. A mismatch indicates tampering, unauthorized update, or supply chain compromise.",
+      "evidence_hint": "md5sum key binaries and compare to baseline. Evidence rank 2 (build/baseline).",
+      "decay_class": "operational"
+    },
+    "FI-02": {
+      "id": "FI-02",
+      "label": "suid_set_unchanged",
+      "description": "The set of SUID/SGID binaries on the filesystem matches the recorded baseline. New SUID binaries are a classic privilege escalation persistence mechanism.",
+      "evidence_hint": "find / -perm -4000 -o -perm -2000 and compare to baseline. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "FI-03": {
+      "id": "FI-03",
+      "label": "no_unexpected_world_writable_dirs",
+      "description": "No world-writable directories exist outside of expected paths (/tmp, /var/tmp, /dev/shm). World-writable directories outside these locations are staging areas for payload drops.",
+      "evidence_hint": "find / -type d -perm -0002 excluding standard temp paths. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "FI-04": {
+      "id": "FI-04",
+      "label": "no_executables_in_temp_paths",
+      "description": "No executable files exist in /tmp, /var/tmp, or /dev/shm. Executables in temp directories indicate payload staging, compiled-and-run attacks, or memory-resident implants.",
+      "evidence_hint": "find /tmp /var/tmp /dev/shm -type f -executable. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "FI-05": {
+      "id": "FI-05",
+      "label": "no_unexpected_recent_system_file_modifications",
+      "description": "No unexpected recent modifications to /etc, /bin, /sbin, /usr/bin. Unexpected changes to system files are indicators of backdoor installation, privilege escalation, or misconfiguration.",
+      "evidence_hint": "find system paths -newer /proc/1 -type f excluding package manager noise. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "FI-06": {
+      "id": "FI-06",
+      "label": "file_attributes_nominal",
+      "description": "Critical files (/etc/passwd, /etc/sudoers) do not have unexpected immutable flags. Unexpectedly immutable files may indicate an attacker locking a backdoor in place.",
+      "evidence_hint": "lsattr /etc/passwd /etc/shadow /etc/sudoers /etc/hosts. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "FI-07": {
+      "id": "FI-07",
+      "label": "passwd_shadow_integrity",
+      "description": "/etc/passwd has no new UID 0 accounts and no unexpected shell-bearing accounts since last baseline. New root accounts are the clearest indicator of persistent backdoor access.",
+      "evidence_hint": "Parse /etc/passwd for UID 0 and shell accounts; compare to baseline. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "FI-08": {
+      "id": "FI-08",
+      "label": "no_deleted_files_with_open_handles",
+      "description": "No processes hold open file handles to deleted files. This is a classic persistence technique — the file is unlinked but the process memory map keeps it alive.",
+      "evidence_hint": "lsof | grep deleted (excluding .so). Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-01": {
+      "id": "PI-01",
+      "label": "process_set_within_manifest",
+      "description": "Running processes match the declared service manifest. New processes not in the manifest require investigation — they may be unauthorized services, implants, or attack tools.",
+      "evidence_hint": "ps aux | awk '{print $11}' | sort -u; compare to baseline. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-02": {
+      "id": "PI-02",
+      "label": "no_processes_from_temp_paths",
+      "description": "No processes are executing from /tmp, /var/tmp, or /dev/shm. A process running from a temp directory is a strong indicator of a dropped payload or in-memory implant.",
+      "evidence_hint": "ls -la /proc/*/exe | grep tmp. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-03": {
+      "id": "PI-03",
+      "label": "listening_ports_match_manifest",
+      "description": "All listening TCP/UDP ports correspond to declared services. New listening ports not in the baseline indicate an unauthorized service, reverse shell, or C2 listener.",
+      "evidence_hint": "ss -tnlp | grep LISTEN; compare to baseline. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-04": {
+      "id": "PI-04",
+      "label": "root_processes_within_baseline",
+      "description": "Processes running as UID 0 match the recorded baseline. New root processes that are not known system services are indicators of privilege escalation or rootkit installation.",
+      "evidence_hint": "ps aux | awk '$1==\"root\"'; compare to baseline. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-05": {
+      "id": "PI-05",
+      "label": "no_shells_from_service_processes",
+      "description": "No interactive shell processes (bash, sh, zsh) are spawned by service processes (nginx, apache, mysqld, etc.). A shell child of a service process is a near-certain indicator of RCE.",
+      "evidence_hint": "ps -ef; for shell processes trace parent PID to service. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-06": {
+      "id": "PI-06",
+      "label": "zombie_count_normal",
+      "description": "Zombie process count is within normal bounds (< 3). Abnormal zombie accumulation indicates a crashing process in a loop, fork bomb remnant, or malware spawning abandoned children.",
+      "evidence_hint": "ps aux | grep -c ' Z '. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "PI-07": {
+      "id": "PI-07",
+      "label": "crontab_unchanged",
+      "description": "Crontab content (system and user) has not changed since the last baseline. New or modified cron entries are the most common persistence mechanism on Linux systems.",
+      "evidence_hint": "cat all crontabs | md5sum; compare to baseline. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "PI-08": {
+      "id": "PI-08",
+      "label": "no_ld_preload_hijacking",
+      "description": "/etc/ld.so.preload is absent and LD_PRELOAD is not set in the init environment. LD_PRELOAD hijacking is a classic rootkit and credential-harvesting technique that intercepts all library calls.",
+      "evidence_hint": "cat /etc/ld.so.preload; cat /proc/1/environ | grep LD_PRELOAD. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "LI-01": {
+      "id": "LI-01",
+      "label": "logging_daemon_running",
+      "description": "A logging daemon (syslog, rsyslog, journald) is running and collecting. Absent logging infrastructure means all log integrity wickets are structurally unknown — this is a fold.",
+      "evidence_hint": "pgrep rsyslogd; journalctl --no-pager -n 1. Evidence rank 1.",
+      "decay_class": "operational"
+    },
+    "LI-02": {
+      "id": "LI-02",
+      "label": "log_files_growing",
+      "description": "Log files have grown since the last observation. A log file that shrinks outside of rotation windows is a strong indicator of tampering or deliberate log wiping.",
+      "evidence_hint": "stat -c '%s' /var/log/syslog between observations. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "LI-03": {
+      "id": "LI-03",
+      "label": "auth_failure_rate_normal",
+      "description": "Authentication failure rate is within declared bounds. Anomalously high failure rates indicate active brute force, credential stuffing, or a compromised system attempting lateral movement.",
+      "evidence_hint": "grep -c 'Failed password' /var/log/auth.log in rolling window. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "LI-04": {
+      "id": "LI-04",
+      "label": "no_log_gaps",
+      "description": "Log entries are present in recent time windows. A gap in logging while the system was running indicates log tampering, logging service crash, or deliberate suppression.",
+      "evidence_hint": "journalctl --since '5 minutes ago' | wc -l. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "LI-05": {
+      "id": "LI-05",
+      "label": "auditd_active_with_rules",
+      "description": "The audit daemon is running with meaningful rules covering privileged actions. Without auditd, there is no tamper-evident record of file access, privilege escalation, or network connections.",
+      "evidence_hint": "pgrep auditd; auditctl -l | wc -l. Evidence rank 1.",
+      "decay_class": "operational"
+    },
+    "LI-06": {
+      "id": "LI-06",
+      "label": "logs_forwarded_to_remote",
+      "description": "Logs are forwarded to a remote SIEM or log aggregator. Local-only logs can be tampered by an attacker with root access. Remote forwarding provides tamper-evident audit trail.",
+      "evidence_hint": "Check rsyslog.conf for @@ entries; check filebeat/syslog-ng config. Evidence rank 3.",
+      "decay_class": "structural"
+    },
+    "LI-07": {
+      "id": "LI-07",
+      "label": "log_rotation_intact",
+      "description": "Log rotation is configured and running. Absent rotation or abnormally large log files indicate misconfiguration or deliberate suppression of log evidence.",
+      "evidence_hint": "cat /var/lib/logrotate/status; find /var/log -size +500M. Evidence rank 3.",
+      "decay_class": "structural"
+    },
+    "LI-08": {
+      "id": "LI-08",
+      "label": "wtmp_lastlog_intact",
+      "description": "wtmp and lastlog have not shrunk. These files record login history and are a primary target for attackers covering tracks. Shrinkage = likely tampering with utmpdump or wtmpclean.",
+      "evidence_hint": "stat -c '%s' /var/log/wtmp /var/log/lastlog between observations. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    }
+  },
+  "attack_paths": {
+    "filesystem_compromise_v1": {
+      "description": "System filesystem shows signs of compromise — binary tampering, unexpected SUID, or payload staging.",
+      "required_wickets": ["FI-01", "FI-02", "FI-04", "FI-07"],
+      "failure_class": "filesystem_integrity"
+    },
+    "process_compromise_v1": {
+      "description": "Running process state shows signs of compromise — unauthorized services, temp-path executables, or shell spawned by service.",
+      "required_wickets": ["PI-01", "PI-02", "PI-03", "PI-05"],
+      "failure_class": "process_integrity"
+    },
+    "persistence_mechanism_v1": {
+      "description": "Persistence mechanism detected — crontab change, new SUID, new UID 0 account, or LD_PRELOAD hijacking.",
+      "required_wickets": ["FI-02", "FI-07", "PI-07", "PI-08"],
+      "failure_class": "persistence"
+    },
+    "log_tampering_v1": {
+      "description": "Log infrastructure shows signs of tampering — shrunk log files, gaps, or wtmp modification.",
+      "required_wickets": ["LI-01", "LI-02", "LI-04", "LI-08"],
+      "failure_class": "log_integrity"
+    },
+    "weak_audit_posture_v1": {
+      "description": "Audit and logging posture is insufficient — no auditd rules, no remote forwarding, local-only logging.",
+      "required_wickets": ["LI-01", "LI-05", "LI-06"],
+      "failure_class": "audit_posture"
+    },
+    "full_system_integrity_v1": {
+      "description": "Complete system integrity assessment — filesystem, process, and log integrity all confirmed.",
+      "required_wickets": [
+        "FI-01", "FI-02", "FI-03", "FI-04", "FI-07", "FI-08",
+        "PI-01", "PI-02", "PI-03", "PI-05", "PI-07", "PI-08",
+        "LI-01", "LI-02", "LI-04", "LI-05"
+      ],
+      "failure_class": "full_integrity"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+# /etc/skg/data_sources.yaml
+# Data pipeline sources for SKG monitoring
+# chmod 640 /etc/skg/data_sources.yaml after editing
+
+data_sources:
+
+  # ── Banking example ────────────────────────────────────────────────────
+  # - url: postgresql://skg_reader:${DB_PASSWORD}@localhost/banking
+  #   table: transactions
+  #   workload_id: banking::transactions
+  #   contract: /etc/skg/contracts/transactions.json
+  #   attack_path_id: data_completeness_failure_v1
+  #   ttl_hours: 1
+
+  # ── Agriculture example ───────────────────────────────────────────────
+  # - url: postgresql://skg_reader:${DB_PASSWORD}@localhost/agri
+  #   table: sensor_readings
+  #   workload_id: agriculture::sensor_readings
+  #   attack_path_id: data_drift_undetected_v1
+  #   ttl_hours: 4
+
+  # ── Medical example ───────────────────────────────────────────────────
+  # - url: postgresql://skg_reader:${DB_PASSWORD}@localhost/ehr
+  #   table: patient_labs
+  #   workload_id: medical::patient_labs
+  #   contract: /etc/skg/contracts/patient_labs.json
+  #   attack_path_id: silent_data_corruption_v1
+  #   ttl_hours: 24
+
+  # ── SQLite local example ──────────────────────────────────────────────
+  # - url: sqlite:////var/lib/myapp/data.db
+  #   table: events
+  #   workload_id: local::events
+  #   attack_path_id: data_completeness_failure_v1
+
+# Pipeline topology bonds — declare relationships between stages
+# same_database bonds are inferred automatically from the URL
+# pipeline_topology:
+#   - from: banking::raw_transactions
+#     to:   banking::transactions
+#     type: upstream_of
+#   - from: banking::transactions
+#     to:   banking::daily_summary
+#     type: derived_from

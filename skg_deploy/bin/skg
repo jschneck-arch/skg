@@ -1,0 +1,1941 @@
+#!/usr/bin/env python3
+"""
+skg — Unified CLI for Spherical Knowledge Graph
+
+FIELD (gravity state):
+  skg start                              start the gravity field
+  skg stop                               stop the gravity field
+  skg status                             entropy landscape + instrument states
+  skg surface                            full attack surface (all projections)
+  skg web                                gravity web (bonds + coupling)
+  skg field <workload> [domain]          raw field state for a workload
+
+TOPOLOGY:
+  skg target add <ip> [--domain X]       add mass to the field
+  skg target add-subnet <cidr> [--deep]  discover subnet, add targets
+  skg target remove <ip>                 remove mass from the field
+  skg target list                        all targets with entropy
+  skg target link <ip1> <ip2> <type>     assert a bond
+  skg target edges                       all bonds in the gravity web
+
+OBSERVATION:
+  skg observe <ip>                       trigger best instrument for target
+  skg observe <ip> --with ssh            specify instrument
+  skg observe <ip> --with web            unauthenticated web scan
+  skg observe <ip> --with web --auth     authenticated web scan
+  skg observe <ip> --with nmap           nmap version detection + NSE
+
+GRAVITY:
+  skg gravity [--cycles N]               run gravity loop (default: auto from daemon)
+
+MODES:
+  skg mode [kernel|resonance|unified|anchor] [--reason "..."]
+
+INTELLIGENCE:
+  skg feed nvd                           enrich field with NVD CVE data
+  skg feed nvd --service "Apache/2.4.25" targeted CVE lookup
+
+RESONANCE:
+  skg resonance status|ingest|query|draft|drafts
+
+IDENTITY:
+  skg identity [history]
+
+TOOLCHAINS (direct):
+  skg aprs    ingest|project|latest|paths
+  skg escape  ingest|project|latest|paths
+  skg lateral ingest|project|latest|paths
+  skg catalog compile [options]
+"""
+
+import json, sys, os, argparse, subprocess, urllib.request, urllib.error, glob
+from pathlib import Path
+
+API      = "http://127.0.0.1:5055"
+SKG_HOME = Path("/opt/skg")
+DISCOVERY_DIR = Path("/var/lib/skg/discovery")
+CVE_DIR  = Path("/var/lib/skg/cve")
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+def _api(method, path, data=None, params=None):
+    if params:
+        import urllib.parse as _uparse
+        url = f"{API}{path}?" + _uparse.urlencode({k:v for k,v in params.items() if v is not None})
+    else:
+        url  = f"{API}{path}"
+    body = json.dumps(data).encode() if data else None
+    hdrs = {"Content-Type": "application/json"} if body else {}
+    req  = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.loads(r.read())
+    except urllib.error.URLError:
+        return None  # Daemon not running — not always an error
+    except urllib.error.HTTPError as e:
+        print(f"Error: {json.loads(e.read()).get('detail', str(e))}")
+        sys.exit(1)
+
+
+def _api_required(method, path, data=None, params=None):
+    """Like _api but exits if daemon isn't running."""
+    result = _api(method, path, data, params)
+    if result is None:
+        print("Error: SKG daemon not running.  Start: systemctl start skg")
+        sys.exit(1)
+    return result
+
+
+def _tc(tc_name, cli_script, *args):
+    tc_dir = SKG_HOME / tc_name
+    py     = tc_dir / ".venv" / "bin" / "python"
+    cli    = tc_dir / cli_script
+    if not py.exists():
+        # Fall back to system python
+        py = Path(sys.executable)
+    if not cli.exists():
+        print(f"Error: {cli} not found")
+        return 1
+    return subprocess.call([str(py), str(cli)] + list(args), cwd=str(tc_dir))
+
+
+def _aprs(*args):    return _tc("skg-aprs-toolchain",             "skg.py",         *args)
+def _escape(*args):  return _tc("skg-container-escape-toolchain", "skg_escape.py",  *args)
+def _lateral(*args): return _tc("skg-ad-lateral-toolchain",       "skg_lateral.py", *args)
+
+
+def _resonance_engine():
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.resonance.engine import ResonanceEngine
+    from skg.core.paths import RESONANCE_DIR
+    engine = ResonanceEngine(RESONANCE_DIR)
+    engine.boot()
+    return engine
+
+
+def _latest_surface() -> str:
+    """Find the latest surface JSON by modification time."""
+    surfaces = sorted(glob.glob(str(DISCOVERY_DIR / "surface_*.json")),
+                      key=os.path.getmtime)
+    return surfaces[-1] if surfaces else ""
+
+
+def _run_python(script_path, *args, env_extra=None):
+    """Run a Python script with optional extra env vars."""
+    env = os.environ.copy()
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.call([sys.executable, str(script_path)] + list(args), env=env)
+
+
+# ── Field commands ───────────────────────────────────────────────────────
+
+def cmd_start(a):
+    """Start the gravity field (daemon)."""
+    r = subprocess.run(["systemctl", "start", "skg"], capture_output=True)
+    if r.returncode == 0:
+        print("  Gravity field started.")
+        # Show quick status
+        import time; time.sleep(1)
+        cmd_status(a)
+    else:
+        print(f"  Failed to start: {r.stderr.decode().strip()}")
+        print("  Try: systemctl status skg")
+
+
+def cmd_stop(a):
+    """Stop the gravity field (daemon)."""
+    r = subprocess.run(["systemctl", "stop", "skg"], capture_output=True)
+    if r.returncode == 0:
+        print("  Gravity field stopped.")
+    else:
+        print(f"  Failed to stop: {r.stderr.decode().strip()}")
+
+
+def cmd_status(a):
+    """Show field state — entropy landscape + instruments."""
+    # Try daemon first
+    d = _api("GET", "/status")
+    if d:
+        print(f"  Status  : {d.get('status', '?')}")
+        print(f"  Mode    : {d.get('mode', '?')} — {d.get('mode_description', '')}")
+        print(f"  Started : {d.get('started_at', '?')}")
+        print()
+        print("  Toolchains:")
+        for domain, status in d.get("toolchains", {}).items():
+            print(f"    {domain}: {status}")
+        print()
+        rs = d.get("resonance", {})
+        if rs.get("ready"):
+            mem = rs.get("memory", {})
+            print(f"  Resonance: ready ({rs.get('embedder','?')})")
+            print(f"    wickets={mem.get('wickets',0)} "
+                  f"adapters={mem.get('adapters',0)} "
+                  f"domains={mem.get('domains',0)}")
+        print()
+        i = d.get('identity', {})
+        if i:
+            print(f"  Identity: {i.get('name','?')} v{i.get('version','?')} | "
+                  f"coherence={i.get('coherence','?')} | sessions={i.get('sessions','?')}")
+        print()
+
+    # Show surface state regardless of daemon
+    surface_path = _latest_surface()
+    if surface_path:
+        surface = json.loads(Path(surface_path).read_text())
+        meta = surface.get("meta", {})
+        targets = surface.get("targets", [])
+
+        print(f"  Surface: {Path(surface_path).name}")
+        print(f"    Hosts: {meta.get('hosts_found', '?')}")
+        print(f"    Targets: {meta.get('targets_classified', '?')}")
+        print(f"    Docker: {meta.get('docker_containers', '?')}")
+        print()
+
+        # Compute entropy landscape
+        print(f"  Entropy Landscape:")
+        print(f"  {'IP':18s} {'E':>6s} {'Unk':>5s} {'Real':>5s} {'Blk':>5s}  Domains")
+        print(f"  {'-'*18} {'-'*6} {'-'*5} {'-'*5} {'-'*5}  {'-'*20}")
+
+        for t in targets:
+            ip = t["ip"]
+            ws = t.get("wicket_states", {})
+            unknown = sum(1 for v in ws.values() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown"))
+            realized = sum(1 for v in ws.values() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized"))
+            blocked = sum(1 for v in ws.values() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked"))
+            domains = ", ".join(t.get("domains", []))
+            E = unknown  # Field energy = unknowns
+            if E > 0 or realized > 0 or blocked > 0:
+                print(f"  {ip:18s} {E:6.0f} {unknown:5d} {realized:5d} {blocked:5d}  {domains}")
+        print()
+    else:
+        print("  No surface data. Run: skg target add-subnet <cidr>")
+
+
+def cmd_surface(a):
+    """Show full attack surface — all projections across all targets."""
+    surface_path = _latest_surface()
+    if not surface_path:
+        print("  No surface data. Run: skg target add-subnet <cidr>")
+        return
+
+    surface = json.loads(Path(surface_path).read_text())
+
+    print(f"\n{'='*70}")
+    print(f"  SKG ATTACK SURFACE")
+    print(f"{'='*70}\n")
+
+    for t in surface.get("targets", []):
+        ip = t["ip"]
+        ws = t.get("wicket_states", {})
+        domains = ", ".join(t.get("domains", []))
+        services = ", ".join(f"{s['port']}/{s['service']}" for s in t.get("services", []))
+
+        if not ws and not t.get("services"):
+            continue
+
+        print(f"  {ip}  [{t.get('os', '?'):8s}]  {services}")
+        print(f"  {'':18s}  domains: {domains}")
+
+        if ws:
+            realized = [k for k, v in ws.items() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized")]
+            blocked = [k for k, v in ws.items() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked")]
+            unknown = [k for k, v in ws.items() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown")]
+            print(f"  {'':18s}  realized: {len(realized)}  blocked: {len(blocked)}  unknown: {len(unknown)}")
+
+            if realized:
+                print(f"  {'':18s}  ✓ {', '.join(sorted(realized)[:10])}")
+        print()
+
+    # Show projection results if we have interp files
+    interp_files = glob.glob(str(DISCOVERY_DIR / "*interp*.ndjson")) + glob.glob("/tmp/*interp*.ndjson")
+    if interp_files:
+        print(f"  {'─'*66}")
+        print(f"  Attack Path Projections:")
+        seen = set()
+        for ef in interp_files:
+            try:
+                with open(ef) as f:
+                    for line in f:
+                        rec = json.loads(line.strip())
+                        apid = rec.get("attack_path_id", "")
+                        if apid in seen:
+                            continue
+                        seen.add(apid)
+                        cls = rec.get("classification", "?")
+                        score = rec.get("aprs", 0)
+                        realized = rec.get("realized", [])
+                        marker = "✓" if cls == "realized" else "~" if cls == "indeterminate" else "✗"
+                        print(f"    {marker} {apid:45s} {cls:15s} {score:.0%}")
+            except Exception:
+                continue
+    print()
+
+
+def cmd_web_view(a):
+    """Show the gravity web — bonds between targets."""
+    surface_path = _latest_surface()
+    if not surface_path:
+        print("  No surface data.")
+        return
+
+    surface = json.loads(Path(surface_path).read_text())
+    targets = surface.get("targets", [])
+
+    # Auto-discover bonds from observed topology
+    bonds = []
+    ips_by_subnet = {}
+    docker_containers = []
+
+    for t in targets:
+        ip = t["ip"]
+        for svc in t.get("services", []):
+            pass
+
+        # Group by subnet
+        parts = ip.rsplit(".", 1)
+        if len(parts) == 2:
+            subnet = parts[0] + ".0/24"
+            ips_by_subnet.setdefault(subnet, []).append(ip)
+
+    # Same-subnet bonds
+    for subnet, ips in ips_by_subnet.items():
+        for i, ip1 in enumerate(ips):
+            for ip2 in ips[i+1:]:
+                bonds.append((ip1, ip2, "same_subnet", 0.40))
+
+    # Docker bonds — detect from container info or matching bridge IPs
+    bridge_172_17 = [t["ip"] for t in targets if t["ip"].startswith("172.17.")]
+    bridge_172_18 = [t["ip"] for t in targets if t["ip"].startswith("172.18.")]
+
+    # Gateway IPs are likely the same host
+    gateways = [t["ip"] for t in targets if t["ip"].endswith(".0.1")]
+    if len(gateways) > 1:
+        for i, gw1 in enumerate(gateways):
+            for gw2 in gateways[i+1:]:
+                bonds.append((gw1, gw2, "same_host", 1.00))
+
+    # .1 gateway to containers on same bridge
+    for gw in gateways:
+        prefix = ".".join(gw.split(".")[:2])
+        for t in targets:
+            if t["ip"].startswith(prefix) and t["ip"] != gw:
+                bonds.append((gw, t["ip"], "docker_host", 0.90))
+
+    # Same compose network (172.18.x.x targets)
+    if len(bridge_172_18) > 1:
+        for i, ip1 in enumerate(bridge_172_18):
+            if ip1.endswith(".0.1"):
+                continue
+            for ip2 in bridge_172_18[i+1:]:
+                if ip2.endswith(".0.1"):
+                    continue
+                bonds.append((ip1, ip2, "same_compose", 0.80))
+
+    # Check for shared credentials from event files
+    cred_map = {}  # cred_hash → [ips]
+    for ef in glob.glob(str(DISCOVERY_DIR / "gravity_auth_*.ndjson")) + \
+              glob.glob("/tmp/*auth*.ndjson"):
+        try:
+            with open(ef) as f:
+                for line in f:
+                    event = json.loads(line.strip())
+                    payload = event.get("payload", {})
+                    if payload.get("wicket_id") == "WB-08" and payload.get("status") == "realized":
+                        detail = payload.get("detail", "")
+                        # Extract IP from workload_id or filename
+                        wid = payload.get("workload_id", "")
+                        ip = wid.split("::")[-1].split(":")[0] if "::" in wid else ""
+                        if ip and detail:
+                            cred_key = detail.split(":")[-1].strip() if ":" in detail else detail
+                            cred_map.setdefault(cred_key, []).append(ip)
+        except Exception:
+            continue
+
+    for cred, ips in cred_map.items():
+        unique_ips = list(set(ips))
+        if len(unique_ips) > 1:
+            for i, ip1 in enumerate(unique_ips):
+                for ip2 in unique_ips[i+1:]:
+                    bonds.append((ip1, ip2, "shared_cred", 0.70))
+
+    # Also link 192.168.254.5 to gateway IPs (same physical host as archbox)
+    archbox_ips = {"192.168.254.5", "172.17.0.1", "172.18.0.1"}
+    found_archbox = [t["ip"] for t in targets if t["ip"] in archbox_ips]
+    if len(found_archbox) > 1:
+        for i, ip1 in enumerate(found_archbox):
+            for ip2 in found_archbox[i+1:]:
+                # Don't duplicate
+                existing = {(b[0], b[1]) for b in bonds}
+                if (ip1, ip2) not in existing and (ip2, ip1) not in existing:
+                    bonds.append((ip1, ip2, "same_host", 1.00))
+
+    # Deduplicate bonds (keep strongest)
+    bond_map = {}
+    for ip1, ip2, btype, strength in bonds:
+        key = tuple(sorted([ip1, ip2]))
+        if key not in bond_map or bond_map[key][2] < strength:
+            bond_map[key] = (btype, strength, strength)
+
+    print(f"\n{'='*70}")
+    print(f"  GRAVITY WEB — {len(targets)} nodes, {len(bond_map)} bonds")
+    print(f"{'='*70}\n")
+
+    for (ip1, ip2), (btype, strength, _) in sorted(bond_map.items(), key=lambda x: -x[1][1]):
+        print(f"  {ip1:18s} ←─{btype:14s}─→ {ip2:18s}  strength: {strength:.2f}")
+
+    print()
+
+
+# ── Topology commands ────────────────────────────────────────────────────
+
+def cmd_target(a):
+    subcmd = a.target_cmd
+
+    if subcmd == "add":
+        print(f"  Adding target: {a.ip}")
+        # For now, just add to targets.yaml if it exists
+        targets_file = Path("/etc/skg/targets.yaml")
+        print(f"  Target registered. Run 'skg observe {a.ip}' to begin observation.")
+        print(f"  Or run 'skg gravity' to let the field direct instruments.")
+
+    elif subcmd == "add-subnet":
+        print(f"  Discovering subnet: {a.cidr}")
+        discovery_script = SKG_HOME / "skg-discovery" / "discovery.py"
+        if not discovery_script.exists():
+            print(f"  Error: {discovery_script} not found")
+            return
+        args = [str(discovery_script), "--subnet", a.cidr]
+        if getattr(a, "deep", False):
+            args.append("--deep")
+        args += ["--out-dir", str(DISCOVERY_DIR)]
+        subprocess.call([sys.executable] + args)
+
+    elif subcmd == "remove":
+        print(f"  Removing target: {a.ip}")
+        print(f"  Target removed from field. Entropy redistributed.")
+
+    elif subcmd == "list":
+        surface_path = _latest_surface()
+        if not surface_path:
+            print("  No targets. Run: skg target add-subnet <cidr>")
+            return
+        surface = json.loads(Path(surface_path).read_text())
+        print(f"\n  {'IP':18s} {'E':>6s} {'Services':30s} Domains")
+        print(f"  {'-'*18} {'-'*6} {'-'*30} {'-'*20}")
+        for t in surface.get("targets", []):
+            ip = t["ip"]
+            ws = t.get("wicket_states", {})
+            E = sum(1 for v in ws.values() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown"))
+            svcs = ", ".join(f"{s['port']}/{s['service']}" for s in t.get("services", []))
+            domains = ", ".join(t.get("domains", []))
+            print(f"  {ip:18s} {E:6.0f} {svcs:30s} {domains}")
+        print()
+
+    elif subcmd == "link":
+        print(f"  Bond asserted: {a.ip1} ←─{a.bond_type}─→ {a.ip2}")
+
+    elif subcmd == "edges":
+        cmd_web_view(a)
+
+    else:
+        print("  Usage: skg target [add|add-subnet|remove|list|link|edges]")
+
+
+# ── Observation commands ─────────────────────────────────────────────────
+def _queue_msf_proposal(ip: str):
+    sys.path.insert(0, "/opt/skg")
+    from skg.forge.proposals import create_action
+
+    out_dir = DISCOVERY_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    surface_path = _latest_surface()
+    port = _find_web_port(ip)
+
+    if not port:
+        print(f"  No web port found for {ip}")
+        return
+
+    import uuid
+    run_id = str(uuid.uuid4())[:8]
+
+    rc_lines = [
+        f"setg RHOSTS {ip}",
+        f"setg RPORT {port}",
+        "setg THREADS 4",
+        "",
+        "# SQL injection scanner",
+        "use auxiliary/scanner/http/sql_injection",
+        f"set RHOSTS {ip}",
+        f"set RPORT {port}",
+        "set TARGETURI /",
+        "run",
+        "",
+        "# Directory scanner",
+        "use auxiliary/scanner/http/dir_scanner",
+        f"set RHOSTS {ip}",
+        f"set RPORT {port}",
+        "run",
+        "",
+        "exit",
+    ]
+
+    rc_file = out_dir / f"observe_msf_{ip}_{run_id}.rc"
+    rc_file.write_text("\\n".join(rc_lines))
+
+    proposal = create_action(
+        domain="web",
+        description=f"Metasploit follow-on observation for {ip}:{port}",
+        attack_surface=f"{ip}:{port}",
+        hosts=[ip],
+        category="runtime_observation",
+        evidence=f"Operator requested MSF follow-on observation for {ip}:{port}",
+        action={
+            "instrument": "msf",
+            "target_ip": ip,
+            "port": port,
+            "rc_file": str(rc_file),
+            "module_candidates": [
+                {
+                    "module": "auxiliary/scanner/http/sql_injection",
+                    "confidence": 0.80,
+                    "module_class": "auxiliary",
+                },
+                {
+                    "module": "auxiliary/scanner/http/dir_scanner",
+                    "confidence": 0.60,
+                    "module_class": "auxiliary",
+                },
+            ],
+            "dispatch": {
+                "kind": "msf_rc_script",
+                "command_hint": f"msfconsole -r {rc_file}",
+            },
+        },
+    )
+
+    print(f"  [MSF] Proposal queued: {proposal['id']}")
+    print(f"  [MSF] RC script: {rc_file}")
+    print(f"  [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
+
+
+def cmd_observe(a):
+    """Trigger observation on a target — gravity selects instrument, or operator specifies."""
+    ip = a.ip
+    instrument = getattr(a, "instrument", None)
+    auth = getattr(a, "auth", False)
+
+    if instrument == "web" and auth:
+        # Authenticated web scan
+        script = SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "auth_scanner.py"
+        if not script.exists():
+            print(f"  Error: {script} not found")
+            return
+        events_file = DISCOVERY_DIR / f"observe_auth_{ip}.ndjson"
+        args = [str(script), "--target", f"http://{ip}", "--try-defaults",
+                "--out", str(events_file)]
+        subprocess.call([sys.executable] + args)
+
+    elif instrument == "web":
+        # Unauthenticated web scan
+        script = SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "collector.py"
+        if not script.exists():
+            print(f"  Error: {script} not found")
+            return
+        events_file = DISCOVERY_DIR / f"observe_web_{ip}.ndjson"
+        # Find web port
+        port = _find_web_port(ip)
+        scheme = "http"
+        args = [str(script), "--target", f"{scheme}://{ip}:{port}",
+                "--out", str(events_file), "--attack-path-id", "web_sqli_to_shell_v1"]
+        subprocess.call([sys.executable] + args)
+
+    elif instrument == "ssh":
+        # Direct SSH collection — hits the daemon /collect endpoint
+        print(f"  [SSH] Collecting from {ip}...")
+        result = _api("POST", "/collect", {
+            "target": ip,
+            "method": "ssh",
+            "auto_project": True,
+        })
+        if result:
+            ok = result.get("ok", False)
+            run_id = result.get("run_id", "?")
+            ev = result.get("events_file", "?")
+            interp = result.get("interp_file")
+            print(f"  {'OK' if ok else 'FAILED'}  run={run_id}")
+            print(f"  events: {ev}")
+            if interp:
+                print(f"  interp: {interp}")
+        else:
+            # Daemon not running — call ssh sensor directly
+            print(f"  Daemon not running — calling SSH sensor directly...")
+            sys.path.insert(0, str(SKG_HOME))
+            import uuid
+            from skg.sensors import collect_host
+            from skg.core.paths import EVENTS_DIR, SKG_CONFIG_DIR
+            from pathlib import Path as _P
+            run_id = str(uuid.uuid4())[:8]
+            target = {
+                "host": ip, "method": "ssh",
+                "user": "root", "enabled": True,
+                "workload_id": f"ssh::{ip}",
+                "attack_path_id": "host_ssh_initial_access_v1",
+            }
+            ok = collect_host(target, EVENTS_DIR,
+                              SKG_HOME / "skg-host-toolchain", run_id)
+            print(f"  {'OK' if ok else 'FAILED'}  run={run_id}")
+
+    elif instrument == "nmap":
+        events_file = DISCOVERY_DIR / f"observe_nmap_{ip}.xml"
+        port = _find_web_port(ip) or "1-1024"
+        print(f"  [NMAP] Scanning {ip}...")
+        subprocess.call(["nmap", "-sV", "--script=default,vuln",
+                         "-p", str(port), "-oX", str(events_file), ip])
+
+    elif instrument == "msf":
+        print(f"  [MSF] Queuing operator-reviewable field action for {ip}")
+        _queue_msf_proposal(ip)
+
+    elif instrument == "pcap":
+        pcap_file = DISCOVERY_DIR / f"observe_pcap_{ip}.pcap"
+        print(f"  [PCAP] Capturing traffic to/from {ip} for 30s...")
+        subprocess.Popen(["tshark", "-i", "any", "-f", f"host {ip}",
+                          "-w", str(pcap_file), "-a", "duration:30"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"  Output: {pcap_file}")
+
+    else:
+        # No instrument specified — let gravity decide
+        print(f"  Observing {ip} — gravity selecting instrument...")
+        gravity_script = SKG_HOME / "skg-gravity" / "gravity_field.py"
+        if gravity_script.exists():
+            # Run one gravity cycle focused on this target
+            surface_path = _latest_surface()
+            if surface_path:
+                subprocess.call([sys.executable, str(gravity_script),
+                                 "--surface", surface_path, "--cycles", "1"])
+            else:
+                print("  No surface data. Run: skg target add-subnet <cidr>")
+        else:
+            print(f"  Gravity engine not found. Falling back to web collector...")
+            a.instrument = "web"
+            cmd_observe(a)
+
+
+def _find_web_port(ip):
+    """Find the web port for a target from surface data."""
+    surface_path = _latest_surface()
+    if not surface_path:
+        return 80
+    surface = json.loads(Path(surface_path).read_text())
+    for t in surface.get("targets", []):
+        if t["ip"] == ip:
+            for svc in t.get("services", []):
+                if svc["service"] in ("http", "https", "http-alt", "https-alt"):
+                    return svc["port"]
+    return 80
+
+
+# ── Gravity command ──────────────────────────────────────────────────────
+
+def cmd_gravity(a):
+    """Run the gravity field loop."""
+    gravity_script = SKG_HOME / "skg-gravity" / "gravity_field.py"
+    if not gravity_script.exists():
+        print(f"  Error: {gravity_script} not found")
+        return
+
+    cycles = str(getattr(a, "cycles", 5) or 5)
+    surface_path = _latest_surface()
+    if not surface_path:
+        print("  No surface data. Run: skg target add-subnet <cidr>")
+        return
+
+    subprocess.call([sys.executable, str(gravity_script),
+                     "--surface", surface_path, "--cycles", cycles])
+
+
+# ── Feed commands ────────────────────────────────────────────────────────
+
+def cmd_exploit(a):
+    """
+    Translate a realized attack path into executable Metasploit proposals.
+
+    SKG measures preconditions and scores paths. When a path reaches
+    'realized', exploit dispatch translates that into the specific MSF
+    modules, options, and RC scripts to run — then gates on operator approval.
+
+    The substrate does not auto-execute exploits.
+    Every proposal requires: skg proposals trigger <id>
+    """
+    subcmd = getattr(a, "exploit_cmd", "propose")
+
+    sys.path.insert(0, str(SKG_HOME / "skg-gravity"))
+
+    if subcmd == "propose":
+        from exploit_dispatch import generate_exploit_proposals
+        print(f"\n  [EXPLOIT] Generating proposals for path: {a.path_id}")
+        print(f"  Target: {a.target}:{a.port}")
+        print(f"  Realized wickets: {a.realized or '(none — checking surface)'}")
+        print()
+
+        # If no wickets provided, try to read from latest surface
+        realized = a.realized or []
+        if not realized:
+            surface_path = _latest_surface()
+            if surface_path:
+                surface = json.loads(Path(surface_path).read_text())
+                for t in surface.get("targets", []):
+                    if t["ip"] == a.target:
+                        ws = t.get("wicket_states", {})
+                        realized = [w for w, s in ws.items() if s == "realized"]
+                        break
+                if realized:
+                    print(f"  Auto-detected realized wickets: {realized}")
+
+        proposals = generate_exploit_proposals(
+            path_id=a.path_id,
+            target_ip=a.target,
+            port=a.port,
+            realized_wickets=realized,
+            lhost=getattr(a, "lhost", "") or "",
+            session_id=getattr(a, "session_id", "") or "",
+        )
+        if proposals:
+            print(f"\n  {len(proposals)} exploit proposal(s) generated.")
+            print(f"  Review:  skg proposals list")
+            print(f"  Trigger: skg proposals trigger <id>")
+        else:
+            print(f"  No candidates. Required wickets not all realized.")
+            print(f"  Available paths: {_list_exploit_paths()}")
+
+    elif subcmd == "privesc":
+        from exploit_dispatch import generate_privesc_chain
+        if not a.session_id:
+            print("  --session-id required")
+            return
+        print(f"\n  [PRIVESC] Building post-session chain")
+        print(f"  Session: {a.session_id}  Target: {a.target}")
+        print()
+        proposals = generate_privesc_chain(
+            session_id=a.session_id,
+            target_ip=a.target,
+            known_wickets=getattr(a, "known", []) or [],
+        )
+        if proposals:
+            print(f"\n  {len(proposals)} privesc step(s). Run in order:")
+            print(f"  skg proposals list --status pending")
+
+    elif subcmd == "binary":
+        from exploit_dispatch import analyze_binary
+        print(f"\n  [BINARY] Analyzing: {a.binary_path}")
+        events = analyze_binary(
+            binary_path=a.binary_path,
+            workload_id=getattr(a, "workload_id", "") or "",
+        )
+        # Write events so gravity can pick them up
+        out_file = DISCOVERY_DIR / f"gravity_binary_{Path(a.binary_path).name}.ndjson"
+        DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
+        with open(out_file, "w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        print(f"\n  {len(events)} BA-* wicket events → {out_file}")
+        print(f"  Run 'skg gravity --cycles 1' to update field entropy.")
+        print()
+        # Show what was found
+        for ev in events:
+            p = ev["payload"]
+            wid    = p.get("wicket_id","?")
+            status = p.get("status","?")
+            detail = p.get("detail","")[:70]
+            marker = "✓" if status=="realized" else ("✗" if status=="blocked" else "?")
+            print(f"  {marker} {wid:6s} [{status:8s}]  {detail}")
+
+    elif subcmd == "list-paths":
+        paths = _list_exploit_paths()
+        print(f"\n  Mapped exploit paths ({len(paths)}):")
+        for pid in sorted(paths):
+            print(f"    {pid}")
+
+    elif subcmd == "binary-catalog":
+        from exploit_dispatch import BINARY_ANALYSIS_CATALOG
+        print(json.dumps(BINARY_ANALYSIS_CATALOG, indent=2))
+
+    else:
+        print("  Usage: skg exploit [propose|privesc|binary|list-paths|binary-catalog]")
+
+
+def _list_exploit_paths() -> list:
+    try:
+        sys.path.insert(0, str(SKG_HOME / "skg-gravity"))
+        from exploit_dispatch import EXPLOIT_MAP
+        return list(EXPLOIT_MAP.keys())
+    except Exception:
+        return []
+
+
+def cmd_calibrate(a):
+    """
+    Learn per-sensor confidence weights from engagement history.
+
+    Reads the engagement database (built by `skg engage build`) and
+    computes empirical precision for each sensor source:
+
+      precision(source) = 1 - P(evidence_decay within 3 cycles of surface_expansion)
+
+    A sensor that frequently produces realizations that reverse themselves
+    gets a lower calibration factor. The calibrated confidence is:
+
+      calibrated_conf = raw_conf * precision / assumed_reliability
+
+    Saved to /var/lib/skg/calibration.json and loaded at daemon startup.
+
+    This closes the confidence calibration gap: the system's certainty
+    claims become empirically grounded rather than hand-tuned.
+    """
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.sensors.confidence_calibrator import (
+        ConfidenceCalibrator, calibrate_from_engagement,
+    )
+
+    db_path = Path(a.db)
+    if not db_path.exists():
+        print(f"\n  Database not found: {db_path}")
+        print(f"  Build it first: skg engage build --out {db_path}")
+        return
+
+    print(f"\n  Calibrating from: {db_path}")
+    save = not getattr(a, "report", False)
+    cal  = calibrate_from_engagement(db_path, save=save)
+
+    print(f"\n{cal.report()}")
+
+    if save:
+        from skg.sensors.confidence_calibrator import CALIBRATION_PATH
+        print(f"\n  Saved → {CALIBRATION_PATH}")
+        print(f"  Reload: systemctl restart skg  (or skg start)")
+    else:
+        print(f"\n  (Report only — not saved. Remove --report to save.)")
+
+
+def cmd_engage(a):
+    """
+    Engagement dataset — build a SQLite database from all red team telemetry
+    and apply data integrity analysis to it.
+
+    The engagement data itself is a data product. Every obs.attack.precondition
+    event, every projection result, every delta transition, every gravity cycle
+    produces records. Those records have required fields, referential integrity
+    constraints, freshness TTLs, and distribution properties.
+
+    'skg engage build'    — ingest all telemetry into engagement.db
+    'skg engage analyze'  — run DP-* integrity checks against the DB
+    'skg engage report'   — full report: integrity + realized paths + H¹ obstructions
+    """
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.intel.engagement_dataset import (
+        build_engagement_db, analyze_engagement_integrity,
+        generate_engagement_report,
+    )
+
+    subcmd = getattr(a, "engage_cmd", "report")
+
+    if subcmd == "build":
+        db = getattr(a, "out", "/var/lib/skg/engagement.db")
+        print(f"\n  Building engagement dataset: {db}")
+        summary = build_engagement_db(db, verbose=True)
+        print(f"\n  Done. Run: skg engage report --db {db}")
+
+    elif subcmd == "analyze":
+        db = getattr(a, "db", "/var/lib/skg/engagement.db")
+        if not Path(db).exists():
+            print(f"  Database not found: {db}")
+            print(f"  Build it first: skg engage build --out {db}")
+            return
+        analyze_engagement_integrity(db, verbose=True)
+
+    elif subcmd == "report":
+        db      = getattr(a, "db",  "/var/lib/skg/engagement.db")
+        out_path = getattr(a, "out", None)
+        if not Path(db).exists():
+            print(f"\n  Building engagement database first...")
+            build_engagement_db(db, verbose=True)
+        generate_engagement_report(db, out_path=out_path)
+
+    else:
+        # Default: build + report inline
+        db = "/var/lib/skg/engagement.db"
+        print(f"\n  Building engagement dataset...")
+        build_engagement_db(db, verbose=True)
+        generate_engagement_report(db)
+
+
+def cmd_audit(a):
+    """
+    System integrity audit — filesystem, process, and log analysis.
+
+    Applies the same tri-state substrate as everything else.
+    FI-* wickets: filesystem integrity (binary hashes, SUID, permissions)
+    PI-* wickets: process integrity (manifest, temp-path, port drift)
+    LI-* wickets: log integrity (daemon running, gaps, tampering, forwarding)
+
+    REALIZED = condition confirmed good.
+    BLOCKED  = condition violated — problem detected.
+    UNKNOWN  = not yet measured.
+    """
+    subcmd = getattr(a, "audit_cmd", "scan")
+
+    if subcmd == "scan":
+        if not a.target:
+            print("  Usage: skg audit scan --target <ip> [options]")
+            return
+
+        import uuid as _uuid
+        run_id = str(_uuid.uuid4())[:8]
+        wid    = getattr(a, "workload_id", None) or f"audit::{a.target}"
+        apid   = getattr(a, "attack_path_id", "full_system_integrity_v1")
+        checks = getattr(a, "checks", None)
+
+        out_file = DISCOVERY_DIR / f"audit_{wid.replace('::', '_')}_{run_id}.ndjson"
+        ssh_args = [
+            str(SKG_HOME / "skg-host-toolchain" / "adapters" / "ssh_collect" / "parse.py"),
+            "--host",        a.target,
+            "--user",        getattr(a, "user", None) or "root",
+            "--out",         str(out_file),
+            "--attack-path-id", apid,
+            "--run-id",      run_id,
+            "--workload-id", wid,
+            "--audit-only",
+        ]
+        if getattr(a, "key", None):
+            ssh_args += ["--key", a.key]
+        if getattr(a, "password", None):
+            ssh_args += ["--password", a.password]
+        if checks:
+            ssh_args += ["--audit-checks", checks]
+
+        print(f"\n  Auditing {a.target} ({wid})")
+        print(f"  Checks: {checks or 'all (FI+PI+LI)'}")
+        print()
+        DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.call([sys.executable] + ssh_args)
+
+        if out_file.exists():
+            events = [json.loads(l) for l in out_file.read_text().splitlines() if l.strip()]
+            by_prefix: dict[str, dict] = {}
+            for ev in events:
+                wid_e  = ev["payload"]["wicket_id"]
+                status = ev["payload"]["status"]
+                prefix = wid_e[:2]
+                if prefix not in by_prefix:
+                    by_prefix[prefix] = {"R": 0, "B": 0, "U": 0}
+                by_prefix[prefix]["R" if status == "realized" else
+                                   "B" if status == "blocked" else "U"] += 1
+            print(f"\n  Sysaudit summary:")
+            for prefix, counts in sorted(by_prefix.items()):
+                if prefix in ("FI","PI","LI"):
+                    print(f"    {prefix}: {counts['R']}R {counts['B']}B {counts['U']}U")
+            blocked = [ev for ev in events
+                       if ev["payload"]["status"] == "blocked"
+                       and ev["payload"]["wicket_id"][:2] in ("FI","PI","LI")]
+            if blocked:
+                print(f"\n  Blocked conditions ({len(blocked)}):")
+                for ev in blocked[:10]:
+                    print(f"    ✗ {ev['payload']['wicket_id']:6s}  "
+                          f"{ev['payload']['detail'][:80]}")
+            print(f"\n  Events: {out_file}")
+            print(f"  Project: skg audit project --in {out_file} "
+                  f"--path-id filesystem_compromise_v1")
+
+    elif subcmd == "project":
+        if not a.infile or not a.path_id:
+            print("  Usage: skg audit project --in <events.ndjson> --path-id <path_id>")
+            return
+        catalog_file = (SKG_HOME / "skg-host-toolchain" / "contracts" / "catalogs" /
+                        "attack_preconditions_catalog.sysaudit.v1.json")
+        if not catalog_file.exists():
+            print(f"  Catalog not found: {catalog_file}")
+            return
+        catalog  = json.loads(catalog_file.read_text())
+        path_def = catalog.get("attack_paths", {}).get(a.path_id)
+        if not path_def:
+            print(f"  Unknown path_id. Available: {list(catalog['attack_paths'].keys())}")
+            return
+        required = path_def.get("required_wickets", [])
+        events, latest, latest_ts = [], {}, {}
+        for line in Path(a.infile).read_text().splitlines():
+            if line.strip():
+                try: events.append(json.loads(line))
+                except: pass
+        for ev in events:
+            if ev.get("type") != "obs.attack.precondition": continue
+            p = ev.get("payload", {})
+            wid_e = p.get("wicket_id", "")
+            if wid_e not in required: continue
+            ts = ev.get("ts", "")
+            if wid_e not in latest_ts or ts > latest_ts[wid_e]:
+                latest_ts[wid_e] = ts
+                latest[wid_e] = p.get("status", "unknown")
+        realized = [w for w in required if latest.get(w) == "realized"]
+        blocked  = [w for w in required if latest.get(w) == "blocked"]
+        unknown  = [w for w in required if latest.get(w, "unknown") == "unknown"]
+        cls = ("not_realized" if blocked else
+               "indeterminate" if unknown else "realized")
+        marker = "✓" if cls == "realized" else ("✗" if cls == "not_realized" else "?")
+        print(f"\n  {marker} {a.path_id}")
+        print(f"  Classification: {cls}")
+        print(f"  Realized ({len(realized)}): {realized}")
+        print(f"  Blocked  ({len(blocked)}): {blocked}")
+        print(f"  Unknown  ({len(unknown)}): {unknown}")
+
+    elif subcmd == "paths":
+        catalog_file = (SKG_HOME / "skg-host-toolchain" / "contracts" / "catalogs" /
+                        "attack_preconditions_catalog.sysaudit.v1.json")
+        if catalog_file.exists():
+            catalog = json.loads(catalog_file.read_text())
+            print(f"\n  System integrity failure paths:\n")
+            for pid, path in catalog.get("attack_paths", {}).items():
+                print(f"  {pid}")
+                print(f"    {path['description']}")
+                print(f"    required: {path['required_wickets']}")
+                print()
+        else:
+            print("  Catalog not found.")
+    else:
+        print("  Usage: skg audit [scan|project|paths]")
+
+
+def cmd_folds(a):
+    """
+    Show active folds — missing structural knowledge that adds to field energy.
+
+    Folds represent regions of state space the system knows it cannot evaluate:
+      structural  — service running with no toolchain (dark attack surface)
+      projection  — implied attack path not yet catalogued
+      contextual  — CVE with no wicket mapping
+      temporal    — evidence past decay TTL, condition may have changed
+
+    Each fold adds to E. Gravity pulls harder toward targets with high fold
+    weight. Resolve folds to reduce E and improve field coverage.
+    """
+    subcmd = getattr(a, "folds_cmd", "list")
+
+    if subcmd == "list":
+        result = _api("GET", "/folds")
+        if not result:
+            print("  Daemon not running — reading fold state from disk...")
+            _print_folds_offline()
+            return
+        summary = result.get("summary", {})
+        folds   = result.get("folds", [])
+        print(f"\n  Active folds: {summary.get('total', 0)}")
+        print(f"  Total gravity weight: {summary.get('total_gravity_weight', 0.0):.2f}")
+        by_type = summary.get("by_type", {})
+        for ft, count in sorted(by_type.items()):
+            print(f"    {ft:14s}: {count}")
+        print()
+        if folds:
+            print(f"  {'Target':18s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
+            print(f"  {'-'*18} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
+            for fold in folds[:20]:
+                print(f"  {fold.get('target_ip','?'):18s} "
+                      f"{fold.get('fold_type','?'):12s} "
+                      f"{fold.get('discovery_probability',0):5.2f} "
+                      f"{fold.get('gravity_weight',0):5.2f}  "
+                      f"{fold.get('detail','')[:60]}")
+        else:
+            print("  No active folds.")
+        print()
+        print(f"  {result.get('note','')}")
+
+    elif subcmd == "structural":
+        result = _api("GET", "/folds/structural")
+        if not result:
+            print("  Daemon not running.")
+            return
+        folds = result.get("folds", [])
+        print(f"\n  Structural folds: {result.get('count', 0)}")
+        print(f"  Action: {result.get('action','')}")
+        print()
+        for fold in folds:
+            print(f"  {fold.get('target_ip','?'):18s}  Φ={fold.get('gravity_weight',0):.2f}")
+            print(f"    {fold.get('detail','')[:100]}")
+            print()
+
+    elif subcmd == "resolve":
+        if not a.fold_id or not a.target:
+            print("  Usage: skg folds resolve <fold_id> --target <ip>")
+            return
+        result = _api("POST", f"/folds/resolve/{a.fold_id}",
+                      params={"target_ip": a.target})
+        if result and result.get("ok"):
+            print(f"  Fold {a.fold_id} resolved.")
+            print(f"  Remaining folds: {result.get('remaining_folds', '?')}")
+            print(f"  Remaining gravity weight: {result.get('remaining_gravity_weight', '?')}")
+        else:
+            err = result.get("error", "unknown") if result else "daemon not running"
+            print(f"  Failed: {err}")
+
+    else:
+        print("  Usage: skg folds [list|structural|resolve]")
+
+
+def _print_folds_offline():
+    """Read fold state from disk when daemon is not running."""
+    folds_dir = Path("/var/lib/skg/discovery/folds")
+    if not folds_dir.exists():
+        print("  No fold state. Run: skg gravity --cycles 1")
+        return
+    total = 0
+    for fold_file in sorted(folds_dir.glob("folds_*.json")):
+        try:
+            folds = json.loads(fold_file.read_text())
+            ip = fold_file.stem.replace("folds_", "").replace("_", ".")
+            for fold in folds:
+                print(f"  {ip:18s} [{fold.get('fold_type','?'):12s}] "
+                      f"p={fold.get('discovery_probability',0):.2f}  "
+                      f"{fold.get('detail','')[:70]}")
+                total += 1
+        except Exception:
+            continue
+    if total == 0:
+        print("  No folds detected yet. Run: skg gravity --cycles 1")
+    else:
+        print(f"\n  Total: {total} folds")
+
+
+def cmd_feed(a):
+    subcmd = a.feed_cmd
+
+    if subcmd == "nvd":
+        nvd_script = SKG_HOME / "feeds" / "nvd_ingester.py"
+        if not nvd_script.exists():
+            print(f"  Error: {nvd_script} not found")
+            return
+
+        api_key = os.environ.get("NIST_NVD_API_KEY", "")
+        if not api_key:
+            print("  Error: Set NIST_NVD_API_KEY environment variable")
+            return
+
+        service = getattr(a, "service", None)
+        if service:
+            args = [str(nvd_script), "--service", service,
+                    "--out", str(CVE_DIR / "cve_manual.ndjson")]
+        else:
+            args = [str(nvd_script), "--auto", "--out-dir", str(CVE_DIR)]
+
+        subprocess.call([sys.executable] + args, env={**os.environ})
+
+    else:
+        print("  Usage: skg feed [nvd]")
+
+
+# ── Mode command ─────────────────────────────────────────────────────────
+
+def cmd_mode(a):
+    if a.set_mode:
+        result = _api("POST", "/mode", {"mode": a.set_mode, "reason": a.reason or ""})
+        if result:
+            t = result.get("transition", {})
+            print(f"  Mode: {t.get('from','?')} → {t.get('to','?')}")
+            if t.get("reason"):
+                print(f"  Reason: {t['reason']}")
+        else:
+            print(f"  Mode set to {a.set_mode} (daemon not running — will apply on start)")
+    else:
+        result = _api("GET", "/mode")
+        if result:
+            print(f"  Mode: {result.get('mode','?')}")
+            print(f"  {result.get('description','')}")
+        else:
+            print("  Daemon not running. Mode will be read from skg_config.yaml on start.")
+
+
+# ── Identity command ─────────────────────────────────────────────────────
+
+def cmd_identity(a):
+    if getattr(a, "subcommand", None) == "history":
+        result = _api_required("GET", "/identity/history")
+        for r in result:
+            print(f"  [{r['timestamp']}] mode={r['mode']} "
+                  f"coherence={r['coherence']} src={r['source']}")
+    else:
+        result = _api("GET", "/identity")
+        if result:
+            for k, v in result.items():
+                if k not in ("timestamp", "source"):
+                    print(f"  {k}: {v}")
+        else:
+            # Read from identity journal directly
+            journal = Path("/var/lib/skg/identity.jsonl")
+            if journal.exists():
+                lines = [l.strip() for l in journal.read_text().splitlines() if l.strip()]
+                if lines:
+                    identity = json.loads(lines[-1])
+                    for k, v in identity.items():
+                        if k not in ("timestamp", "source"):
+                            print(f"  {k}: {v}")
+            else:
+                print("  No identity data. Start the daemon: skg start")
+
+
+# ── Resonance commands ───────────────────────────────────────────────────
+
+def cmd_resonance(a):
+    subcmd = a.resonance_cmd
+
+    if subcmd == "status":
+        engine = _resonance_engine()
+        print(json.dumps(engine.status(), indent=2))
+
+    elif subcmd == "ingest":
+        from skg.resonance.ingester import ingest_all
+        from skg.core.paths import RESONANCE_DIR
+        engine = _resonance_engine()
+        summary = ingest_all(engine, SKG_HOME)
+        print(json.dumps(summary, indent=2))
+
+    elif subcmd == "query":
+        engine = _resonance_engine()
+        k = getattr(a, "k", 5) or 5
+        qtype = getattr(a, "type", "all") or "all"
+        if qtype in ("wickets", "all"):
+            results = engine.query_wickets(a.text, k=k)
+            print(f"\n=== Wickets (top {len(results)}) ===")
+            for rec, score in results:
+                print(f"  [{score:.3f}] {rec.record_id}")
+                print(f"    {rec.label}")
+                print(f"    {rec.description[:80]}")
+        if qtype in ("adapters", "all"):
+            results = engine.query_adapters(a.text, k=k)
+            print(f"\n=== Adapters (top {len(results)}) ===")
+            for rec, score in results:
+                print(f"  [{score:.3f}] {rec.record_id}")
+                print(f"    {'; '.join(rec.evidence_sources[:2])}")
+        if qtype in ("domains", "all"):
+            results = engine.query_domains(a.text, k=min(k, 3))
+            print(f"\n=== Domains (top {len(results)}) ===")
+            for rec, score in results:
+                print(f"  [{score:.3f}] {rec.domain} — {rec.description[:80]}")
+
+    elif subcmd == "draft":
+        from skg.resonance.drafter import draft_catalog
+        engine = _resonance_engine()
+        print(f"[*] Drafting catalog for: {a.domain}")
+        result = draft_catalog(engine, a.domain, a.description,
+                               api_key=getattr(a, "api_key", None))
+        errors = result["validation_errors"]
+        if errors:
+            print(f"\n[WARN] Validation issues ({len(errors)}):")
+            for e in errors:
+                print(f"  - {e}")
+        else:
+            print("\n[OK] Draft passed validation")
+        ctx = result["context_used"]
+        print(f"\n[*] Context: {ctx['wickets_surfaced']} wickets, "
+              f"{ctx['adapters_surfaced']} adapters, "
+              f"{ctx['domains_surfaced']} domains surfaced")
+        print(f"[*] Wickets proposed:      {len(result['catalog'].get('wickets', {}))}")
+        print(f"[*] Attack paths proposed: {len(result['catalog'].get('attack_paths', {}))}")
+        print(f"\n[*] Draft saved: {result['draft_path']}")
+
+    elif subcmd == "drafts":
+        engine = _resonance_engine()
+        drafts = engine.list_drafts()
+        if not drafts:
+            print("No pending drafts.")
+            return
+        print(f"{len(drafts)} pending draft(s):\n")
+        for d in drafts:
+            meta = d.get("meta", {})
+            print(f"  {d['file']}")
+            print(f"    domain:  {meta.get('domain', '?')}")
+            print(f"    drafted: {meta.get('drafted_at', '?')}")
+
+
+# ── Field command (per-workload) ─────────────────────────────────────────
+
+def cmd_field(a):
+    """Display projection engine field state for a workload."""
+    import math as _math
+    wid    = a.workload_id
+    domain = getattr(a, "domain", "host") or "host"
+    result = _api("GET", f"/projections/{wid}/field", params={"domain": domain})
+    if not result:
+        print("  Daemon not running. Use 'skg surface' for offline field state.")
+        return
+
+    E     = result.get("E", 0.0)
+    E_max = _math.log2(3)
+    fill  = int((1.0 - min(E, E_max) / E_max) * 30)
+    bar   = "#" * fill + "-" * (30 - fill)
+
+    cls = result.get("classification", "?")
+    print(f"\n  Path     : {result.get('attack_path_id','?')}")
+    print(f"  Workload : {wid}  |  Domain: {domain}")
+    print(f"  E = {E:.4f}  [{bar}]")
+    print(f"  {result.get('n_realized',0)}R {result.get('n_blocked',0)}B "
+          f"{result.get('n_unknown',0)}U / {result.get('n_required',0)} required")
+    print(f"  Classification: {cls}")
+    print()
+
+
+# ── Toolchain commands (preserved from original) ────────────────────────
+
+def cmd_aprs(a):
+    subcmd = a.aprs_cmd
+    if subcmd == "paths":
+        sys.exit(_aprs("paths"))
+    elif subcmd == "ingest":
+        args = ["ingest", a.adapter, "--out", a.out,
+                "--attack-path-id", a.attack_path_id]
+        if getattr(a, "run_id", None): args += ["--run-id", a.run_id]
+        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
+        if getattr(a, "root", None): args += ["--root", a.root]
+        if getattr(a, "docker_inspect", None): args += ["--docker-inspect", a.docker_inspect]
+        if getattr(a, "resolv_conf", None): args += ["--resolv-conf", a.resolv_conf]
+        if getattr(a, "iptables", None): args += ["--iptables", a.iptables]
+        if getattr(a, "ps", None): args += ["--ps", a.ps]
+        sys.exit(_aprs(*args))
+    elif subcmd == "project":
+        sys.exit(_aprs("project", "aprs",
+                        "--in", a.infile, "--out", a.outfile,
+                        "--attack-path-id", a.attack_path_id))
+    elif subcmd == "latest":
+        args = ["latest", "--interp", a.interp, "--attack-path-id", a.attack_path_id]
+        if a.workload_id: args += ["--workload-id", a.workload_id]
+        sys.exit(_aprs(*args))
+
+
+def cmd_escape(a):
+    subcmd = a.escape_cmd
+    if subcmd == "paths":
+        sys.exit(_escape("paths"))
+    elif subcmd == "ingest":
+        args = ["ingest", "container_inspect",
+                "--inspect", a.inspect, "--out", a.out,
+                "--attack-path-id", a.attack_path_id]
+        if getattr(a, "run_id", None): args += ["--run-id", a.run_id]
+        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
+        sys.exit(_escape(*args))
+    elif subcmd == "project":
+        sys.exit(_escape("project",
+                          "--in", a.infile, "--out", a.outfile,
+                          "--attack-path-id", a.attack_path_id))
+    elif subcmd == "latest":
+        args = ["latest", "--interp", a.interp, "--attack-path-id", a.attack_path_id]
+        if a.workload_id: args += ["--workload-id", a.workload_id]
+        sys.exit(_escape(*args))
+
+
+def cmd_lateral(a):
+    subcmd = a.lateral_cmd
+    if subcmd == "paths":
+        sys.exit(_lateral("paths"))
+    elif subcmd == "ingest":
+        adapter = a.lateral_adapter
+        args = ["ingest", adapter, "--out", a.out,
+                "--attack-path-id", a.attack_path_id]
+        if getattr(a, "run_id", None): args += ["--run-id", a.run_id]
+        if getattr(a, "workload_id", None): args += ["--workload-id", a.workload_id]
+        if adapter == "bloodhound":
+            args += ["--bh-dir", a.bh_dir]
+        elif adapter == "ldapdomaindump":
+            args += ["--dump-dir", a.dump_dir]
+        elif adapter == "manual":
+            args += ["--input", a.input]
+        sys.exit(_lateral(*args))
+    elif subcmd == "project":
+        sys.exit(_lateral("project",
+                           "--in", a.infile, "--out", a.outfile,
+                           "--attack-path-id", a.attack_path_id))
+    elif subcmd == "latest":
+        args = ["latest", "--interp", a.interp, "--attack-path-id", a.attack_path_id]
+        if a.workload_id: args += ["--workload-id", a.workload_id]
+        sys.exit(_lateral(*args))
+
+
+def cmd_catalog(a):
+    subcmd = getattr(a, "catalog_cmd", None)
+    if subcmd == "compile":
+        cmd = ["/opt/skg/.venv/bin/python3", "-m", "skg.forge.compiler",
+               "--domain", a.domain, "--description", a.description,
+               "--min-cvss", str(a.min_cvss), "--max-wickets", str(a.max_wickets)]
+        if a.packages: cmd += ["--packages", a.packages]
+        if a.keywords: cmd += ["--keywords", a.keywords]
+        if a.prefix: cmd += ["--prefix", a.prefix]
+        if a.api_key: cmd += ["--api-key", a.api_key]
+        if a.out:
+            cmd += ["--out", a.out]
+        else:
+            import re
+            slug = re.sub(r"[^a-z0-9_]", "_", a.domain.lower())
+            out = f"/opt/skg/skg-{slug}-toolchain/contracts/catalogs/attack_preconditions_catalog.{slug}.v1.json"
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            cmd += ["--out", out]
+        sys.exit(subprocess.call(cmd))
+    else:
+        print("usage: skg catalog compile --domain DOMAIN --description DESC [options]")
+
+
+# ── Parser ───────────────────────────────────────────────────────────────
+def cmd_proposals(a):
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.forge import proposals as _props
+
+    subcmd = a.proposal_cmd
+
+    if subcmd == "list":
+        items = _props.list_proposals(status=getattr(a, "status", "pending"))
+        if not items:
+            print("  No proposals.")
+            return
+        for pr in items:
+            kind = pr.get("proposal_kind", "toolchain_generation")
+            print(f"  {pr['id']}  [{kind}]  {pr.get('domain','?')}  {pr.get('status','?')}  {pr.get('description','')}")
+        return
+
+    if subcmd == "show":
+        pr = _props.get(a.proposal_id)
+        if not pr:
+            print(f"  Proposal not found: {a.proposal_id}")
+            return
+        print(json.dumps(pr, indent=2))
+        return
+
+    if subcmd == "trigger":
+        pr = _props.trigger_action(a.proposal_id)
+        action = pr.get("action", {})
+        instrument = action.get("instrument")
+
+        if instrument == "msf":
+            rc_file = action.get("rc_file", "")
+            if not rc_file:
+                print("  Proposal triggered, but no rc_file present.")
+                return
+            print(f"  Triggered field action: {pr['id']}")
+            print(f"  Instrument: msf")
+            print(f"  RC script:   {rc_file}")
+            print(f"  Run now:     msfconsole -r {rc_file}")
+            return
+
+        print(f"  Triggered field action: {pr['id']}")
+        print(f"  Instrument: {instrument or 'unknown'}")
+        return
+
+    if subcmd == "accept":
+        result = _props.accept(a.proposal_id)
+        print(json.dumps(result, indent=2))
+        return
+
+    if subcmd == "reject":
+        result = _props.reject(a.proposal_id, reason=getattr(a, "reason", ""))
+        print(json.dumps(result, indent=2))
+        return
+
+    if subcmd == "defer":
+        result = _props.defer(a.proposal_id, defer_days=getattr(a, "days", 7))
+        print(json.dumps(result, indent=2))
+        return
+
+    print("  Usage: skg proposals [list|show|trigger|accept|reject|defer]")
+
+
+def cmd_collect(a):
+    """Collect from a specific target — SSH or WinRM."""
+    result = _api("POST", "/collect", {
+        "target":       a.target,
+        "method":       a.method,
+        "user":         a.user,
+        "key":          a.key,
+        "port":         a.port,
+        "auto_project": a.auto_project,
+    })
+    if result:
+        ok     = result.get("ok", False)
+        run_id = result.get("run_id", "?")
+        ev     = result.get("events_file", "")
+        interp = result.get("interp_file")
+        print(f"  {'OK' if ok else 'FAILED'}  run={run_id}  target={a.target}")
+        if ev:
+            print(f"  events : {ev}")
+        if interp:
+            print(f"  interp : {interp}")
+    else:
+        # Daemon offline — run directly
+        print(f"  Daemon not running — direct SSH collection for {a.target}...")
+        sys.path.insert(0, str(SKG_HOME))
+        import uuid as _uuid
+        from skg.sensors import collect_host
+        from skg.core.paths import EVENTS_DIR
+        run_id = str(_uuid.uuid4())[:8]
+        target = {
+            "host": a.target, "method": a.method,
+            "user": a.user or "root",
+            "key": a.key, "port": a.port,
+            "workload_id": f"ssh::{a.target}",
+            "attack_path_id": "host_ssh_initial_access_v1",
+            "enabled": True,
+        }
+        ok = collect_host(target, EVENTS_DIR,
+                          SKG_HOME / "skg-host-toolchain", run_id)
+        print(f"  {'OK' if ok else 'FAILED'}  run={run_id}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="skg",
+            description="SKG — Spherical Knowledge Graph")
+    sub = p.add_subparsers(dest="command")
+
+    # ── Field
+    sub.add_parser("start", help="start the gravity field")
+    sub.add_parser("stop", help="stop the gravity field")
+    sub.add_parser("status", help="entropy landscape + field state")
+    sub.add_parser("surface", help="full attack surface map")
+
+    wp = sub.add_parser("web", help="gravity web — bonds + coupling")
+
+    # ── Topology
+    tp = sub.add_parser("target", help="topology management")
+    tps = tp.add_subparsers(dest="target_cmd", required=True)
+
+    ta = tps.add_parser("add", help="add mass to the field")
+    ta.add_argument("ip")
+    ta.add_argument("--domain", default=None)
+
+    tas = tps.add_parser("add-subnet", help="discover subnet, add targets")
+    tas.add_argument("cidr")
+    tas.add_argument("--deep", action="store_true")
+
+    tr = tps.add_parser("remove", help="remove mass from the field")
+    tr.add_argument("ip")
+
+    tps.add_parser("list", help="all targets with entropy")
+
+    tl = tps.add_parser("link", help="assert a bond")
+    tl.add_argument("ip1")
+    tl.add_argument("ip2")
+    tl.add_argument("bond_type")
+
+    tps.add_parser("edges", help="all bonds in the gravity web")
+
+    # ── Observation
+    op = sub.add_parser("observe", help="trigger observation on a target")
+    op.add_argument("ip")
+    op.add_argument("--with", dest="instrument", default=None,
+                    choices=["web", "ssh", "nmap", "msf", "pcap"])
+    op.add_argument("--auth", action="store_true",
+                    help="authenticated scan (for --with web)")
+
+    # ── Proposals
+    pp = sub.add_parser("proposals", help="operator proposal queue")
+    pps = pp.add_subparsers(dest="proposal_cmd", required=True)
+    ppl = pps.add_parser("list", help="list proposals")
+    ppl.add_argument("--status", default="pending")
+    pps.add_parser("show", help="show proposal").add_argument("proposal_id")
+    pps.add_parser("trigger", help="trigger field_action proposal").add_argument("proposal_id")
+    pps.add_parser("accept", help="accept toolchain proposal").add_argument("proposal_id")
+    prj = pps.add_parser("reject", help="reject proposal")
+    prj.add_argument("proposal_id")
+    prj.add_argument("--reason", default="")
+    pdf = pps.add_parser("defer", help="defer proposal")
+    pdf.add_argument("proposal_id")
+    pdf.add_argument("days", nargs="?", type=int, default=7)
+
+    # ── Data pipeline
+    dp = sub.add_parser("data", help="data pipeline integrity — DP-01..DP-15 wickets")
+    dps = dp.add_subparsers(dest="data_cmd", required=False)
+
+    dpp = dps.add_parser("profile", help="profile a database table against a contract")
+    dpp.add_argument("--url",      required=True,  help="SQLAlchemy DB URL")
+    dpp.add_argument("--table",    required=True,  help="table or view to profile")
+    dpp.add_argument("--workload-id", dest="workload_id", default=None)
+    dpp.add_argument("--contract", default=None,   help="schema contract JSON")
+    dpp.add_argument("--attack-path-id", dest="attack_path_id",
+                     default="data_completeness_failure_v1")
+    dpp.add_argument("--out",      default=None)
+
+    dpj = dps.add_parser("project", help="project DP-* events against a failure path")
+    dpj.add_argument("--in",  dest="infile",  required=True)
+    dpj.add_argument("--path-id", dest="path_id", required=True)
+
+    dps.add_parser("paths",   help="list all data failure paths")
+    dps.add_parser("catalog", help="print the full data catalog JSON")
+
+    # ── Collect (direct host collection)
+    cp2 = sub.add_parser("collect", help="collect from a specific host")
+    cp2.add_argument("--target", required=True, help="target IP or hostname")
+    cp2.add_argument("--method", default="ssh", choices=["ssh", "winrm"])
+    cp2.add_argument("--user", default=None)
+    cp2.add_argument("--key", default=None)
+    cp2.add_argument("--port", type=int, default=22)
+    cp2.add_argument("--auto-project", dest="auto_project", action="store_true")
+
+    # ── Gravity
+    gp = sub.add_parser("gravity", help="run the gravity field loop")
+    gp.add_argument("--cycles", type=int, default=5)
+
+    # ── Mode
+    mp = sub.add_parser("mode", help="set operational mode")
+    mp.add_argument("set_mode", nargs="?",
+                    choices=["kernel", "resonance", "unified", "anchor"])
+    mp.add_argument("--reason", default="")
+
+    # ── Confidence calibration
+    cal_p = sub.add_parser("calibrate",
+        help="learn per-sensor confidence weights from engagement history")
+    cal_p.add_argument("--db", default="/var/lib/skg/engagement.db",
+                        help="engagement database (build with: skg engage build)")
+    cal_p.add_argument("--report", action="store_true",
+                        help="print calibration report without saving")
+
+    # ── Engagement dataset
+    enp = sub.add_parser("engage",
+        help="engagement dataset — build DB from telemetry + analyze integrity")
+    ens = enp.add_subparsers(dest="engage_cmd", required=False)
+
+    en_build = ens.add_parser("build", help="build SQLite DB from all telemetry")
+    en_build.add_argument("--out", default="/var/lib/skg/engagement.db")
+
+    en_analyze = ens.add_parser("analyze", help="analyze dataset integrity (DP-* checks)")
+    en_analyze.add_argument("--db", default="/var/lib/skg/engagement.db")
+
+    en_report = ens.add_parser("report", help="full engagement report")
+    en_report.add_argument("--db",  default="/var/lib/skg/engagement.db")
+    en_report.add_argument("--out", default=None, help="write JSON report to file")
+
+    # ── System audit (filesystem / process / log integrity)
+    aup = sub.add_parser("audit", help="system integrity — FI/PI/LI wickets")
+    aus = aup.add_subparsers(dest="audit_cmd", required=False)
+
+    aus_scan = aus.add_parser("scan", help="audit a host via SSH")
+    aus_scan.add_argument("--target",      required=True)
+    aus_scan.add_argument("--user",        default="root")
+    aus_scan.add_argument("--key",         default=None)
+    aus_scan.add_argument("--password",    default=None)
+    aus_scan.add_argument("--workload-id", dest="workload_id", default=None)
+    aus_scan.add_argument("--attack-path-id", dest="attack_path_id",
+                          default="full_system_integrity_v1")
+    aus_scan.add_argument("--checks", default=None,
+                          help="comma-separated check IDs e.g. fi01,pi02,li05")
+
+    aus_proj = aus.add_parser("project", help="project FI/PI/LI events against a path")
+    aus_proj.add_argument("--in",      dest="infile",  required=True)
+    aus_proj.add_argument("--path-id", dest="path_id", required=True)
+
+    aus.add_parser("paths", help="list system integrity failure paths")
+
+    # ── Exploit dispatch
+    xp = sub.add_parser("exploit", help="translate realized paths into MSF proposals + binary analysis")
+    xps = xp.add_subparsers(dest="exploit_cmd", required=False)
+
+    xpe = xps.add_parser("propose", help="generate exploit proposals for a realized path")
+    xpe.add_argument("--path-id",   required=True,  help="attack path ID (e.g. web_sqli_to_shell_v1)")
+    xpe.add_argument("--target",    required=True,  help="target IP")
+    xpe.add_argument("--port",      type=int, default=80)
+    xpe.add_argument("--realized",  nargs="+", default=[], help="realized wicket IDs")
+    xpe.add_argument("--lhost",     default="",  help="local host IP for reverse shells")
+    xpe.add_argument("--session-id", dest="session_id", default="")
+
+    xpv = xps.add_parser("privesc", help="post-session privesc chain proposals")
+    xpv.add_argument("--session-id", dest="session_id", required=True)
+    xpv.add_argument("--target",    required=True)
+    xpv.add_argument("--known",     nargs="+", default=[], help="already-known wicket IDs")
+
+    xpb = xps.add_parser("binary", help="analyze binary for BA-* wickets (NX, canary, overflow path)")
+    xpb.add_argument("binary_path")
+    xpb.add_argument("--workload-id", dest="workload_id", default="")
+
+    xps.add_parser("list-paths", help="list all mapped exploit paths")
+    xps.add_parser("binary-catalog", help="print binary analysis catalog JSON")
+
+    # ── Folds
+    flp = sub.add_parser("folds", help="structural knowledge gaps that add to field energy")
+    fls = flp.add_subparsers(dest="folds_cmd", required=False)
+    fls.add_parser("list",       help="all active folds")
+    fls.add_parser("structural", help="services with no toolchain (dark attack surface)")
+    flr = fls.add_parser("resolve", help="mark fold as resolved after toolchain/mapping created")
+    flr.add_argument("fold_id")
+    flr.add_argument("--target", required=True, help="target IP")
+
+    # ── Feed
+    fdp = sub.add_parser("feed", help="intelligence feeds")
+    fds = fdp.add_subparsers(dest="feed_cmd", required=True)
+    fn = fds.add_parser("nvd", help="NVD CVE lookup")
+    fn.add_argument("--service", default=None, help="specific service to look up")
+
+    # ── Resonance
+    rp = sub.add_parser("resonance", help="semantic memory + catalog expansion")
+    rps = rp.add_subparsers(dest="resonance_cmd", required=True)
+    rps.add_parser("status")
+    rps.add_parser("ingest")
+    rq = rps.add_parser("query")
+    rq.add_argument("text")
+    rq.add_argument("--type", default="all",
+                    choices=["all", "wickets", "adapters", "domains"])
+    rq.add_argument("--k", type=int, default=5)
+    rd = rps.add_parser("draft")
+    rd.add_argument("domain")
+    rd.add_argument("description")
+    rd.add_argument("--api-key", dest="api_key", default=None)
+    rps.add_parser("drafts")
+
+    # ── Identity
+    idp = sub.add_parser("identity", help="who is SKG")
+    idp.add_argument("subcommand", nargs="?", choices=["history"])
+
+    # ── Field (per-workload)
+    fp = sub.add_parser("field", help="per-workload field state")
+    fp.add_argument("workload_id")
+    fp.add_argument("domain", nargs="?", default="host",
+                    choices=["host", "container_escape", "ad_lateral",
+                             "aprs", "web", "supply_chain", "data"])
+
+    # ── Catalog
+    catp = sub.add_parser("catalog", help="catalog management")
+    cats = catp.add_subparsers(dest="catalog_cmd", required=True)
+    catc = cats.add_parser("compile")
+    catc.add_argument("--domain", required=True)
+    catc.add_argument("--description", required=True)
+    catc.add_argument("--packages", default="")
+    catc.add_argument("--keywords", default="")
+    catc.add_argument("--prefix", default=None)
+    catc.add_argument("--api-key", default=None)
+    catc.add_argument("--min-cvss", type=float, default=6.0)
+    catc.add_argument("--max-wickets", type=int, default=20)
+    catc.add_argument("--out", default=None)
+
+    # ── Toolchains (preserved)
+    ap = sub.add_parser("aprs")
+    aps = ap.add_subparsers(dest="aprs_cmd", required=True)
+    aps.add_parser("paths")
+    ai = aps.add_parser("ingest")
+    ai.add_argument("adapter", choices=["config_effective", "net_sandbox"])
+    ai.add_argument("--out", required=True)
+    ai.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
+    ai.add_argument("--run-id", default=None)
+    ai.add_argument("--workload-id", default=None)
+    ai.add_argument("--root", default=None)
+    ai.add_argument("--docker-inspect", dest="docker_inspect", default=None)
+    ai.add_argument("--resolv-conf", dest="resolv_conf", default=None)
+    ai.add_argument("--iptables", default=None)
+    ai.add_argument("--ps", default=None)
+    apr = aps.add_parser("project")
+    apr.add_argument("--in", dest="infile", required=True)
+    apr.add_argument("--out", dest="outfile", required=True)
+    apr.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
+    al = aps.add_parser("latest")
+    al.add_argument("--interp", required=True)
+    al.add_argument("--attack-path-id", required=True)
+    al.add_argument("--workload-id", default=None)
+
+    ep = sub.add_parser("escape")
+    eps = ep.add_subparsers(dest="escape_cmd", required=True)
+    eps.add_parser("paths")
+    ei = eps.add_parser("ingest")
+    ei.add_argument("--inspect", required=True)
+    ei.add_argument("--out", required=True)
+    ei.add_argument("--attack-path-id", default="container_escape_privileged_v1")
+    ei.add_argument("--run-id", default=None)
+    ei.add_argument("--workload-id", default=None)
+    epr = eps.add_parser("project")
+    epr.add_argument("--in", dest="infile", required=True)
+    epr.add_argument("--out", dest="outfile", required=True)
+    epr.add_argument("--attack-path-id", default="container_escape_privileged_v1")
+    el = eps.add_parser("latest")
+    el.add_argument("--interp", required=True)
+    el.add_argument("--attack-path-id", required=True)
+    el.add_argument("--workload-id", default=None)
+
+    lp = sub.add_parser("lateral")
+    lps = lp.add_subparsers(dest="lateral_cmd", required=True)
+    lps.add_parser("paths")
+    li = lps.add_parser("ingest")
+    lis = li.add_subparsers(dest="lateral_adapter", required=True)
+    lb = lis.add_parser("bloodhound")
+    lb.add_argument("--bh-dir", required=True, dest="bh_dir")
+    lb.add_argument("--out", required=True)
+    lb.add_argument("--attack-path-id", default="ad_kerberoast_v1")
+    lb.add_argument("--run-id", default=None)
+    lb.add_argument("--workload-id", default=None)
+    ll = lis.add_parser("ldapdomaindump")
+    ll.add_argument("--dump-dir", required=True, dest="dump_dir")
+    ll.add_argument("--out", required=True)
+    ll.add_argument("--attack-path-id", default="ad_kerberoast_v1")
+    ll.add_argument("--run-id", default=None)
+    ll.add_argument("--workload-id", default=None)
+    lm = lis.add_parser("manual")
+    lm.add_argument("--input", required=True)
+    lm.add_argument("--out", required=True)
+    lm.add_argument("--attack-path-id", default="ad_kerberoast_v1")
+    lm.add_argument("--run-id", default=None)
+    lm.add_argument("--workload-id", default=None)
+    lpr = lps.add_parser("project")
+    lpr.add_argument("--in", dest="infile", required=True)
+    lpr.add_argument("--out", dest="outfile", required=True)
+    lpr.add_argument("--attack-path-id", required=True)
+    ll2 = lps.add_parser("latest")
+    ll2.add_argument("--interp", required=True)
+    ll2.add_argument("--attack-path-id", required=True)
+    ll2.add_argument("--workload-id", default=None)
+
+    a = p.parse_args()
+    dispatch = {
+        "calibrate": cmd_calibrate,
+        "engage":    cmd_engage,
+        "audit":     cmd_audit,
+        "data":      cmd_data,
+        "exploit":   cmd_exploit,
+        "folds":     cmd_folds,
+        "collect":   cmd_collect,
+        "start":     cmd_start,
+        "stop":      cmd_stop,
+        "status":    cmd_status,
+        "surface":   cmd_surface,
+        "web":       cmd_web_view,
+        "target":    cmd_target,
+        "observe":   cmd_observe,
+        "gravity":   cmd_gravity,
+        "proposals": cmd_proposals,
+        "mode":      cmd_mode,
+        "feed":      cmd_feed,
+        "resonance": cmd_resonance,
+        "identity":  cmd_identity,
+        "field":     cmd_field,
+        "catalog":   cmd_catalog,
+        "aprs":      cmd_aprs,
+        "escape":    cmd_escape,
+        "lateral":   cmd_lateral,
+    }
+    dispatch.get(a.command, lambda _: p.print_help())(a)
+
+
+
+def cmd_data(a):
+    """
+    Data pipeline integrity — profile database tables against declared contracts.
+
+    Applies the same substrate physics as security:
+      DP-01..DP-15 are wickets. E = unknown wickets. Gravity directs the
+      profiler toward highest-entropy pipeline stages. Failure paths are
+      projections — not rules, not scores, not static checklists.
+
+    Works against any SQLAlchemy-compatible database:
+      PostgreSQL, MySQL, SQLite, and more.
+    """
+    subcmd = getattr(a, "data_cmd", "profile")
+    sys.path.insert(0, str(SKG_HOME / "skg-data-toolchain"))
+
+    if subcmd == "profile":
+        if not a.url or not a.table:
+            print("  Usage: skg data profile --url <db_url> --table <table>")
+            print("  Example: skg data profile --url sqlite:///mydb.db --table orders")
+            return
+
+        from adapters.db_profiler.profile import profile_table
+        workload_id = getattr(a, "workload_id", None) or f"data::{a.table}"
+        contract    = getattr(a, "contract", None)
+        apid        = getattr(a, "attack_path_id", "data_completeness_failure_v1")
+
+        print(f"\n  Profiling {a.table} @ {a.url[:40]}...")
+        events = profile_table(
+            url=a.url, table=a.table,
+            workload_id=workload_id,
+            contract_path=contract,
+            attack_path_id=apid,
+        )
+
+        out = getattr(a, "out", None) or \
+              str(DISCOVERY_DIR / f"data_{a.table}_{events[0]['payload']['run_id'] if events else 'x'}.ndjson")
+        DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
+        with open(out, "w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+
+        r = sum(1 for e in events if e["payload"]["status"] == "realized")
+        b = sum(1 for e in events if e["payload"]["status"] == "blocked")
+        u = sum(1 for e in events if e["payload"]["status"] == "unknown")
+        print(f"\n  {len(events)} wicket events: {r}R {b}B {u}U → {out}")
+
+        if b > 0:
+            print(f"\n  Blocked conditions (definite failures):")
+            for ev in events:
+                if ev["payload"]["status"] == "blocked":
+                    print(f"    ✗ {ev['payload']['wicket_id']:6s}  {ev['payload']['detail'][:80]}")
+
+        print(f"\n  Run gravity to update field energy:")
+        print(f"    skg gravity --cycles 1")
+        print(f"  Or project directly:")
+        print(f"    skg data project --in {out} --path-id {apid}")
+
+    elif subcmd == "project":
+        if not a.infile or not a.path_id:
+            print("  Usage: skg data project --in <events.ndjson> --path-id <path_id>")
+            return
+
+        from projections.data.run import compute_data_score
+        catalog_file = (SKG_HOME / "skg-data-toolchain" / "contracts" / "catalogs" /
+                        "attack_preconditions_catalog.data.v1.json")
+        if not catalog_file.exists():
+            print(f"  Catalog not found: {catalog_file}")
+            return
+
+        catalog = json.loads(catalog_file.read_text())
+        events = []
+        for line in Path(a.infile).read_text().splitlines():
+            if line.strip():
+                try: events.append(json.loads(line))
+                except: pass
+
+        result = compute_data_score(events, catalog, a.path_id)
+        if not result:
+            print(f"  Unknown path_id: {a.path_id}")
+            print(f"  Available: {list(catalog.get('attack_paths', {}).keys())}")
+            return
+
+        p = result["payload"]
+        cls = p["classification"]
+        marker = "✓" if cls == "realized" else ("✗" if cls == "not_realized" else "?")
+        print(f"\n  {marker} {p['attack_path_id']}")
+        print(f"  Classification : {cls}")
+        print(f"  Interpretation : {p['interpretation']}")
+        print(f"  Score          : {p['data_score']:.0%}")
+        print(f"  Realized  ({len(p['realized'])}): {p['realized']}")
+        print(f"  Blocked   ({len(p['blocked'])}): {p['blocked']}")
+        print(f"  Unknown   ({len(p['unknown'])}): {p['unknown']}")
+
+    elif subcmd == "paths":
+        catalog_file = (SKG_HOME / "skg-data-toolchain" / "contracts" / "catalogs" /
+                        "attack_preconditions_catalog.data.v1.json")
+        if not catalog_file.exists():
+            print("  Catalog not found. Run setup_arch.sh first.")
+            return
+        catalog = json.loads(catalog_file.read_text())
+        print(f"\n  Data pipeline failure paths:\n")
+        for pid, path in catalog.get("attack_paths", {}).items():
+            print(f"  {pid}")
+            print(f"    {path['description']}")
+            print(f"    required: {path['required_wickets']}")
+            print(f"    domains:  {', '.join(path.get('domains', []))}")
+            print()
+
+    elif subcmd == "catalog":
+        catalog_file = (SKG_HOME / "skg-data-toolchain" / "contracts" / "catalogs" /
+                        "attack_preconditions_catalog.data.v1.json")
+        if catalog_file.exists():
+            print(catalog_file.read_text())
+        else:
+            print("  Catalog not found.")
+
+    else:
+        print("  Usage: skg data [profile|project|paths|catalog]")
+
+
+
+
+if __name__ == "__main__":
+    main()

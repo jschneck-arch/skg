@@ -1,0 +1,172 @@
+{
+  "version": "1.0.0",
+  "description": "Log4Shell (Log4j JNDI RCE) attack preconditions catalog. Evidence-ranked conditions required for Log4Shell exploitation across five attack paths.",
+  "wickets": {
+    "AP-L4": {
+      "id": "AP-L4",
+      "label": "log4j_loaded_at_runtime",
+      "description": "Log4j classes are loaded during execution.",
+      "evidence_hint": "Evidence rank min: 1",
+      "decay_class": "operational"
+    },
+    "AP-L7": {
+      "id": "AP-L7",
+      "label": "outbound_egress_permits_callback",
+      "description": "Network policy permits outbound connectivity needed for remote resolution/callback.",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "ephemeral"
+    },
+    "AP-L8": {
+      "id": "AP-L8",
+      "label": "attacker-controlled_input_reaches_a_log4j_sink",
+      "description": "Untrusted input is logged by Log4j on a reachable code path.",
+      "evidence_hint": "Evidence rank min: 1",
+      "decay_class": "ephemeral"
+    },
+    "AP-L9": {
+      "id": "AP-L9",
+      "label": "exposure_class_supports_attacker_access",
+      "description": "Service exposure posture allows attacker interaction (public/internal/post-auth).",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L10": {
+      "id": "AP-L10",
+      "label": "jndi_lookup_capability_present",
+      "description": "Required lookup capability/classes are present/active in runtime.",
+      "evidence_hint": "Evidence rank min: 1",
+      "decay_class": "ephemeral"
+    },
+    "AP-L11": {
+      "id": "AP-L11",
+      "label": "lookups_enabled_in_effective_configuration",
+      "description": "Effective logging configuration permits lookups / message substitution relevant to the path.",
+      "evidence_hint": "Evidence rank min: 3",
+      "decay_class": "operational"
+    },
+    "AP-L12": {
+      "id": "AP-L12",
+      "label": "dns_resolution_allowed",
+      "description": "Environment permits DNS resolution required for outbound target discovery.",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L13": {
+      "id": "AP-L13",
+      "label": "ldap_rmi_outbound_permitted",
+      "description": "Environment permits LDAP/RMI egress or equivalent protocol needed for classic JNDI retrieval.",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L14": {
+      "id": "AP-L14",
+      "label": "http_https_outbound_permitted",
+      "description": "Environment permits HTTP(S) egress (alternative retrieval / callback).",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L15": {
+      "id": "AP-L15",
+      "label": "proxy-only_outbound_with_allowlist",
+      "description": "Outbound is constrained to proxy and allowlist governs destinations.",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L16": {
+      "id": "AP-L16",
+      "label": "process_spawn_permitted",
+      "description": "Policy allows exec/spawn needed for high-impact payloads.",
+      "evidence_hint": "Evidence rank min: 3",
+      "decay_class": "ephemeral"
+    },
+    "AP-L17": {
+      "id": "AP-L17",
+      "label": "relevant_file_write_permitted",
+      "description": "Policy allows writing to locations needed for persistence/impact.",
+      "evidence_hint": "Evidence rank min: 3",
+      "decay_class": "operational"
+    },
+    "AP-L18": {
+      "id": "AP-L18",
+      "label": "outbound_channel_lacks_strong_endpoint_authentication",
+      "description": "Outbound retrieval/callback channel can be intercepted/modified due to missing TLS validation, weak trust, or use of cleartext protocols.",
+      "evidence_hint": "Evidence rank min: 4",
+      "decay_class": "operational"
+    },
+    "AP-L19": {
+      "id": "AP-L19",
+      "label": "no_certificate_pinning___proxy_interception_permitted",
+      "description": "Client permits interception (e.g., enterprise proxy) and does not pin certificates or otherwise prevent MITM substitution.",
+      "evidence_hint": "Evidence rank min: 3",
+      "decay_class": "operational"
+    }
+  },
+  "attack_paths": {
+    "log4j_dos_v1": {
+      "id": "log4j_dos_v1",
+      "description": "Log4j Lookup/Pattern DoS v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L11"
+      ],
+      "references": []
+    },
+    "log4j_info_disclosure_v1": {
+      "id": "log4j_info_disclosure_v1",
+      "description": "Log4j Lookup-Driven Info Disclosure v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L11"
+      ],
+      "references": []
+    },
+    "log4j_jndi_callback_v1": {
+      "id": "log4j_jndi_callback_v1",
+      "description": "Log4j JNDI Callback (network interaction) v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7"
+      ],
+      "references": []
+    },
+    "log4j_jndi_rce_v1": {
+      "id": "log4j_jndi_rce_v1",
+      "description": "Log4j JNDI RCE (generic) v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7"
+      ],
+      "references": []
+    },
+    "log4j_mitm_injection_v1": {
+      "id": "log4j_mitm_injection_v1",
+      "description": "Log4j Outbound Retrieval with MITM Injection v1",
+      "required_wickets": [
+        "AP-L4",
+        "AP-L8",
+        "AP-L9",
+        "AP-L10",
+        "AP-L11",
+        "AP-L12",
+        "AP-L7",
+        "AP-L18",
+        "AP-L19"
+      ],
+      "references": []
+    }
+  }
+}

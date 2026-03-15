@@ -1,0 +1,12 @@
+[Unit]
+Description=SKG Daily Fine-Tune Timer
+Requires=skg-train.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=skg-train.service
+
+[Install]
+WantedBy=timers.target

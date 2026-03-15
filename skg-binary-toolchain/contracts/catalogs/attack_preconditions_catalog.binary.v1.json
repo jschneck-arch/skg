@@ -1,0 +1,80 @@
+{
+  "version": "1.0.0",
+  "domain": "binary_analysis",
+  "description": "Binary exploitation precondition analysis. Wickets describe memory protection absence and exploitation path constructibility. Same tri-state physics: REALIZED = protection absent (exploitable condition confirmed), BLOCKED = protection present (constraint prevents exploitation), UNKNOWN = not yet measured.",
+  "wickets": {
+    "BA-01": {
+      "id": "BA-01",
+      "label": "nx_disabled",
+      "description": "NX (non-executable stack/heap) not set. Stack memory is executable \u2014 shellcode injection viable without ROP.",
+      "evidence_hint": "checksec --file=<binary> | grep NX. Evidence rank 3 (config/binary attributes).",
+      "decay_class": "structural"
+    },
+    "BA-02": {
+      "id": "BA-02",
+      "label": "aslr_disabled_or_weak",
+      "description": "PIE disabled or ASLR weak. Load address is predictable \u2014 absolute addressing in payload viable.",
+      "evidence_hint": "checksec --file=<binary> | grep PIE; cat /proc/sys/kernel/randomize_va_space. Evidence rank 3.",
+      "decay_class": "structural"
+    },
+    "BA-03": {
+      "id": "BA-03",
+      "label": "no_stack_canary",
+      "description": "Stack canary not present. Stack overflow reaches return address without detection.",
+      "evidence_hint": "checksec --file=<binary> | grep Canary. Evidence rank 3.",
+      "decay_class": "structural"
+    },
+    "BA-04": {
+      "id": "BA-04",
+      "label": "dangerous_function_imported",
+      "description": "Binary calls dangerous libc function: strcpy, strcat, gets, sprintf, vsprintf, scanf, system, popen, exec.",
+      "evidence_hint": "rabin2 -i <binary> | grep -E 'strcpy|gets|sprintf|system'. Evidence rank 3.",
+      "decay_class": "structural"
+    },
+    "BA-05": {
+      "id": "BA-05",
+      "label": "controlled_input_reaches_dangerous_call",
+      "description": "Attacker-controlled data flows to a dangerous function. Overflow path confirmed by ltrace or static analysis.",
+      "evidence_hint": "ltrace -e 'strcpy+gets+sprintf+system' ./<binary> < input; radare2 data flow. Evidence rank 2.",
+      "decay_class": "ephemeral"
+    },
+    "BA-06": {
+      "id": "BA-06",
+      "label": "exploit_chain_constructible",
+      "description": "Sufficient ROP gadgets exist or direct EIP/RIP control demonstrated via cyclic pattern.",
+      "evidence_hint": "ROPgadget --binary <binary> --rop; pwndbg cyclic + offset. Evidence rank 2.",
+      "decay_class": "structural"
+    }
+  },
+  "attack_paths": {
+    "binary_stack_overflow_v1": {
+      "description": "Stack buffer overflow \u2192 code execution. Requires no NX, no canary, dangerous function reachable, controlled input, gadgets.",
+      "required_wickets": [
+        "BA-01",
+        "BA-03",
+        "BA-04",
+        "BA-05",
+        "BA-06"
+      ],
+      "failure_class": "memory_corruption"
+    },
+    "binary_rop_chain_v1": {
+      "description": "ROP chain bypasses NX \u2192 code execution. Canary absent, dangerous function reachable, controlled input, gadgets.",
+      "required_wickets": [
+        "BA-03",
+        "BA-04",
+        "BA-05",
+        "BA-06"
+      ],
+      "failure_class": "rop_exploitation"
+    },
+    "binary_format_string_v1": {
+      "description": "Format string vulnerability \u2192 arbitrary read/write. Dangerous function (printf family) reachable with controlled format arg.",
+      "required_wickets": [
+        "BA-04",
+        "BA-05"
+      ],
+      "failure_class": "format_string"
+    }
+  }
+}

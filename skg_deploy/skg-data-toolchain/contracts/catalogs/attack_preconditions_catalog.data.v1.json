@@ -1,0 +1,162 @@
+{
+  "version": "1.0.0",
+  "domain": "data_pipeline",
+  "description": "Data pipeline integrity and degradation preconditions. Conditions whose simultaneous realization constitutes a valid, trustworthy data product. Each failure path corresponds to a class of data quality problems that causes downstream decisions to be made on false certainty.",
+  "wickets": {
+    "DP-01": {
+      "id": "DP-01",
+      "label": "schema_contract_present",
+      "description": "A declared schema or contract exists for this stage. Without it the substrate cannot evaluate any other condition — all downstream wickets remain structurally unknown.",
+      "evidence_hint": "Check for schema registry entry, JSON Schema file, dbt model YAML, or CREATE TABLE statement. Evidence rank 3 (config/contract).",
+      "decay_class": "structural"
+    },
+    "DP-02": {
+      "id": "DP-02",
+      "label": "schema_version_stable",
+      "description": "The schema has not changed since the last collection. A schema change without a corresponding migration marks all transformation correctness wickets as unknown.",
+      "evidence_hint": "Compare schema hash or version against last recorded. Evidence rank 3.",
+      "decay_class": "operational"
+    },
+    "DP-03": {
+      "id": "DP-03",
+      "label": "required_fields_populated",
+      "description": "All non-nullable fields declared in the contract have non-null values in this batch or record set. NULL in a required field is a blocked state, not an unknown — the constraint is active.",
+      "evidence_hint": "SELECT COUNT(*) WHERE required_field IS NULL. Evidence rank 1 (runtime query).",
+      "decay_class": "ephemeral"
+    },
+    "DP-04": {
+      "id": "DP-04",
+      "label": "fields_within_declared_bounds",
+      "description": "Numeric and date fields fall within the min/max/enum bounds declared in the contract. Out-of-bounds values indicate upstream corruption or schema drift.",
+      "evidence_hint": "SELECT MIN/MAX/COUNT of each bounded field against declared constraints. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-05": {
+      "id": "DP-05",
+      "label": "referential_integrity_intact",
+      "description": "Foreign key relationships resolve. No orphaned records. Broken references mean the record cannot be correctly joined downstream — the relationship is blocked, not unknown.",
+      "evidence_hint": "LEFT JOIN target against foreign table; WHERE fk IS NULL in result. Evidence rank 1.",
+      "decay_class": "operational"
+    },
+    "DP-06": {
+      "id": "DP-06",
+      "label": "transformation_applied",
+      "description": "The declared transformation has run on this batch. Detectable via audit log, transformation timestamp column, or comparison of raw vs transformed record counts.",
+      "evidence_hint": "Check transformation audit table or compare row counts pre/post transform. Evidence rank 2 (build/pipeline log).",
+      "decay_class": "ephemeral"
+    },
+    "DP-07": {
+      "id": "DP-07",
+      "label": "transformation_correct",
+      "description": "The transformation output matches the declared contract. A transformation that ran but produced wrong output is a blocked state — the constraint was violated. Different from unknown (not yet run).",
+      "evidence_hint": "Sample transformed values against declared business rules. Unit test assertions on known inputs. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-08": {
+      "id": "DP-08",
+      "label": "no_duplicate_records",
+      "description": "The declared primary key appears exactly once per record in this batch. Duplicates introduced by joins, retries, or reprocessing corrupt any aggregate built downstream.",
+      "evidence_hint": "SELECT pk, COUNT(*) GROUP BY pk HAVING COUNT(*) > 1. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-09": {
+      "id": "DP-09",
+      "label": "freshness_within_ttl",
+      "description": "The most recent record or batch is within the declared TTL. Stale data feeding a live decision system is a temporal fold — the data was real, but may no longer be.",
+      "evidence_hint": "SELECT MAX(updated_at) and compare to NOW() - declared_ttl. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-10": {
+      "id": "DP-10",
+      "label": "upstream_source_reachable",
+      "description": "The upstream data source responds to connection probes. Unreachable upstream is a blocked state for all downstream freshness and completeness wickets.",
+      "evidence_hint": "TCP connect or SELECT 1 against upstream connection string. Evidence rank 4 (network).",
+      "decay_class": "ephemeral"
+    },
+    "DP-11": {
+      "id": "DP-11",
+      "label": "batch_complete",
+      "description": "All expected records for this batch window have arrived. Detected via record count against declared expectation, watermark comparison, or batch manifest check.",
+      "evidence_hint": "SELECT COUNT(*) WHERE batch_id = X vs declared_expected_count. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-12": {
+      "id": "DP-12",
+      "label": "distribution_stable",
+      "description": "Statistical distribution of key fields is within historical bounds. Drift beyond declared sigma is a contextual fold — the system observed a condition it cannot evaluate against current contracts.",
+      "evidence_hint": "Compare current mean/stddev/percentiles to baseline. Z-score or KL divergence against rolling window. Evidence rank 6 (scanner/profiler).",
+      "decay_class": "operational"
+    },
+    "DP-13": {
+      "id": "DP-13",
+      "label": "no_null_injection",
+      "description": "The transformation did not introduce NULLs into fields that were non-null upstream. NULL injection by transformation is distinct from upstream missing data — it is a transformation defect.",
+      "evidence_hint": "Compare null counts pre/post transformation for each field. Evidence rank 1.",
+      "decay_class": "ephemeral"
+    },
+    "DP-14": {
+      "id": "DP-14",
+      "label": "encoding_consistent",
+      "description": "Character encoding is uniform across the batch and consistent with the declared encoding in the schema contract. Mixed encodings cause silent corruption in string operations.",
+      "evidence_hint": "chardet or Python codecs probe on sample of string fields. Evidence rank 6.",
+      "decay_class": "structural"
+    },
+    "DP-15": {
+      "id": "DP-15",
+      "label": "records_conform_to_current_schema",
+      "description": "Records in this batch conform to the current schema version, not a prior version. After a migration, records written by old producers may violate new constraints silently.",
+      "evidence_hint": "Validate sample records against current JSON Schema or Avro/Protobuf schema. Evidence rank 1.",
+      "decay_class": "operational"
+    }
+  },
+  "attack_paths": {
+    "data_completeness_failure_v1": {
+      "description": "Batch arrived but is incomplete — missing records, null required fields, or broken foreign keys. Any downstream aggregate is wrong.",
+      "required_wickets": ["DP-10", "DP-11", "DP-03", "DP-05"],
+      "failure_class": "completeness",
+      "domains": ["banking", "medical", "agriculture", "civic_planning", "security"]
+    },
+    "data_transformation_failure_v1": {
+      "description": "Transformation ran but produced incorrect output — null injection, wrong business rule applied, or output outside declared bounds.",
+      "required_wickets": ["DP-06", "DP-07", "DP-13", "DP-04"],
+      "failure_class": "correctness",
+      "domains": ["banking", "medical", "agriculture", "civic_planning", "security"]
+    },
+    "data_drift_undetected_v1": {
+      "description": "Data distribution has shifted beyond declared bounds and freshness has expired. Downstream models or decisions are operating on stale or drifted inputs without knowing it.",
+      "required_wickets": ["DP-09", "DP-12", "DP-02"],
+      "failure_class": "drift",
+      "domains": ["banking", "medical", "agriculture", "security"]
+    },
+    "schema_migration_breakage_v1": {
+      "description": "Schema changed and old-format records are flowing through the pipeline. Transformation rules written for the new schema silently corrupt or discard old-format fields.",
+      "required_wickets": ["DP-01", "DP-02", "DP-15"],
+      "failure_class": "schema",
+      "domains": ["banking", "medical", "civic_planning", "security"]
+    },
+    "referential_integrity_failure_v1": {
+      "description": "Foreign key relationships broken — orphaned records, dangling references. Any join downstream produces wrong results without error.",
+      "required_wickets": ["DP-03", "DP-05", "DP-08"],
+      "failure_class": "integrity",
+      "domains": ["banking", "medical", "civic_planning", "security"]
+    },
+    "stale_feature_vector_v1": {
+      "description": "ML feature vector computed from data that has since changed or expired. Model predictions are based on conditions that no longer reflect reality.",
+      "required_wickets": ["DP-09", "DP-12", "DP-06"],
+      "failure_class": "staleness",
+      "domains": ["banking", "medical", "agriculture", "security"]
+    },
+    "silent_data_corruption_v1": {
+      "description": "Data is present, counts are correct, but values are wrong — encoding errors, null injection, or out-of-bounds values passed validation. No alarm fired.",
+      "required_wickets": ["DP-03", "DP-04", "DP-07", "DP-13", "DP-14"],
+      "failure_class": "corruption",
+      "domains": ["banking", "medical", "agriculture", "civic_planning", "security"]
+    },
+    "pipeline_source_loss_v1": {
+      "description": "Upstream source unreachable. All downstream wickets transition to unknown or blocked depending on whether they have cached state.",
+      "required_wickets": ["DP-10", "DP-11", "DP-09"],
+      "failure_class": "availability",
+      "domains": ["banking", "medical", "agriculture", "civic_planning", "security"]
+    }
+  }
+}

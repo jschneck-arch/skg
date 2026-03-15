@@ -1,0 +1,12 @@
+{
+  "domain": "web",
+  "description": "HTTP/S and Onion web application attack surface evaluation",
+  "attack_surface": "HTTP/S web application attack surface: admin interfaces, API exposure, auth bypass, misconfigs, TLS issues, sensitive file exposure",
+  "hosts": [],
+  "generated_at": "2026-03-06T02:33:36.859801+00:00",
+  "generation_backend": "template",
+  "errors": [
+    "Used template catalog \u2014 no generation backend available",
+    "Used template adapter \u2014 check collection commands"
+  ]
+}

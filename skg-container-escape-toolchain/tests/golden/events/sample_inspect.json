@@ -1,0 +1,42 @@
+[
+  {
+    "Id": "abc123def456",
+    "Config": {
+      "User": "",
+      "Image": "ubuntu:22.04",
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      ]
+    },
+    "HostConfig": {
+      "Privileged": true,
+      "CapAdd": null,
+      "CapDrop": null,
+      "SecurityOpt": null,
+      "PidMode": "",
+      "IpcMode": "private",
+      "NetworkMode": "bridge",
+      "UsernsMode": ""
+    },
+    "Mounts": [
+      {
+        "Type": "bind",
+        "Source": "/var/run/docker.sock",
+        "Destination": "/var/run/docker.sock",
+        "Mode": "",
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ],
+    "NetworkSettings": {
+      "Ports": {
+        "8080/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "8080"
+          }
+        ]
+      }
+    }
+  }
+]

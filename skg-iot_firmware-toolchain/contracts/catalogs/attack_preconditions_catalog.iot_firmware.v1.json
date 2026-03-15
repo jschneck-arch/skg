@@ -1,0 +1,183 @@
+{
+  "domain": "iot_firmware",
+  "version": "1.0.0",
+  "description": "Compromise of embedded IoT device via firmware vulnerabilities and default credential exploitation.",
+  "generated_by": "skg.forge.compiler",
+  "generated_at": "2026-03-08T02:12:15.237200+00:00",
+  "source_cves": [
+    "CVE-2005-0490",
+    "CVE-2016-2147",
+    "CVE-2017-9078",
+    "CVE-2016-6301",
+    "CVE-2020-15833",
+    "CVE-2013-3619",
+    "CVE-2017-16544",
+    "CVE-2017-14491",
+    "CVE-2003-0545",
+    "CVE-2018-1000500",
+    "CVE-2004-0079",
+    "CVE-2011-5325",
+    "CVE-2018-1000517",
+    "CVE-2016-2148",
+    "CVE-2017-3209",
+    "CVE-2005-0877"
+  ],
+  "wickets": {
+    "IF-01": {
+      "id": "IF-01",
+      "label": "target_reachable_and_responsive",
+      "description": "Target system or service responds to network probes; collection or exploitation is feasible.",
+      "evidence_hint": "TCP connect or ICMP probe confirms reachability; confirm via port scan or HTTP HEAD request",
+      "decay_class": "ephemeral"
+    },
+    "IF-02": {
+      "id": "IF-02",
+      "label": "target_service_exposed",
+      "description": "Target service is listening on a reachable port and accepting connections.",
+      "evidence_hint": "Service banner grab or HTTP 200/401 response confirms service is listening",
+      "decay_class": "ephemeral"
+    },
+    "IF-03": {
+      "id": "IF-03",
+      "label": "busybox_memory_corruption_exploitable",
+      "description": "Buffer overflow via unchecked memory operation (CVE-2016-2148, CVSS 9.8 CRITICAL)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-04": {
+      "id": "IF-04",
+      "label": "busybox_critical_vuln_present",
+      "description": "BusyBox project BusyBox wget version prior to commit 8e2174e9bd836e53c8b9c6e00d1bc6e2a718686e contains a Buffer Overflow vulnerability in Busybox wget that can result in heap buffer overflow. (CVE-2018-1000517, CVSS 9.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "IF-05": {
+      "id": "IF-05",
+      "label": "dropbear_hardcoded_credential_present",
+      "description": "Hardcoded credential present in software (CVE-2020-15833, CVSS 9.8 CRITICAL)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "IF-06": {
+      "id": "IF-06",
+      "label": "openssl_arbitrary_code_execution_possible",
+      "description": "Double free vulnerability in OpenSSL 0.9.7 allows remote attackers to cause a denial of service (crash) and possibly execute arbitrary code via an SSL client certificate with a certain invalid ASN.1 e (CVE-2003-0545, CVSS 9.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-07": {
+      "id": "IF-07",
+      "label": "dnsmasq_out_of_bounds_write_exploitable",
+      "description": "Out-of-bounds write via malformed input (CVE-2017-14491, CVSS 9.8 CRITICAL)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-08": {
+      "id": "IF-08",
+      "label": "busybox_code_injection_exploitable",
+      "description": "Code injection via unsafe deserialization or eval (CVE-2017-16544, CVSS 8.8 HIGH)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; requires low privilege user present",
+      "decay_class": "ephemeral"
+    },
+    "IF-09": {
+      "id": "IF-09",
+      "label": "dropbear_remote_code_execution_possible",
+      "description": "The server in Dropbear before 2017.75 might allow post-authentication root remote code execution because of a double free in cleanup of TCP listeners when the -a option is enabled. (CVE-2017-9078, CVSS 8.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; requires low privilege user present",
+      "decay_class": "ephemeral"
+    },
+    "IF-10": {
+      "id": "IF-10",
+      "label": "curl_arbitrary_code_execution_possible",
+      "description": "Multiple stack-based buffer overflows in libcURL and cURL 7.12.1, and possibly other versions, allow remote malicious web servers to execute arbitrary code via base64 encoded replies that exceed the i (CVE-2005-0490, CVSS 8.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; requires low privilege user present",
+      "decay_class": "ephemeral"
+    },
+    "IF-11": {
+      "id": "IF-11",
+      "label": "busybox_arbitrary_code_execution_possible",
+      "description": "Busybox contains a Missing SSL certificate validation vulnerability in The \"busybox wget\" applet that can result in arbitrary code execution. (CVE-2018-1000500, CVSS 8.1)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-12": {
+      "id": "IF-12",
+      "label": "busybox_insecure_default_permissions",
+      "description": "Incorrect default permissions on file or directory (CVE-2017-3209, CVSS 8.1 HIGH)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "IF-13": {
+      "id": "IF-13",
+      "label": "busybox_denial_of_service_possible",
+      "description": "The recv_and_process_client_pkt function in networking/ntpd.c in busybox allows remote attackers to cause a denial of service (CPU and bandwidth consumption) via a forged NTP packet, which triggers a  (CVE-2016-6301, CVSS 7.5)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-14": {
+      "id": "IF-14",
+      "label": "busybox_integer_overflow_exploitable",
+      "description": "Integer overflow leading to memory corruption (CVE-2016-2147, CVSS 7.5 HIGH)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "IF-15": {
+      "id": "IF-15",
+      "label": "busybox_path_traversal_exploitable",
+      "description": "Directory traversal vulnerability in the BusyBox implementation of tar before 1.22.0 v5 allows remote attackers to point to files outside the current working directory via a symlink. (CVE-2011-5325, CVSS 7.5)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    }
+  },
+  "attack_paths": {
+    "iot_firmware_network_exploit_v1": {
+      "id": "iot_firmware_network_exploit_v1",
+      "description": "Remote exploitation via network-accessible vulnerability in iot_firmware environment.",
+      "required_wickets": [
+        "IF-01",
+        "IF-03",
+        "IF-04",
+        "IF-05",
+        "IF-06",
+        "IF-07"
+      ],
+      "references": [
+        "http://packetstormsecurity.com/files/153278/WAGO-852-Industrial-Managed-Switch-Series-Code-Execution-Hardcoded-Credentials.html",
+        "http://packetstormsecurity.com/files/154361/Cisco-Device-Hardcoded-Credentials-GNU-glibc-BusyBox.html",
+        "http://seclists.org/fulldisclosure/2019/Jun/18",
+        "https://git.busybox.net/busybox/commit/?id=8e2174e9bd836e53c8b9c6e00d1bc6e2a718686e",
+        "https://lists.debian.org/debian-lts-announce/2018/07/msg00037.html"
+      ]
+    },
+    "iot_firmware_local_exploit_v1": {
+      "id": "iot_firmware_local_exploit_v1",
+      "description": "Local exploitation of iot_firmware environment requiring initial access.",
+      "required_wickets": [
+        "IF-01",
+        "IF-02"
+      ],
+      "references": []
+    },
+    "iot_firmware_full_chain_v1": {
+      "id": "iot_firmware_full_chain_v1",
+      "description": "Full exploitation chain: remote access through local privilege escalation in iot_firmware.",
+      "required_wickets": [
+        "IF-01",
+        "IF-03",
+        "IF-04",
+        "IF-05",
+        "IF-06",
+        "IF-07",
+        "IF-08",
+        "IF-09"
+      ],
+      "references": [
+        "http://packetstormsecurity.com/files/153278/WAGO-852-Industrial-Managed-Switch-Series-Code-Execution-Hardcoded-Credentials.html",
+        "http://packetstormsecurity.com/files/154361/Cisco-Device-Hardcoded-Credentials-GNU-glibc-BusyBox.html",
+        "http://seclists.org/fulldisclosure/2019/Jun/18",
+        "https://git.busybox.net/busybox/commit/?id=8e2174e9bd836e53c8b9c6e00d1bc6e2a718686e",
+        "https://lists.debian.org/debian-lts-announce/2018/07/msg00037.html"
+      ]
+    }
+  }
+}

@@ -1,0 +1,308 @@
+{
+  "version": "1.0.0",
+  "description": "Host recon and privilege escalation attack preconditions catalog. Evidence-ranked conditions derived from SSH/WinRM collection, Nmap scans, and Metasploit session data.",
+  "wickets": {
+    "HO-01": {
+      "id": "HO-01",
+      "label": "host_reachable_and_responsive",
+      "description": "Target host responds to network probes; collection or exploitation is feasible.",
+      "evidence_hint": "Evidence rank min: 4 (nmap scan or successful TCP connect)",
+      "decay_class": "ephemeral"
+    },
+    "HO-02": {
+      "id": "HO-02",
+      "label": "ssh_service_exposed",
+      "description": "SSH service is listening on a reachable port.",
+      "evidence_hint": "Evidence rank min: 4 (nmap service scan or banner grab)",
+      "decay_class": "ephemeral"
+    },
+    "HO-03": {
+      "id": "HO-03",
+      "label": "ssh_credential_valid",
+      "description": "A valid SSH credential (key or password) for a user account is available.",
+      "evidence_hint": "Evidence rank min: 1 (successful SSH authentication)",
+      "decay_class": "operational"
+    },
+    "HO-04": {
+      "id": "HO-04",
+      "label": "winrm_service_exposed",
+      "description": "WinRM (5985/5986) is listening and accessible.",
+      "evidence_hint": "Evidence rank min: 4 (nmap port scan)",
+      "decay_class": "ephemeral"
+    },
+    "HO-05": {
+      "id": "HO-05",
+      "label": "winrm_credential_valid",
+      "description": "A valid WinRM credential is available for the target.",
+      "evidence_hint": "Evidence rank min: 1 (successful WinRM authentication)",
+      "decay_class": "operational"
+    },
+    "HO-06": {
+      "id": "HO-06",
+      "label": "sudo_misconfigured",
+      "description": "sudoers grants NOPASSWD or wildcard exec for non-root user.",
+      "evidence_hint": "Evidence rank min: 3 (sudo -l output parsed from host)",
+      "decay_class": "operational"
+    },
+    "HO-07": {
+      "id": "HO-07",
+      "label": "suid_binary_present",
+      "description": "A SUID binary that can be abused for privilege escalation exists on the filesystem.",
+      "evidence_hint": "Evidence rank min: 3 (find / -perm -4000 output)",
+      "decay_class": "operational"
+    },
+    "HO-08": {
+      "id": "HO-08",
+      "label": "world_writable_cron_or_service",
+      "description": "A cron job, systemd unit, or service executable is world-writable or writable by a low-privilege user.",
+      "evidence_hint": "Evidence rank min: 3 (crontab / systemctl / filesystem permission scan)",
+      "decay_class": "operational"
+    },
+    "HO-09": {
+      "id": "HO-09",
+      "label": "credential_in_environment",
+      "description": "A credential, token, or secret is present in environment variables, shell history, or config files.",
+      "evidence_hint": "Evidence rank min: 2 (env dump, .bash_history, .aws/credentials, /etc/environment)",
+      "decay_class": "ephemeral"
+    },
+    "HO-10": {
+      "id": "HO-10",
+      "label": "user_is_local_admin_or_root",
+      "description": "The collected user account has root/Administrator-level privileges on the host.",
+      "evidence_hint": "Evidence rank min: 1 (id output shows uid=0 or group membership)",
+      "decay_class": "operational"
+    },
+    "HO-11": {
+      "id": "HO-11",
+      "label": "vulnerable_package_installed",
+      "description": "An installed package has a known CVE with public exploit code.",
+      "evidence_hint": "Evidence rank min: 2 (package list cross-referenced with CVE data)",
+      "decay_class": "ephemeral"
+    },
+    "HO-12": {
+      "id": "HO-12",
+      "label": "unpatched_kernel",
+      "description": "Kernel version is below a patch threshold that fixes known LPE CVEs.",
+      "evidence_hint": "Evidence rank min: 1 (uname -r output)",
+      "decay_class": "operational"
+    },
+    "HO-13": {
+      "id": "HO-13",
+      "label": "ssh_private_key_accessible",
+      "description": "An SSH private key readable by the current user exists in ~/.ssh or accessible paths.",
+      "evidence_hint": "Evidence rank min: 2 (filesystem scan of ~/.ssh)",
+      "decay_class": "ephemeral"
+    },
+    "HO-14": {
+      "id": "HO-14",
+      "label": "writable_authorized_keys",
+      "description": "An authorized_keys file on the host or an upstream host is writable.",
+      "evidence_hint": "Evidence rank min: 2 (file permission check)",
+      "decay_class": "operational"
+    },
+    "HO-15": {
+      "id": "HO-15",
+      "label": "container_runtime_present",
+      "description": "Docker or another container runtime is installed and the current user can interact with it.",
+      "evidence_hint": "Evidence rank min: 2 (which docker, docker ps, /var/run/docker.sock permission)",
+      "decay_class": "ephemeral"
+    },
+    "HO-16": {
+      "id": "HO-16",
+      "label": "cloud_metadata_reachable",
+      "description": "Instance metadata service (169.254.169.254 or IMDSv2) is reachable and returns credentials.",
+      "evidence_hint": "Evidence rank min: 4 (HTTP GET to metadata endpoint)",
+      "decay_class": "ephemeral"
+    },
+    "HO-17": {
+      "id": "HO-17",
+      "label": "msf_session_active",
+      "description": "An active Metasploit session exists for this host.",
+      "evidence_hint": "Evidence rank min: 1 (MSF sessions list)",
+      "decay_class": "ephemeral"
+    },
+    "HO-18": {
+      "id": "HO-18",
+      "label": "msf_credential_harvested",
+      "description": "Metasploit has harvested a credential (hash, plaintext, or token) for this host.",
+      "evidence_hint": "Evidence rank min: 1 (MSF creds database)",
+      "decay_class": "operational"
+    },
+    "HO-19": {
+      "id": "HO-19",
+      "label": "smb_service_exposed",
+      "description": "SMB (445/139) is listening on the host.",
+      "evidence_hint": "Evidence rank min: 4 (nmap port scan)",
+      "decay_class": "ephemeral"
+    },
+    "HO-20": {
+      "id": "HO-20",
+      "label": "rdp_service_exposed",
+      "description": "RDP (3389) is listening on the host.",
+      "evidence_hint": "Evidence rank min: 4 (nmap port scan)",
+      "decay_class": "ephemeral"
+    },
+    "HO-21": {
+      "id": "HO-21",
+      "label": "nfs_share_world_readable",
+      "description": "NFS exports are present and accessible without authentication.",
+      "evidence_hint": "Evidence rank min: 3 (showmount -e output or /etc/exports)",
+      "decay_class": "operational"
+    },
+    "HO-22": {
+      "id": "HO-22",
+      "label": "password_reuse_likely",
+      "description": "The same credential found on this host is likely valid on other hosts in the environment.",
+      "evidence_hint": "Evidence rank min: 2 (credential correlation across MSF creds db or collection outputs)",
+      "decay_class": "operational"
+    },
+    "HO-23": {
+      "id": "HO-23",
+      "label": "av_edr_absent_or_weak",
+      "description": "No endpoint detection/response agent or antivirus is running, or a known-bypassable version is present.",
+      "evidence_hint": "Evidence rank min: 1 (ps/service list, wmic product list)",
+      "decay_class": "ephemeral"
+    },
+    "HO-24": {
+      "id": "HO-24",
+      "label": "host_in_domain",
+      "description": "Host is domain-joined, enabling Kerberos ticket acquisition for lateral movement.",
+      "evidence_hint": "Evidence rank min: 2 (hostname, realm, domain field in collection)",
+      "decay_class": "operational"
+    },
+    "HO-25": {
+      "id": "HO-25",
+      "label": "open_port_running_exploitable_service",
+      "description": "An nmap-identified open port is running a service version with a known exploitable CVE.",
+      "evidence_hint": "Evidence rank min: 4 (nmap -sV with version detection)",
+      "decay_class": "ephemeral"
+    }
+  },
+  "attack_paths": {
+    "host_ssh_initial_access_v1": {
+      "id": "host_ssh_initial_access_v1",
+      "description": "Gain initial foothold via SSH with a harvested or default credential.",
+      "required_wickets": [
+        "HO-01",
+        "HO-02",
+        "HO-03"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1078/",
+        "https://attack.mitre.org/techniques/T1021/004/"
+      ]
+    },
+    "host_winrm_initial_access_v1": {
+      "id": "host_winrm_initial_access_v1",
+      "description": "Gain initial foothold on a Windows host via WinRM with a valid credential.",
+      "required_wickets": [
+        "HO-01",
+        "HO-04",
+        "HO-05"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1021/006/"
+      ]
+    },
+    "host_linux_privesc_sudo_v1": {
+      "id": "host_linux_privesc_sudo_v1",
+      "description": "Escalate from low-privilege user to root via misconfigured sudo.",
+      "required_wickets": [
+        "HO-03",
+        "HO-06"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1548/003/"
+      ]
+    },
+    "host_linux_privesc_suid_v1": {
+      "id": "host_linux_privesc_suid_v1",
+      "description": "Escalate to root via abuse of a SUID binary (e.g. vim, find, python).",
+      "required_wickets": [
+        "HO-03",
+        "HO-07"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1548/001/"
+      ]
+    },
+    "host_linux_privesc_kernel_v1": {
+      "id": "host_linux_privesc_kernel_v1",
+      "description": "Escalate to root via a known kernel LPE vulnerability.",
+      "required_wickets": [
+        "HO-03",
+        "HO-12"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1068/"
+      ]
+    },
+    "host_credential_access_env_v1": {
+      "id": "host_credential_access_env_v1",
+      "description": "Harvest credentials from environment variables, shell history, or config files.",
+      "required_wickets": [
+        "HO-03",
+        "HO-09"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1552/001/",
+        "https://attack.mitre.org/techniques/T1552/007/"
+      ]
+    },
+    "host_lateral_ssh_key_v1": {
+      "id": "host_lateral_ssh_key_v1",
+      "description": "Move laterally using an SSH private key found on the compromised host.",
+      "required_wickets": [
+        "HO-03",
+        "HO-13"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1021/004/"
+      ]
+    },
+    "host_container_escape_docker_v1": {
+      "id": "host_container_escape_docker_v1",
+      "description": "Escape container environment via Docker socket access on host.",
+      "required_wickets": [
+        "HO-03",
+        "HO-15"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1611/"
+      ]
+    },
+    "host_cloud_credential_imds_v1": {
+      "id": "host_cloud_credential_imds_v1",
+      "description": "Retrieve cloud IAM credentials from the instance metadata service.",
+      "required_wickets": [
+        "HO-03",
+        "HO-16"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1552/005/"
+      ]
+    },
+    "host_msf_post_exploitation_v1": {
+      "id": "host_msf_post_exploitation_v1",
+      "description": "Full post-exploitation capability via active Metasploit session: dump creds, pivot, persist.",
+      "required_wickets": [
+        "HO-17"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1059/",
+        "https://attack.mitre.org/techniques/T1003/"
+      ]
+    },
+    "host_network_exploit_v1": {
+      "id": "host_network_exploit_v1",
+      "description": "Exploit a network-exposed service running a vulnerable version (e.g. EternalBlue, Log4Shell, BlueKeep).",
+      "required_wickets": [
+        "HO-01",
+        "HO-25"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1190/"
+      ]
+    }
+  }
+}

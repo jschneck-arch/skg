@@ -1,0 +1,15 @@
+- host: 192.168.254.7
+    method: ssh
+    user: root
+    key: ~/.ssh/id_rsa
+    workload_id: samsung-tv
+    enabled: true
+    tags: [iot, samsung]
+
+  - host: 172.18.0.4
+    method: http
+    workload_id: bloodhound-ui
+    enabled: true
+    auth:
+      user: admin
+      password: 4RsTqDmIrkyOCCShh8vSKO9uCdDVA23q

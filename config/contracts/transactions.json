@@ -1,0 +1,37 @@
+{
+  "table": "transactions",
+  "primary_key": "transaction_id",
+  "ttl_hours": 1,
+  "required_fields": [
+    "transaction_id",
+    "account_id",
+    "amount",
+    "currency",
+    "created_at"
+  ],
+  "bounds": {
+    "amount": { "min": -1000000, "max": 1000000 },
+    "currency": { "enum": ["USD", "EUR", "GBP", "JPY", "CAD", "AUD"] }
+  },
+  "foreign_keys": [
+    {
+      "field": "account_id",
+      "ref_table": "accounts",
+      "ref_field": "id"
+    }
+  ],
+  "expected_count_per_batch": null,
+  "timestamp_columns": ["created_at", "updated_at"],
+  "numeric_fields": ["amount"],
+  "distribution_baselines": {
+    "amount": {
+      "mean": 150.0,
+      "std": 80.0,
+      "p50": 120.0,
+      "p95": 400.0
+    }
+  },
+  "type_constraints": {
+    "currency": "enum"
+  }
+}

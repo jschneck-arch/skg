@@ -1,0 +1,21 @@
+# SKG core daemon + resonance engine
+fastapi
+uvicorn
+pydantic
+
+# Resonance engine (semantic memory)
+faiss-cpu
+numpy
+sentence-transformers
+
+# Sensor layer — collection transports
+paramiko
+pywinrm
+pymetasploit3
+requests
+
+# YAML support (catalog compiler + config)
+pyyaml
+
+# Optional: install separately via AUR or pip when ready
+# ollama

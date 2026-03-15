@@ -1,0 +1,168 @@
+{
+  "domain": "supply_chain",
+  "version": "1.0.0",
+  "description": "Software supply chain compromise via vulnerable dependencies and maintainer account takeover.",
+  "generated_by": "skg.forge.compiler",
+  "generated_at": "2026-03-08T02:09:22.006673+00:00",
+  "source_cves": [
+    "CVE-2017-18342",
+    "CVE-2026-24009",
+    "CVE-2020-5310",
+    "CVE-2005-4860",
+    "CVE-2019-20477",
+    "CVE-2018-1000805",
+    "CVE-2020-5311",
+    "CVE-2018-7750",
+    "CVE-2020-14343",
+    "CVE-2019-16865",
+    "CVE-2019-19911",
+    "CVE-2020-5312",
+    "CVE-2007-4150",
+    "CVE-2020-1747",
+    "CVE-2001-1125",
+    "CVE-2025-50460",
+    "CVE-2020-5313"
+  ],
+  "wickets": {
+    "SC-01": {
+      "id": "SC-01",
+      "label": "target_reachable_and_responsive",
+      "description": "Target system or service responds to network probes; collection or exploitation is feasible.",
+      "evidence_hint": "TCP connect or ICMP probe confirms reachability; confirm via port scan or HTTP HEAD request",
+      "decay_class": "ephemeral"
+    },
+    "SC-02": {
+      "id": "SC-02",
+      "label": "target_service_exposed",
+      "description": "Target service is listening on a reachable port and accepting connections.",
+      "evidence_hint": "Service banner grab or HTTP 200/401 response confirms service is listening",
+      "decay_class": "ephemeral"
+    },
+    "SC-03": {
+      "id": "SC-03",
+      "label": "pyyaml_unsafe_deserialization_exploitable",
+      "description": "Deserialization of untrusted data enabling code execution (CVE-2017-18342, CVSS 9.8 CRITICAL)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "SC-04": {
+      "id": "SC-04",
+      "label": "pyyaml_arbitrary_code_execution_possible",
+      "description": "A vulnerability was discovered in the PyYAML library in versions before 5.3.1, where it is susceptible to arbitrary code execution when it processes untrusted YAML files through the full_load method o (CVE-2020-1747, CVSS 9.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "SC-05": {
+      "id": "SC-05",
+      "label": "paramiko_authentication_bypass_possible",
+      "description": "Authentication bypass via improper credential validation (CVE-2018-7750, CVSS 9.8 CRITICAL)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "SC-06": {
+      "id": "SC-06",
+      "label": "cryptography_arbitrary_code_execution_possible",
+      "description": "Symantec LiveUpdate before 1.6 does not use cryptography to ensure the integrity of download files, which allows remote attackers to execute arbitrary code via DNS spoofing of the update.symantec.com  (CVE-2001-1125, CVSS 9.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "ephemeral"
+    },
+    "SC-07": {
+      "id": "SC-07",
+      "label": "pillow_critical_vuln_present",
+      "description": "libImaging/SgiRleDecode.c in Pillow before 6.2.2 has an SGI buffer overflow. (CVE-2020-5311, CVSS 9.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "SC-08": {
+      "id": "SC-08",
+      "label": "paramiko_remote_code_execution_possible",
+      "description": "Paramiko version 2.4.1, 2.3.2, 2.2.3, 2.1.5, 2.0.8, 1.18.5, 1.17.6 contains a Incorrect Access Control vulnerability in SSH server that can result in RCE. (CVE-2018-1000805, CVSS 8.8)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; requires low privilege user present",
+      "decay_class": "ephemeral"
+    },
+    "SC-09": {
+      "id": "SC-09",
+      "label": "pillow_integer_overflow_exploitable",
+      "description": "Integer overflow leading to memory corruption (CVE-2020-5310, CVSS 8.8 HIGH)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; user interaction required (social engineering or phishing vector)",
+      "decay_class": "ephemeral"
+    },
+    "SC-10": {
+      "id": "SC-10",
+      "label": "cryptography_high_vuln_present",
+      "description": "Spectrum Cash Receipting System before 6.504 uses weak cryptography (static substitution) in the PASSFILE password file, which makes it easier for local users to gain privileges by decrypting a passwo (CVE-2005-4860, CVSS 7.8)",
+      "evidence_hint": "Local execution required; confirm via SSH command or agent collection; requires low privilege user present",
+      "decay_class": "operational"
+    },
+    "SC-11": {
+      "id": "SC-11",
+      "label": "pillow_high_vuln_present",
+      "description": "An issue was discovered in Pillow before 6.2.0. (CVE-2019-16865, CVSS 7.5)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab",
+      "decay_class": "operational"
+    },
+    "SC-12": {
+      "id": "SC-12",
+      "label": "pillow_out_of_bounds_read_exploitable",
+      "description": "Out-of-bounds read via malformed input (CVE-2020-5313, CVSS 7.1 HIGH)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab; user interaction required (social engineering or phishing vector)",
+      "decay_class": "ephemeral"
+    }
+  },
+  "attack_paths": {
+    "supply_chain_network_exploit_v1": {
+      "id": "supply_chain_network_exploit_v1",
+      "description": "Remote exploitation via network-accessible vulnerability in supply_chain environment.",
+      "required_wickets": [
+        "SC-01",
+        "SC-03",
+        "SC-04",
+        "SC-05",
+        "SC-06",
+        "SC-07"
+      ],
+      "references": [
+        "https://github.com/marshmallow-code/apispec/issues/278",
+        "https://github.com/yaml/pyyaml/blob/master/CHANGES",
+        "https://github.com/yaml/pyyaml/issues/193",
+        "http://lists.opensuse.org/opensuse-security-announce/2020-04/msg00017.html",
+        "http://lists.opensuse.org/opensuse-security-announce/2020-05/msg00017.html"
+      ]
+    },
+    "supply_chain_local_exploit_v1": {
+      "id": "supply_chain_local_exploit_v1",
+      "description": "Local exploitation of supply_chain environment requiring initial access.",
+      "required_wickets": [
+        "SC-01",
+        "SC-02",
+        "SC-10"
+      ],
+      "references": [
+        "http://marc.info/?l=bugtraq&m=111229613907550&w=2",
+        "http://secunia.com/advisories/13985",
+        "http://www.portcullis.co.uk/uplds/advisories/Portcullis%20Security%20Advisory%2005-002%20Spectrum%20Cash%20Receipting%20System%20Weak%20Password%20Protection%20Vulnerability.txt"
+      ]
+    },
+    "supply_chain_full_chain_v1": {
+      "id": "supply_chain_full_chain_v1",
+      "description": "Full exploitation chain: remote access through local privilege escalation in supply_chain.",
+      "required_wickets": [
+        "SC-01",
+        "SC-03",
+        "SC-04",
+        "SC-05",
+        "SC-06",
+        "SC-07",
+        "SC-08",
+        "SC-09"
+      ],
+      "references": [
+        "https://github.com/marshmallow-code/apispec/issues/278",
+        "https://github.com/yaml/pyyaml/blob/master/CHANGES",
+        "https://github.com/yaml/pyyaml/issues/193",
+        "http://lists.opensuse.org/opensuse-security-announce/2020-04/msg00017.html",
+        "http://lists.opensuse.org/opensuse-security-announce/2020-05/msg00017.html"
+      ]
+    }
+  }
+}
