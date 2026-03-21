@@ -462,7 +462,7 @@ def generate_toolchain(
         try:
             from skg.resonance.ollama_backend import OllamaBackend
             backend = OllamaBackend()
-            raw = backend.generate(adapter_prompt)
+            raw = backend.generate(adapter_prompt, num_predict=1024)
             raw = re.sub(r'^```python\s*', '', raw)
             raw = re.sub(r'^```\s*', '', raw)
             raw = re.sub(r'\s*```$', '', raw).strip()
@@ -828,7 +828,7 @@ def _generate_adapter_via_api(prompt: str, api_key: str) -> str:
     """Generate adapter code via Anthropic API."""
     import urllib.request
     payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6",
         "max_tokens": 4096,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()

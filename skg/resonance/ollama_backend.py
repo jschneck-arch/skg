@@ -152,6 +152,10 @@ class OllamaBackend:
             or cfg_model
         )
         self.temperature = float(env_temp) if env_temp else float(cfg_temp)
+        # generation_timeout_s: how long to wait for a full generation response.
+        # Default 900s (15 min) — CPU-only inference for catalog/adapter JSON is slow.
+        # Set resonance.ollama.generation_timeout_s in skg_config.yaml to override.
+        self.generation_timeout_s = int(cfg.get("generation_timeout_s") or 900)
 
     @staticmethod
     def load_config() -> dict[str, Any]:
@@ -242,7 +246,7 @@ class OllamaBackend:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=self.generation_timeout_s) as r:
                 data = json.loads(r.read())
             return data.get("response", "").strip()
         except urllib.error.URLError as exc:
@@ -266,7 +270,9 @@ class OllamaBackend:
         log.info(f"[ollama] drafting catalog for '{domain_name}' using {m}")
         prompt = _build_prompt(domain_name, description, context)
 
-        raw = self.generate(prompt, m)
+        # Catalogs are compact JSON — 512 tokens is sufficient and reduces
+        # inference time significantly on CPU-only hardware.
+        raw = self.generate(prompt, m, num_predict=512)
 
         # Strip markdown fences if present
         raw = re.sub(r"^```json\s*", "", raw)
@@ -287,7 +293,7 @@ class OllamaBackend:
             # Retry once with stricter instruction
             log.warning(f"[ollama] first attempt invalid JSON ({exc}), retrying")
             retry_prompt = prompt + "\n\nCRITICAL: Output ONLY the JSON object. No text before or after."
-            raw2 = self.generate(retry_prompt, m)
+            raw2 = self.generate(retry_prompt, m, num_predict=512)
             raw2 = re.sub(r"```[^\n]*\n?", "", raw2).strip()
             brace2 = raw2.find("{")
             if brace2 >= 0:

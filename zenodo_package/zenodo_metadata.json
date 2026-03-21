@@ -1,0 +1,42 @@
+{
+  "metadata": {
+    "title": "The Unified Field Functional: Fiber-Driven Gravity and Field-First Architecture in SKG",
+    "upload_type": "publication",
+    "publication_type": "preprint",
+    "description": "Prior work established a formal substrate for telemetry-driven reasoning (Work 3) and an operational gravity field mechanism for autonomous instrument selection. This paper inverts the architectural relationship: we define a unified field functional L(F) over five canonical field objects — Field Observation, Field Local, Field Coupling, Field Fiber, Field Cluster — and show that the tri-state encoding, projection operator, field energy, and gravity selection mechanism of Work 3 are all derived projections under this functional. The field is primary; wickets are one projection of it.\n\nThe central contribution is fiber-driven gravity: the gravity field follows the gradient of the field functional with respect to fiber tension rather than a flat count of unknown wickets, recovering the Work 3 mechanism as a special case and extending it with coupling opportunity and decoherence load terms. We establish four formal propositions: boundedness of L(F), recovery of the Work 3 selection mechanism as a flat-space limit, monotone reduction under non-contradictory observations, and characterization of protected states as stable local minima. The decoherence criterion is formalized as four simultaneous conditions on coherence, contradiction, decoherence mass, and basis count corresponding to field-geometric stability. The pearl manifold is identified as memory curvature in the gravity selection landscape.\n\nWe validate the framework against a live heterogeneous lab network. The central result is autonomous EternalBlue (CVE-2017-0143 / MS17-010) path realization: the coupling chain from host reachability through SMB exposure to confirmed vulnerability was traversed in one instrument execution, generating an exploit proposal at 0.95 confidence without human guidance. Three independent coupling-arc failures that previously blocked this path are diagnosed as structurally identical under the field functional — each a severed inter-local coupling.",
+    "creators": [
+      {
+        "name": "Schneck, Jeffrey Michael",
+        "affiliation": "Independent Researcher"
+      }
+    ],
+    "keywords": [
+      "security knowledge graph",
+      "telemetry-driven reasoning",
+      "information-theoretic gravity",
+      "fiber bundle",
+      "sheaf cohomology",
+      "autonomous red teaming",
+      "attack path realization",
+      "field functional",
+      "decoherence criterion",
+      "pearl manifold"
+    ],
+    "license": "cc-by-4.0",
+    "access_right": "open",
+    "language": "eng",
+    "publication_date": "2026-03-21",
+    "notes": "Work 4 in the SKG series. Builds on: Work 3 — Projection Over Constrained System State (formal substrate, sheaf structure, empirical validation). The SKG system is available at https://github.com/jschneck-arch/skg",
+    "related_identifiers": [
+      {
+        "identifier": "https://github.com/jschneck-arch/skg",
+        "relation": "isSupplementedBy",
+        "scheme": "url"
+      }
+    ],
+    "subjects": [
+      {"term": "Computer Science - Cryptography and Security", "scheme": "arxiv", "identifier": "cs.CR"},
+      {"term": "Computer Science - Information Theory", "scheme": "arxiv", "identifier": "cs.IT"}
+    ]
+  }
+}

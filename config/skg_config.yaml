@@ -57,6 +57,11 @@ resonance:
     url: "http://localhost:11434"
     model: "tinyllama:latest"
     temperature: 0.1
+    # generation_timeout_s: how long to wait for catalog/adapter generation (Ollama).
+    # CPU-only with tinyllama is ~0.3 tok/s — 512 tokens takes ~1700s.
+    # Set ANTHROPIC_API_KEY in /etc/skg/skg.env for Claude-backed generation instead.
+    # Better local models: ollama pull qwen2.5:0.5b  (faster) or llama3.2:3b (better)
+    generation_timeout_s: 900
 
   assistant:
     enabled: true

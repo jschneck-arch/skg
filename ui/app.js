@@ -86,6 +86,7 @@ function targetMap(targets) {
   const byIp = new Map();
   (targets.targets || []).forEach((target) => {
     if (target.ip) byIp.set(target.ip, target);
+    if (target.workload_id) byIp.set(target.workload_id, target);
   });
   return byIp;
 }
@@ -158,7 +159,7 @@ function selectTopFold() {
     renderActionStatus();
     return;
   }
-  const foldId = fold.fold_id || `${fold.target_ip || fold.location || "fold"}:0`;
+  const foldId = fold.id || `${fold.target_ip || fold.location || "fold"}:0`;
   state.selected = { kind: "fold", id: foldId, payload: fold };
   setActiveView("surface");
   render();
@@ -297,13 +298,21 @@ function reportHtml() {
 }
 
 function currentGroupedTargets(data) {
+  const knownKeys = new Set(
+    (data.targets.targets || []).flatMap((t) => [t.ip, t.workload_id].filter(Boolean))
+  );
   return groupSurfaceByIdentity(data.surface)
     .filter((group) => matchesFilter(
       group.identity_key,
       group.manifestations,
       group.paths.map((p) => [p.attack_path_id, p.classification, p.domain])
     ))
-    .sort((a, b) => ((b.paths[0] || {}).score || 0) - ((a.paths[0] || {}).score || 0));
+    .sort((a, b) => {
+      const aKnown = knownKeys.has(a.identity_key) ? 1 : 0;
+      const bKnown = knownKeys.has(b.identity_key) ? 1 : 0;
+      if (bKnown !== aKnown) return bKnown - aKnown;
+      return ((b.paths[0] || {}).score || 0) - ((a.paths[0] || {}).score || 0);
+    });
 }
 
 function assistantOverview(data) {
@@ -375,7 +384,7 @@ function renderFolds(data) {
   box.innerHTML = "";
   currentFilteredFolds(data)
     .forEach((fold, index) => {
-    const foldId = fold.fold_id || `${fold.target_ip || fold.location || "fold"}:${index}`;
+    const foldId = fold.id || `${fold.target_ip || fold.location || "fold"}:${index}`;
     const why = (fold.why || {}).mismatch || "fold";
     const node = el(
       "div",
@@ -631,8 +640,11 @@ async function ensureActionHistory() {
 async function handleAction(kind, payload) {
   try {
     if (kind === "proposal-accept") {
-      await postJson(`/proposals/${encodeURIComponent(payload.id)}/accept`, {});
-      state.actionStatus = `Accepted proposal ${payload.id}.`;
+      const acceptResult = await postJson(`/proposals/${encodeURIComponent(payload.id)}/accept`, {});
+      const hint = acceptResult.command_hint || acceptResult.command || "";
+      state.actionStatus = hint
+        ? `Accepted ${payload.id}. Run: ${hint}`
+        : `Accepted proposal ${payload.id}.`;
     } else if (kind === "proposal-defer") {
       const result = await postJson(`/proposals/${encodeURIComponent(payload.id)}/defer`, { days: 7 });
       state.actionStatus = `Deferred proposal ${payload.id} until ${result.until || "later"}.`;
@@ -787,7 +799,7 @@ function relatedObjects(selection, data) {
     .slice(0, 6)
     .map((fold, index) => ({
       kind: "fold",
-      id: fold.fold_id || `${fold.target_ip || fold.location || "fold"}:${index}`,
+      id: fold.id || `${fold.target_ip || fold.location || "fold"}:${index}`,
       label: `${fold.fold_type} Φ=${Number(fold.gravity_weight || 0).toFixed(2)}`,
     }));
 
@@ -877,8 +889,8 @@ function renderFoldDetail(selection, data) {
     wouldDo.push("Re-observe the surrounding surface before deciding whether this fold is structural, contextual, or temporal pressure.");
   }
   const reviewCommands = [];
-  if (fold.fold_id && (fold.target_ip || fold.location)) {
-    reviewCommands.push(`curl -X POST 'http://127.0.0.1:5055/folds/resolve/${fold.fold_id}?target_ip=${fold.target_ip || fold.location}'`);
+  if (fold.id && (fold.target_ip || fold.location)) {
+    reviewCommands.push(`curl -X POST 'http://127.0.0.1:5055/folds/resolve/${fold.id}?target_ip=${fold.target_ip || fold.location}'`);
   }
   if (why.service) {
     reviewCommands.push(`skg catalog compile --domain ${why.service.toLowerCase().replace(/[^a-z0-9]+/g, "_")} --description 'review ${why.service} fold coverage' --dry-run`);
@@ -889,9 +901,9 @@ function renderFoldDetail(selection, data) {
       <div class="detail-meta">
         <div class="meta">${esc(fold.target_ip || fold.location || "unknown")} | gravity ${Number(fold.gravity_weight || 0).toFixed(3)}</div>
         ${
-          fold.fold_id && (fold.target_ip || fold.location)
+          fold.id && (fold.target_ip || fold.location)
             ? `<div class="button-row">
-                 <button class="action-button" data-action-kind="fold-resolve" data-fold-id="${esc(fold.fold_id)}" data-target-ip="${esc(fold.target_ip || fold.location)}">Resolve Fold</button>
+                 <button class="action-button" data-action-kind="fold-resolve" data-fold-id="${esc(fold.id)}" data-target-ip="${esc(fold.target_ip || fold.location)}">Resolve Fold</button>
                </div>`
             : ""
         }
@@ -1045,7 +1057,7 @@ async function ensureAssistantExplanation(selection) {
   state.assistantLoading = key;
   renderSelection(state.data);
   try {
-    state.assistantBySelection[key] = await postJson("/assistant/explain", {
+    const resp = await postJson("/assistant/explain", {
       kind: selection.kind,
       id: selection.id,
       identity_key: selectionIdentity(selection),
@@ -1053,6 +1065,14 @@ async function ensureAssistantExplanation(selection) {
       task: selectionTask(selection),
       context: buildAssistantContext(selection),
     });
+    state.assistantBySelection[key] = resp;
+    // If Ollama is computing in the background, re-poll after it should finish
+    if (resp && resp.computing && !resp.mode === "ollama") {
+      setTimeout(() => {
+        delete state.assistantBySelection[key];
+        ensureAssistantExplanation(selection);
+      }, 38000);
+    }
   } catch (err) {
     state.assistantBySelection[key] = { error: err.message };
   } finally {
@@ -1069,27 +1089,31 @@ function renderAssistantResponse(selection, fallbackHtml) {
   if (taskBadge) taskBadge.textContent = selectionTask(selection);
   if (!key) return fallbackHtml;
   if (state.assistantLoading === key) {
-    return "Loading bounded assistant explanation from live SKG substrate.";
+    return "Loading...";
   }
   const payload = state.assistantBySelection[key];
   if (!payload) return fallbackHtml;
   if (payload.error) {
-    return `${fallbackHtml}<div class="meta">Assistant endpoint failed: ${esc(payload.error)}</div>`;
+    return `${fallbackHtml}<div class="meta">Assistant error: ${esc(payload.error)}</div>`;
   }
   const findings = (payload.findings || []).map((item) => `<li>${esc(item)}</li>`).join("");
   const actions = (payload.next_actions || []).map((item) => `<li>${esc(item)}</li>`).join("");
   const cautions = (payload.cautions || []).map((item) => `<li>${esc(item)}</li>`).join("");
   const refs = payload.references || {};
-  if (modeBadge) modeBadge.textContent = payload.mode || "fallback";
+  const modeLabel = payload.mode === "ollama"
+    ? `llm: ${esc(payload.model || "ollama")}`
+    : payload.computing
+      ? `computing (${esc(payload.model || "ollama")})`
+      : "deterministic";
+  if (modeBadge) modeBadge.textContent = payload.mode === "ollama" ? "llm" : payload.computing ? "computing" : "deterministic";
   if (taskBadge) taskBadge.textContent = payload.task || selectionTask(selection);
   return `
     <div class="assistant-block">
-      <div class="meta">assistant mode: ${esc(payload.mode || "fallback")}${payload.model ? ` | model: ${esc(payload.model)}` : ""}</div>
+      <div class="meta">${modeLabel} | folds=${esc(refs.fold_count || 0)} proposals=${esc(refs.proposal_count || 0)} artifacts=${esc(refs.artifact_count || 0)}</div>
       <p>${esc(payload.summary || "")}</p>
       ${findings ? `<strong>Findings</strong><ul>${findings}</ul>` : ""}
-      ${actions ? `<strong>Next Actions</strong><ul>${actions}</ul>` : ""}
+      ${actions ? `<strong>Next</strong><ul>${actions}</ul>` : ""}
       ${cautions ? `<strong>Cautions</strong><ul>${cautions}</ul>` : ""}
-      <div class="meta">refs: folds=${esc(refs.fold_count || 0)} | proposals=${esc(refs.proposal_count || 0)} | artifacts=${esc(refs.artifact_count || 0)} | transitions=${esc((refs.timeline || {}).transition_count || 0)}</div>
     </div>`;
 }
 
@@ -1195,7 +1219,7 @@ function findSelection(kind, id, data) {
     const neighborhood = (data.memory.neighborhoods || []).find((row, index) => `${row.identity_key}:${row.domain || "unknown"}:${index}` === id);
     return neighborhood ? { kind, id, payload: neighborhood } : null;
   }
-  const fold = (data.folds.folds || []).find((row, index) => (row.fold_id || `${row.target_ip || row.location || "fold"}:${index}`) === id);
+  const fold = (data.folds.folds || []).find((row, index) => (row.id || `${row.target_ip || row.location || "fold"}:${index}`) === id);
   return fold ? { kind: "fold", id, payload: fold } : null;
 }
 
@@ -1591,7 +1615,7 @@ function renderActionHistory() {
             <strong>${esc(row.reason || row.action || row.kind || "action")}</strong>
             <div class="meta">${esc(row.timestamp || "")}</div>
             <div class="meta">${esc(row.identity_key || row.target_ip || "global")} | ${esc(row.domain || "unknown")}</div>
-            <div class="meta">${esc(row.proposal_id || row.fold_id || row.status || "")}</div>
+            <div class="meta">${esc(row.proposal_id || row.id || row.status || "")}</div>
           </div>`
         )
         .join("")

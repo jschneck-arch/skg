@@ -286,6 +286,75 @@ def _instrument_observation_coherence(inst_name: str, target: dict) -> float:
     return 1.0
 
 
+def _merge_configured_targets(surface: dict) -> dict:
+    """
+    Inject any targets declared in /etc/skg/targets.yaml that are not already
+    present in the surface.  Auto-discovery misses KVM/libvirt subnets and any
+    host that happened to be down at scan time.
+    """
+    targets_file = Path("/etc/skg/targets.yaml")
+    if not targets_file.exists():
+        return surface
+    try:
+        import yaml as _yaml
+        data = _yaml.safe_load(targets_file.read_text()) or {}
+    except Exception:
+        return surface
+    existing_ips: set[str] = {t.get("ip", "") for t in surface.get("targets", [])}
+    new_targets = []
+    for entry in (data.get("targets") or []):
+        ip = str(entry.get("host") or entry.get("ip") or "").strip()
+        if not ip or ip in existing_ips:
+            continue
+        # Build a minimal service list from the declared services block
+        svc_map: dict = entry.get("services") or {}
+        services: list[tuple[int, str, str]] = []
+        port_hints = {
+            "http": (entry.get("services", {}).get("http", {}).get("port") or 80, "http"),
+            "ftp":  (entry.get("services", {}).get("ftp", {}).get("port") or 21, "ftp"),
+            "ssh":  (entry.get("services", {}).get("ssh", {}).get("port") or 22, "ssh"),
+            "mysql": (entry.get("services", {}).get("mysql", {}).get("port") or 3306, "mysql"),
+        }
+        if not svc_map:
+            method = entry.get("method", "")
+            if method in ("http", "https"):
+                services.append((80, "http", ""))
+            elif method == "ssh":
+                services.append((22, "ssh", ""))
+            else:
+                services.append((80, "http", ""))
+        else:
+            for svc_name, svc_conf in svc_map.items():
+                if not isinstance(svc_conf, dict):
+                    continue
+                port = int(svc_conf.get("port") or port_hints.get(svc_name, (0, ""))[0] or 0)
+                if port:
+                    services.append((port, svc_name, ""))
+        tags = entry.get("tags") or []
+        os_guess = "windows" if "windows" in tags else "linux"
+        try:
+            classified = _classify_target_from_services(ip, services)
+        except Exception:
+            classified = {
+                "ip": ip,
+                "os": os_guess,
+                "services": [{"port": p, "service": s, "banner": b} for p, s, b in services],
+                "domains": [],
+                "attack_paths": [],
+                "wicket_states": {},
+            }
+        classified["ip"] = ip
+        classified["workload_id"] = entry.get("workload_id", "")
+        classified["os"] = os_guess if classified.get("os") in ("unknown", "", None) else classified["os"]
+        classified["wicket_states"] = load_wicket_states(ip)
+        new_targets.append(classified)
+        existing_ips.add(ip)
+    if new_targets:
+        surface = dict(surface)
+        surface["targets"] = list(surface.get("targets", [])) + new_targets
+    return surface
+
+
 def _hydrate_surface_from_latest_nmap(surface_path: str) -> dict:
     if not surface_path:
         return {}
@@ -503,6 +572,41 @@ def _fold_service_family(fold) -> str:
     return "generic"
 
 
+_RESONANCE_ENGINE = None  # lazy-loaded, shared across calls within a gravity process
+
+
+def _get_resonance_engine():
+    """Load the resonance engine from disk (lazy, cached for the process lifetime)."""
+    global _RESONANCE_ENGINE
+    if _RESONANCE_ENGINE is not None:
+        return _RESONANCE_ENGINE
+    try:
+        from skg.resonance.engine import ResonanceEngine
+        engine = ResonanceEngine(SKG_STATE_DIR / "resonance")
+        engine.boot()
+        _RESONANCE_ENGINE = engine
+    except Exception as exc:
+        print(f"  [RESONANCE] engine unavailable: {exc}")
+    return _RESONANCE_ENGINE
+
+
+def _get_anthropic_api_key() -> str:
+    """Read ANTHROPIC_API_KEY from environment or /etc/skg/skg.env."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        return key
+    try:
+        env_file = Path("/etc/skg/skg.env")
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
 def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_path: str) -> list[str]:
     try:
         from skg.forge.generator import generate_toolchain
@@ -597,12 +701,17 @@ def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_pat
             "fold_ids": [fid for fid in fold_ids if fid],
         }
 
+        # Inject Anthropic API key so the forge can use Claude when available
+        api_key = _get_anthropic_api_key()
+        if api_key:
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+
         try:
             gen_result = generate_toolchain(
                 domain=domain,
                 description=description,
                 gap=gap,
-                resonance_engine=None,
+                resonance_engine=_get_resonance_engine(),
             )
             if not gen_result.get("success"):
                 continue
@@ -3923,6 +4032,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
     surface = _hydrate_surface_from_latest_nmap(surface_path)
     if not surface:
         surface = json.loads(Path(surface_path).read_text())
+    surface = _merge_configured_targets(surface)
     if focus_target:
         targets = [t for t in surface.get("targets", []) if t.get("ip") == focus_target]
         if not targets:

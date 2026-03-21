@@ -2326,6 +2326,60 @@ def _assistant_parse_json(raw: str) -> dict[str, Any] | None:
     return None
 
 
+# ── Async Ollama assistant cache ─────────────────────────────────────────────
+# tinyllama on CPU takes 30-60s per inference — far too slow for real-time
+# requests. Strategy: return from cache if fresh; spawn a background thread to
+# (re)compute when the cache is missing or stale. The UI always gets an instant
+# response; the next poll gets the LLM result once ready.
+
+_OLLAMA_CACHE: dict[str, dict[str, Any]] = {}   # key → {result, model, computed_at}
+_OLLAMA_INFLIGHT: set[str] = set()               # keys currently being computed
+_OLLAMA_CACHE_TTL_S = 600                        # 10 minutes
+_OLLAMA_LOCK = threading.Lock()
+
+
+def _assistant_cache_key(context: dict[str, Any]) -> str:
+    return f"{context.get('identity_key','')}:{context.get('task','')}"
+
+
+def _assistant_ollama_background(context: dict[str, Any], model: str, num_predict: int) -> None:
+    """Run Ollama inference in a background thread and store result in cache."""
+    key = _assistant_cache_key(context)
+    try:
+        from skg.resonance.ollama_backend import OllamaBackend
+        backend = OllamaBackend()
+        # Trim context to reduce prompt size for tinyllama
+        slim = {
+            "kind": context.get("kind"),
+            "identity_key": context.get("identity_key"),
+            "task": context.get("task"),
+            "subject": context.get("subject"),
+            "fold_count": context.get("fold_count"),
+            "proposal_count": context.get("proposal_count"),
+            "related_folds": (context.get("related_folds") or [])[:3],
+            "related_proposals": (context.get("related_proposals") or [])[:3],
+            "timeline": {
+                k: v for k, v in (context.get("timeline") or {}).items()
+                if k != "recent_transitions"
+            },
+        }
+        prompt = _assistant_json_prompt(slim)
+        raw = backend.generate(prompt, model=model, num_predict=num_predict)
+        payload = _assistant_parse_json(raw)
+        if isinstance(payload, dict):
+            with _OLLAMA_LOCK:
+                _OLLAMA_CACHE[key] = {
+                    "result": payload,
+                    "model": model,
+                    "computed_at": time.time(),
+                }
+    except Exception as exc:
+        log.debug(f"[assistant] background Ollama error for {key}: {exc}")
+    finally:
+        with _OLLAMA_LOCK:
+            _OLLAMA_INFLIGHT.discard(key)
+
+
 def _assistant_try_ollama(context: dict[str, Any], timeout_s: float = 8.0) -> tuple[dict[str, Any] | None, str | None]:
     try:
         from skg.resonance.ollama_backend import OllamaBackend
@@ -2337,31 +2391,23 @@ def _assistant_try_ollama(context: dict[str, Any], timeout_s: float = 8.0) -> tu
         return None, None
 
     model = backend.model()
-    result: dict[str, Any] = {"payload": None}
-    error: dict[str, Any] = {"raised": None}
+    key = _assistant_cache_key(context)
+    num_predict = int((context.get("assistant_config") or {}).get("num_predict") or 220)
 
-    def _worker() -> None:
-        try:
-            prompt = _assistant_json_prompt(context)
-            raw = backend.generate(
-                prompt,
-                model=model,
-                num_predict=int((context.get("assistant_config") or {}).get("num_predict") or 220),
+    with _OLLAMA_LOCK:
+        cached = _OLLAMA_CACHE.get(key)
+        if cached and (time.time() - cached["computed_at"]) < _OLLAMA_CACHE_TTL_S:
+            return cached["result"], cached.get("model", model)
+        if key not in _OLLAMA_INFLIGHT:
+            _OLLAMA_INFLIGHT.add(key)
+            t = threading.Thread(
+                target=_assistant_ollama_background,
+                args=(context, model, num_predict),
+                daemon=True,
             )
-            result["payload"] = _assistant_parse_json(raw)
-        except Exception as exc:
-            error["raised"] = exc
+            t.start()
 
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    thread.join(timeout_s)
-    if thread.is_alive():
-        return None, model
-    if error["raised"] is not None:
-        return None, model
-    payload = result.get("payload")
-    if isinstance(payload, dict):
-        return payload, model
+    # Cache miss — background task is now running; caller will use fallback
     return None, model
 
 
@@ -2624,6 +2670,7 @@ def assistant_explain(req: AssistantExplainRequest):
         }
         mode = "fallback"
         model = None
+        computing = False
         if context["assistant_config"]["enabled"]:
             rendered, model = _assistant_try_ollama(
                 context,
@@ -2631,6 +2678,10 @@ def assistant_explain(req: AssistantExplainRequest):
             )
             if rendered:
                 mode = "ollama"
+            else:
+                # Check if a background compute was just kicked off
+                with _OLLAMA_LOCK:
+                    computing = _assistant_cache_key(context) in _OLLAMA_INFLIGHT
         else:
             rendered = None
 
@@ -2639,6 +2690,7 @@ def assistant_explain(req: AssistantExplainRequest):
         return {
             "mode": mode,
             "model": model,
+            "computing": computing,
             "task": task,
             "selection": {
                 "kind": req.kind,
@@ -3110,7 +3162,27 @@ def fold_resolve(fold_id: str, target_ip: str = ""):
 
 # --- Entry point ---
 
+def _load_skg_env() -> None:
+    """Load /etc/skg/skg.env key=value pairs into os.environ (do not override existing)."""
+    env_file = Path("/etc/skg/skg.env")
+    if not env_file.exists():
+        return
+    try:
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except Exception:
+        pass
+
+
 def run():
+    _load_skg_env()
     log = setup_logging()
 
     def _shutdown(sig, _):
