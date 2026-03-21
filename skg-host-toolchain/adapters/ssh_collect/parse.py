@@ -182,7 +182,7 @@ def eval_ho10_root(client, host: str, out: Path, apid: str, rid: str, wid: str):
 
 def eval_ho06_sudo(client, host: str, out: Path, apid: str, rid: str, wid: str):
     """HO-06: sudo misconfigured (NOPASSWD / wildcard exec)."""
-    stdout, _, rc = _run(client, "sudo -l -n 2>&1 || sudo -l 2>&1")
+    stdout, _, rc = _run(client, "sudo -l -n 2>&1")
     if not stdout or "not allowed" in stdout.lower() or "command not found" in stdout.lower():
         emit(out, "HO-06", "unknown", 3, "ssh_command", f"ssh://{host}/sudo-l", 0.4,
              apid, rid, wid, "Could not enumerate sudo permissions or sudo not present.")

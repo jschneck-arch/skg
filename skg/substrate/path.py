@@ -52,6 +52,7 @@ class PathScore:
     blocked:        list[str]       # node_ids confirmed blocked
     unknown:        list[str]       # node_ids with no sufficient evidence
     latest_status:  dict[str, str]  # node_id → tri-state
+    unresolved_detail: dict[str, dict] = field(default_factory=dict)
     workload_id:    str = ""
     run_id:         str = ""
     computed_at:    str = ""
@@ -77,6 +78,7 @@ class PathScore:
             "blocked":        self.blocked,
             "unknown":        self.unknown,
             "latest_status":  self.latest_status,
+            "unresolved_detail": self.unresolved_detail,
             "entropy":        self.entropy,
             "workload_id":    self.workload_id,
             "run_id":         self.run_id,

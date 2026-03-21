@@ -9,7 +9,8 @@ If FAISS is unavailable, the engine falls back to an in-memory cosine search.
 """
 from __future__ import annotations
 
-import json, logging
+import json, logging, re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypeVar, Generic, Type
 
@@ -280,3 +281,37 @@ class ResonanceEngine:
                 "observations": self.observations.status() if self.observations else None,
             },
         }
+
+    def status_offline(self) -> dict:
+        return {
+            "ready": False,
+            "memory": {
+                "wickets": 0,
+                "adapters": 0,
+                "domains": 0,
+                "observations": None,
+            },
+        }
+
+    def save_draft(self, domain_name: str, catalog: dict) -> Path:
+        """
+        Persist a resonance draft into the engine's draft store.
+
+        Drafts are the source material for later operator review and eventual
+        catalog/toolchain promotion, so they live under resonance/drafts rather
+        than being dropped into a temp path.
+        """
+        self._check_ready()
+        self._drafts_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_domain = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(domain_name)).strip("_") or "draft"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        draft_path = self._drafts_dir / f"draft_{safe_domain}_{ts}.json"
+
+        payload = {
+            "domain": domain_name,
+            "saved_at": ts,
+            "catalog": catalog,
+        }
+        draft_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return draft_path

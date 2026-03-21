@@ -36,6 +36,7 @@ SCORE_KEY = {
     "ad_lateral":       "lateral_score",
     "host":             "host_score",
     "web":              "web_score",
+    "ai_target":        "ai_score",
 }
 
 DOMAIN_LABEL = {
@@ -44,6 +45,7 @@ DOMAIN_LABEL = {
     "ad_lateral":       "AD Lateral Movement",
     "host":             "Host Compromise",
     "web":              "Web Surface",
+    "ai_target":        "AI/ML Target",
 }
 
 CLASSIFICATION_RANK = {
@@ -80,13 +82,15 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
 
 def _infer_domain(payload: dict, filename: str) -> str:
     for key, domain in [("aprs","aprs"), ("lateral_score","ad_lateral"),
-                        ("escape_score","container_escape"), ("host_score","host")]:
+                        ("escape_score","container_escape"), ("host_score","host"),
+                        ("web_score","web"), ("ai_score","ai_target")]:
         if key in payload:
             return domain
     fname = filename.lower()
     for kw, domain in [("lateral","ad_lateral"), ("ad_","ad_lateral"),
                        ("escape","container_escape"), ("container","container_escape"),
-                       ("aprs","aprs"), ("log4j","aprs"), ("host","host")]:
+                       ("aprs","aprs"), ("log4j","aprs"), ("host","host"),
+                       ("web","web"), ("ai","ai_target")]:
         if kw in fname:
             return domain
     return "unknown"

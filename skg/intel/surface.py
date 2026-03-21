@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from skg.core.paths import INTERP_DIR, EVENTS_DIR, SKG_STATE_DIR, SKG_HOME
+from skg.identity import parse_workload_ref
 
 # Score key by domain
 SCORE_KEY = {
@@ -36,6 +37,11 @@ SCORE_KEY = {
     "ad_lateral":       "lateral_score",
     "host":             "host_score",
     "web":              "web_score",
+    "ai_target":        "ai_score",
+    "data":             "data_score",
+    "supply_chain":     "supply_chain_score",
+    "iot_firmware":     "iot_score",
+    "binary":           "binary_score",
 }
 
 DOMAIN_LABEL = {
@@ -44,6 +50,11 @@ DOMAIN_LABEL = {
     "ad_lateral":       "AD Lateral Movement",
     "host":             "Host Compromise",
     "web":              "Web Surface",
+    "ai_target":        "AI/ML Target",
+    "data":             "Data Exposure",
+    "supply_chain":     "Supply Chain",
+    "iot_firmware":     "IoT Firmware",
+    "binary":           "Binary Exploitation",
 }
 
 CLASSIFICATION_RANK = {
@@ -54,12 +65,24 @@ CLASSIFICATION_RANK = {
 }
 
 
+def _normalize_classification(classification: str) -> str:
+    if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
+        return classification
+    if classification == "fully_realized":
+        return "realized"
+    if classification == "blocked":
+        return "not_realized"
+    if classification in {"partial", "indeterminate_h1"}:
+        return "indeterminate"
+    return classification or "unknown"
+
+
 def _read_interp_dir(interp_dir: Path) -> list[dict]:
     """Read all projection results from INTERP_DIR. Returns latest per workload+path."""
     results: dict[str, dict] = {}
     if not interp_dir.exists():
         return []
-    for f in sorted(interp_dir.glob("*.json")):
+    for f in sorted(list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson"))):
         try:
             data = json.loads(f.read_text())
             # Handle both direct payload and wrapped event
@@ -72,6 +95,7 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
             key    = f"{wid}::{path_id}"
             # Keep latest by filename (sorted above means last wins)
             payload["_source_file"] = f.name
+            payload["classification"] = _normalize_classification(payload.get("classification", "unknown"))
             results[key] = payload
         except Exception:
             pass
@@ -80,13 +104,19 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
 
 def _infer_domain(payload: dict, filename: str) -> str:
     for key, domain in [("aprs","aprs"), ("lateral_score","ad_lateral"),
-                        ("escape_score","container_escape"), ("host_score","host")]:
+                        ("escape_score","container_escape"), ("host_score","host"),
+                        ("web_score","web"), ("ai_score","ai_target"),
+                        ("data_score","data"), ("supply_chain_score","supply_chain"),
+                        ("iot_score","iot_firmware"), ("binary_score","binary")]:
         if key in payload:
             return domain
     fname = filename.lower()
-    for kw, domain in [("lateral","ad_lateral"), ("ad_","ad_lateral"),
+    for kw, domain in [("supply_chain","supply_chain"), ("iot_firmware","iot_firmware"),
+                       ("binary","binary"), ("data_","data"),
+                       ("lateral","ad_lateral"), ("ad_","ad_lateral"),
                        ("escape","container_escape"), ("container","container_escape"),
-                       ("aprs","aprs"), ("log4j","aprs"), ("host","host")]:
+                       ("aprs","aprs"), ("log4j","aprs"), ("host","host"),
+                       ("web","web"), ("ai","ai_target")]:
         if kw in fname:
             return domain
     return "unknown"
@@ -139,8 +169,9 @@ def surface(interp_dir: Path | None = None,
         score  = _get_score(proj, domain)
         if score < min_score:
             continue
+        ident = parse_workload_ref(proj.get("workload_id","unknown"))
 
-        classification = proj.get("classification", "unknown")
+        classification = _normalize_classification(proj.get("classification", "unknown"))
         neighbors = []
         if graph:
             try:
@@ -151,6 +182,8 @@ def surface(interp_dir: Path | None = None,
 
         workloads.append({
             "workload_id":    proj.get("workload_id","unknown"),
+            "identity_key":   ident["identity_key"],
+            "manifestation_key": ident["manifestation_key"],
             "domain":         domain,
             "domain_label":   DOMAIN_LABEL.get(domain, domain),
             "attack_path_id": proj.get("attack_path_id",""),
@@ -159,6 +192,17 @@ def surface(interp_dir: Path | None = None,
             "realized":       proj.get("realized", []),
             "blocked":        proj.get("blocked", []),
             "unknown":        proj.get("unknown", []),
+            "unresolved_detail": proj.get("unresolved_detail", {}),
+            "local_energy": round(
+                float(proj.get("total_energy", 0.0) or 0.0)
+                or sum(float((proj.get("unresolved_detail", {}) or {}).get(nid, {}).get("local_energy", 0.0) or 0.0)
+                       for nid in proj.get("unknown", [])),
+                3,
+            ),
+            "compatibility_score": round(float(proj.get("compatibility_score", 0.0) or 0.0), 3),
+            "compatibility_span": int(proj.get("compatibility_span", 0) or 0),
+            "decoherence": round(float(proj.get("decoherence", 0.0) or 0.0), 3),
+            "unresolved_reason": proj.get("unresolved_reason", ""),
             "neighbors":      neighbors,
             "computed_at":    proj.get("computed_at",""),
         })
@@ -166,6 +210,7 @@ def surface(interp_dir: Path | None = None,
     # Sort: realized first, then by score desc
     workloads.sort(key=lambda w: (
         CLASSIFICATION_RANK.get(w["classification"], 9),
+        -float(w.get("local_energy", 0.0) or 0.0),
         -w["score"]
     ))
 

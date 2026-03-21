@@ -12,27 +12,103 @@ The SKG daemon. Single entry point. Owns everything.
 The toolchains manage their own venvs and projection logic.
 The daemon calls them as subprocesses — no duplication.
 """
-import json, logging, os, signal, subprocess, sys, threading, time
+import glob, json, logging, math, os, selectors, signal, subprocess, sys, threading, time
+import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from skg.core.paths import (
     ensure_runtime_dirs, TOOLCHAIN_DIR, CE_TOOLCHAIN_DIR, AD_TOOLCHAIN_DIR,
     HOST_TOOLCHAIN_DIR, IDENTITY_FILE, EVENTS_DIR, INTERP_DIR, LOG_FILE, PID_FILE,
-    RESONANCE_DIR, SKG_HOME, SKG_CONFIG_DIR, SKG_STATE_DIR,
+    RESONANCE_DIR, SKG_HOME, SKG_CONFIG_DIR, SKG_STATE_DIR, DISCOVERY_DIR,
 )
 from skg.modes import Mode, ModeTransition, MODE_BEHAVIOR, valid_transition
-from skg.identity import Identity
+from skg.identity import Identity, parse_workload_ref
 from skg.resonance.engine import ResonanceEngine
 from skg.resonance.ingester import ingest_all
 from skg.temporal import DeltaStore
 from skg.temporal.feedback import FeedbackIngester
 from skg.graph import WorkloadGraph
 from skg.sensors import SensorLoop
+from skg.kernel.pearls import Pearl, PearlLedger
+
+UI_DIR = SKG_HOME / "ui"
+
+
+def _surface_score(path: str) -> tuple[int, int, float]:
+    try:
+        data = json.loads(Path(path).read_text())
+        targets = data.get("targets", []) or []
+        target_count = sum(1 for t in targets if t.get("ip") or t.get("host"))
+        service_count = sum(len(t.get("services", []) or []) for t in targets)
+        return (target_count + service_count, target_count, os.path.getmtime(path))
+    except Exception:
+        return (0, 0, os.path.getmtime(path))
+
+
+def _select_surface_path() -> str | None:
+    surfaces = glob.glob(str(DISCOVERY_DIR / "surface_*.json"))
+    if not surfaces:
+        return None
+    return max(surfaces, key=_surface_score)
+
+
+def _configured_local_targets() -> list[dict[str, Any]]:
+    try:
+        import yaml
+        from urllib.parse import urlparse
+
+        cfg_path = SKG_CONFIG_DIR / "skg_config.yaml"
+        if not cfg_path.exists():
+            cfg_path = SKG_HOME / "config" / "skg_config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        resonance = cfg.get("resonance", {}) or {}
+        ollama = resonance.get("ollama", {}) or {}
+        url = str(ollama.get("url") or "").strip()
+        if not url:
+            return []
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().lower()
+        if host not in {"127.0.0.1", "localhost"}:
+            return []
+        port = int(parsed.port or 11434)
+        model = str(ollama.get("model") or "").strip()
+        banner = "Ollama API" + (f" ({model})" if model else "")
+        return [{
+            "host": "127.0.0.1",
+            "ip": "127.0.0.1",
+            "hostname": "localhost",
+            "os": "local",
+            "kind": "local-ai-service",
+            "services": [{"port": port, "service": "ollama", "banner": banner}],
+            "domains": ["ai_target", "web"],
+            "applicable_attack_paths": [],
+        }]
+    except Exception:
+        return []
+
+
+def _resonance_boot_timeout_s(default: float = 5.0) -> float:
+    try:
+        import yaml
+
+        cfg_path = SKG_CONFIG_DIR / "skg_config.yaml"
+        if not cfg_path.exists():
+            cfg_path = SKG_HOME / "config" / "skg_config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        resonance = cfg.get("resonance", {}) or {}
+        timeout_s = float(resonance.get("boot_timeout_s", default) or default)
+        return max(0.5, timeout_s)
+    except Exception:
+        return default
 
 # Registered domains: name → (cli_script, project_subcommand, interp_event_type)
 DOMAINS = {
@@ -191,13 +267,20 @@ class SKGKernel:
         )
         # Gravity field loop — runs as a background thread
         self._gravity_thread:  threading.Thread | None = None
+        self._gravity_focus_thread: threading.Thread | None = None
         self._gravity_stop:    threading.Event = threading.Event()
         self._gravity_state:   dict = {
             "running":      False,
             "cycle":        0,
             "total_entropy": None,
             "total_unknowns": None,
+            "field_pull_boost": None,
             "last_cycle_at": None,
+            "cycle_started_at": None,
+            "current_surface": None,
+            "current_activity": None,
+            "recent_output": [],
+            "last_returncode": None,
             "error":        None,
         }
 
@@ -217,21 +300,40 @@ class SKGKernel:
             status = "ready" if tc.available() else "not bootstrapped — run bootstrap.sh"
             self.log.info(f"Toolchain [{domain}]: {status}")
 
-        # Boot resonance engine and ingest toolchains if memory is empty
+        # Boot resonance engine and ingest toolchains if memory is empty,
+        # but do not let a slow embedder block the whole daemon.
         try:
-            self.resonance.boot()
+            boot_timeout_s = _resonance_boot_timeout_s()
+            pool = ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(self.resonance.boot)
+            future.result(timeout=boot_timeout_s)
+            pool.shutdown(wait=False, cancel_futures=False)
+
             rs = self.resonance.status()
-            total = sum(rs["memory"].values())
+            mem = rs.get("memory", {}) or {}
+            total = sum(v for v in mem.values() if isinstance(v, (int, float)))
             if total == 0:
                 self.log.info("Resonance memory empty — ingesting toolchains...")
                 summary = ingest_all(self.resonance, SKG_HOME)
                 self.log.info(f"Resonance ingestion complete: {summary}")
             else:
                 self.log.info(f"Resonance memory: "
-                              f"wickets={rs['memory']['wickets']} "
-                              f"adapters={rs['memory']['adapters']} "
-                              f"domains={rs['memory']['domains']}")
+                              f"wickets={mem.get('wickets', 0)} "
+                              f"adapters={mem.get('adapters', 0)} "
+                              f"domains={mem.get('domains', 0)}")
+        except FutureTimeoutError:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self.log.warning(
+                f"Resonance engine boot timed out after {boot_timeout_s:.1f}s — continuing without it"
+            )
         except Exception as e:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
             self.log.warning(f"Resonance engine failed to boot: {e} — continuing without it")
 
         # Boot temporal delta store and workload graph
@@ -269,8 +371,18 @@ class SKGKernel:
             self.log.warning(f"Feedback ingester failed to initialize: {e}")
 
         self.log.info(f"Mode: {self._mode.value} | online.")
-        # Start gravity field loop — continuous entropy-driven observation
-        self.gravity_start()
+        # Start gravity field loop only when explicitly configured.
+        try:
+            import yaml as _yaml
+            cfg = _yaml.safe_load(open(SKG_CONFIG_DIR / "skg_config.yaml")) or {}
+            gravity_cfg = cfg.get("gravity", {}) or {}
+            autostart = bool(gravity_cfg.get("autostart", cfg.get("gravity_autostart", False)))
+        except Exception:
+            autostart = False
+        if autostart:
+            self.gravity_start()
+        else:
+            self.log.info("Gravity autostart disabled; operator must start the loop explicitly.")
 
     def shutdown(self) -> None:
         self.log.info("SKG shutting down...")
@@ -303,6 +415,168 @@ class SKGKernel:
     def gravity_status(self) -> dict:
         return dict(self._gravity_state)
 
+    def _run_gravity_cycle(self, surface_path: str, cycle_label: str, focus_target: str | None = None,
+                           authorized: bool = False) -> None:
+        gravity_dir = SKG_HOME / "skg-gravity"
+        gravity_script = gravity_dir / "gravity_field.py"
+        self._gravity_state["error"] = None
+        self._gravity_state["cycle_started_at"] = datetime.now(timezone.utc).isoformat()
+        self._gravity_state["current_surface"] = surface_path
+        self._gravity_state["current_activity"] = f"Starting {cycle_label}"
+        self._gravity_state["recent_output"] = []
+        self._gravity_state["last_returncode"] = None
+        self._gravity_state["field_pull_boost"] = None
+
+        cmd = [
+            sys.executable, "-u", str(gravity_script),
+            "--surface", surface_path,
+            "--cycles", "1",
+            "--out-dir", str(DISCOVERY_DIR),
+        ]
+        if focus_target:
+            cmd.extend(["--target", focus_target])
+        if authorized:
+            cmd.append("--authorized")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        sel = selectors.DefaultSelector()
+        if proc.stdout:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+
+        start = time.time()
+        recent_lines: list[str] = []
+        saw_completion = False
+        completion_seen_at: float | None = None
+
+        def _terminate_proc_group(sig=signal.SIGTERM) -> None:
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                try:
+                    proc.send_signal(sig)
+                except Exception:
+                    pass
+
+        while True:
+            if time.time() - start > 90:
+                _terminate_proc_group(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    _terminate_proc_group(signal.SIGKILL)
+                self._gravity_state["error"] = f"{cycle_label} timed out"
+                self._gravity_state["current_activity"] = f"{cycle_label} timed out"
+                self.log.warning(f"{cycle_label} timed out (90s)")
+                break
+
+            events = sel.select(timeout=0.5)
+            for key, _ in events:
+                line = key.fileobj.readline()
+                if not line:
+                    continue
+                line = line.rstrip()
+                if not line:
+                    continue
+                recent_lines.append(line)
+                recent_lines = recent_lines[-24:]
+                self._gravity_state["recent_output"] = list(recent_lines)
+                self._gravity_state["current_activity"] = line[:240]
+                if "Field dynamics complete." in line:
+                    saw_completion = True
+                    completion_seen_at = time.time()
+                if "total E=" in line:
+                    try:
+                        e_val = float(line.split("total E=")[1].split()[0])
+                        self._gravity_state["total_entropy"] = round(e_val, 2)
+                    except Exception:
+                        pass
+                if "Unresolved:" in line:
+                    try:
+                        u_val = float(line.split("Unresolved:")[1].split()[0])
+                        self._gravity_state["total_unknowns"] = round(u_val, 2)
+                    except Exception:
+                        pass
+                if "Field+" in line and "Fold+" in line:
+                    try:
+                        parts = line.split()
+                        for idx, token in enumerate(parts):
+                            if token == "Field+" and idx + 1 < len(parts):
+                                field_token = parts[idx + 1].strip()
+                                if field_token.startswith("+"):
+                                    self._gravity_state["field_pull_boost"] = round(float(field_token[1:]), 2)
+                    except Exception:
+                        pass
+                if "total unknowns," in line or "total unknowns" in line:
+                    try:
+                        u_val = int(line.strip().split()[0])
+                        self._gravity_state["total_unknowns"] = u_val
+                    except Exception:
+                        pass
+
+            if saw_completion and proc.poll() is None and completion_seen_at is not None:
+                if time.time() - completion_seen_at > 3:
+                    self.log.info(f"{cycle_label} reached completion banner but process lingered; terminating wrapper process group")
+                    _terminate_proc_group(signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        _terminate_proc_group(signal.SIGKILL)
+
+            if proc.poll() is not None:
+                if proc.stdout:
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        if not line:
+                            continue
+                        recent_lines.append(line)
+                        recent_lines = recent_lines[-24:]
+                self._gravity_state["recent_output"] = list(recent_lines)
+                self._gravity_state["last_returncode"] = proc.returncode
+                self._gravity_state["last_cycle_at"] = datetime.now(timezone.utc).isoformat()
+                self._gravity_state["current_activity"] = (
+                    recent_lines[-1][:240] if recent_lines else f"{cycle_label} complete"
+                )
+                if proc.returncode != 0:
+                    self.log.debug(f"{cycle_label} exited rc={proc.returncode}")
+                break
+
+    def gravity_run_target(self, target_ip: str, authorized: bool = False) -> None:
+        if self._gravity_thread and self._gravity_thread.is_alive():
+            raise ValueError("Stop the continuous gravity loop before running a focused target cycle.")
+        if self._gravity_focus_thread and self._gravity_focus_thread.is_alive():
+            raise ValueError("A focused gravity cycle is already running.")
+
+        surface_path = _select_surface_path()
+        if not surface_path:
+            raise ValueError("No surface file — run discovery first")
+
+        def _worker():
+            self._gravity_state["running"] = True
+            self._gravity_state["cycle"] = int(self._gravity_state.get("cycle") or 0) + 1
+            try:
+                self._run_gravity_cycle(surface_path, f"focused cycle for {target_ip}", focus_target=target_ip, authorized=authorized)
+            except Exception as exc:
+                self._gravity_state["error"] = str(exc)
+                self.log.warning(f"Focused gravity cycle error: {exc}")
+            finally:
+                self._gravity_state["running"] = False
+
+        self._gravity_focus_thread = threading.Thread(
+            target=_worker,
+            name=f"skg-gravity-focus-{target_ip}",
+            daemon=True,
+        )
+        self._gravity_focus_thread.start()
+
     def _gravity_loop(self) -> None:
         """
         Continuous gravity field dynamics — the daemon's primary observational loop.
@@ -311,77 +585,30 @@ class SKGKernel:
         Uses gravity_field_loop() logic inline to avoid subprocess overhead and share
         instrument state across cycles.
         """
-        import glob as _glob
         try:
             import yaml as _yaml
-            cfg = _yaml.safe_load(open(SKG_CONFIG_DIR / "skg_config.yaml"))
-            interval = int(cfg.get("gravity_cycle_interval_s", 120))
-            epsilon  = float(cfg.get("gravity_convergence_epsilon", 0.01))
+            cfg = _yaml.safe_load(open(SKG_CONFIG_DIR / "skg_config.yaml")) or {}
+            gravity_cfg = cfg.get("gravity", {}) or {}
+            interval = int(gravity_cfg.get("cycle_interval_s", cfg.get("gravity_cycle_interval_s", 120)))
+            epsilon  = float(gravity_cfg.get("convergence_epsilon", cfg.get("gravity_convergence_epsilon", 0.01)))
         except Exception:
             interval = 120
             epsilon  = 0.01
-
-        gravity_dir = SKG_HOME / "skg-gravity"
-        gravity_script = gravity_dir / "gravity_field.py"
 
         self._gravity_state["running"] = True
         self.log.info(f"Gravity loop: interval={interval}s epsilon={epsilon}")
 
         cycle = 0
         while not self._gravity_stop.is_set():
-            # Find latest surface file
-            surfaces = sorted(
-                _glob.glob("/var/lib/skg/discovery/surface_*.json"),
-                key=os.path.getmtime,
-            )
-            if not surfaces:
+            surface_path = _select_surface_path()
+            if not surface_path:
                 self._gravity_state["error"] = "No surface file — run discovery first"
                 self._gravity_stop.wait(timeout=interval)
                 continue
-
-            surface_path = surfaces[-1]
             cycle += 1
             self._gravity_state["cycle"] = cycle
-            self._gravity_state["error"] = None
-
             try:
-                # Run one gravity cycle as a subprocess to avoid polluting
-                # the daemon's import namespace with gravity's sys.path hacks.
-                # stdout is captured and parsed for the state update.
-                result = subprocess.run(
-                    [sys.executable, str(gravity_script),
-                     "--surface", surface_path,
-                     "--cycles", "1",
-                     "--out-dir", "/var/lib/skg/discovery"],
-                    capture_output=True, text=True, timeout=90,
-                )
-                # Extract entropy from last summary line
-                for line in reversed(result.stdout.splitlines()):
-                    if "total E=" in line:
-                        try:
-                            e_val = float(line.split("total E=")[1].split()[0])
-                            self._gravity_state["total_entropy"] = round(e_val, 2)
-                        except Exception:
-                            pass
-                    if "total unknowns," in line or "total unknowns" in line:
-                        try:
-                            u_val = int(line.strip().split()[0])
-                            self._gravity_state["total_unknowns"] = u_val
-                        except Exception:
-                            pass
-
-                self._gravity_state["last_cycle_at"] = (
-                    datetime.now(timezone.utc).isoformat()
-                )
-
-                if result.returncode != 0 and result.stderr:
-                    self.log.debug(
-                        f"Gravity cycle {cycle} stderr: {result.stderr[:200]}"
-                    )
-
-            except subprocess.TimeoutExpired:
-                self._gravity_state["error"] = f"Cycle {cycle} timed out"
-                self.log.warning("Gravity cycle timed out (90s)")
+                self._run_gravity_cycle(surface_path, f"cycle {cycle}")
             except Exception as exc:
                 self._gravity_state["error"] = str(exc)
                 self.log.warning(f"Gravity cycle error: {exc}")
@@ -424,7 +651,15 @@ class SKGKernel:
         try:
             rs = self.resonance.status()
         except Exception:
-            rs = self.resonance.status_offline()
+            rs = {
+                "ready": False,
+                "memory": {
+                    "wickets": 0,
+                    "adapters": 0,
+                    "domains": 0,
+                    "observations": None,
+                },
+            }
         return {
             "status": "online",
             "mode": self._mode.value,
@@ -447,6 +682,8 @@ class SKGKernel:
 
 kernel = SKGKernel()
 app    = FastAPI(title="SKG", version="1.0.0")
+if UI_DIR.exists():
+    app.mount("/ui/static", StaticFiles(directory=str(UI_DIR)), name="ui-static")
 
 
 class ModeRequest(BaseModel):
@@ -463,13 +700,26 @@ class IngestRequest(BaseModel):
     kwargs:         dict       = {}
 
 
-@app.get("/")
-def root():
+@app.get("/api")
+def api_root():
     return {"skg": "online",
             "domains": list(DOMAINS.keys()),
             "endpoints": ["/status", "/mode", "/identity", "/identity/history",
                           "/ingest", "/projections/{workload_id}",
                           "/gravity/status", "/gravity/start", "/gravity/stop"]}
+
+
+@app.get("/")
+def root():
+    return RedirectResponse(url="/ui", status_code=307)
+
+
+@app.get("/ui")
+def ui_index():
+    index = UI_DIR / "index.html"
+    if not index.exists():
+        raise HTTPException(404, "UI not installed")
+    return FileResponse(index)
 
 
 @app.get("/status")
@@ -507,6 +757,16 @@ def gravity_stop():
     return {"ok": True, "gravity_state": kernel.gravity_status()}
 
 
+@app.post("/gravity/run")
+def gravity_run(target_ip: str, authorized: bool = False):
+    """Run one focused gravity cycle for a selected target."""
+    try:
+        kernel.gravity_run_target(target_ip, authorized=authorized)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return {"ok": True, "gravity_state": kernel.gravity_status(), "target_ip": target_ip}
+
+
 def _compute_field_state() -> dict:
     """
     Compute field energy E per active attack path from latest interp files.
@@ -517,8 +777,8 @@ def _compute_field_state() -> dict:
     """
     from pathlib import Path as _P
 
-    interp_dir = _P("/var/lib/skg/interp")
-    folds_dir  = _P("/var/lib/skg/discovery/folds")
+    interp_dir = INTERP_DIR
+    folds_dir  = DISCOVERY_DIR / "folds"
 
     # Load fold managers per IP from persisted gravity cycle data
     fold_boost_by_wid: dict[str, float] = {}
@@ -537,22 +797,63 @@ def _compute_field_state() -> dict:
         except Exception:
             pass
 
+    def _load_interp_payload(path: _P) -> dict | None:
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return None
+        return data.get("payload", data) if isinstance(data, dict) else None
+
+    def _normalize_projection_classification(classification: str) -> str:
+        if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
+            return classification
+        if classification in {"fully_realized"}:
+            return "realized"
+        if classification in {"blocked"}:
+            return "not_realized"
+        if classification in {"partial", "indeterminate_h1"}:
+            return "indeterminate"
+        return classification or "unknown"
+
+    field_map: dict[str, float] = {}
+    persistence_map: dict[str, float] = {}
+    fiber_clusters: dict[str, object] = {}
+    try:
+        from skg.topology.energy import anchored_field_pull, compute_field_fibers, compute_field_topology
+
+        topo = compute_field_topology(DISCOVERY_DIR, interp_dir).as_dict()
+        for sphere, row in (topo.get("spheres") or {}).items():
+            field_map[sphere] = float((row or {}).get("gravity_pull", 0.0) or 0.0)
+            persistence_map[sphere] = float((row or {}).get("pearl_persistence", 0.0) or 0.0)
+        fiber_clusters = {c.anchor: c for c in compute_field_fibers()}
+    except Exception:
+        anchored_field_pull = None
+        field_map = {}
+        persistence_map = {}
+        fiber_clusters = {}
+
     # Group interp files by (workload_id, attack_path_id), take latest per group
     latest: dict[tuple, dict] = {}
-    for f in interp_dir.glob("*.json"):
-        try:
-            d = json.loads(f.read_text())
-            key = (d.get("workload_id", "?"), d.get("attack_path_id", "?"))
-            existing = latest.get(key)
-            if existing is None or f.stat().st_mtime > existing["_mtime"]:
-                d["_mtime"] = f.stat().st_mtime
-                d["_file"]  = str(f)
-                latest[key] = d
-        except Exception:
+    for f in sorted(list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson"))):
+        d = _load_interp_payload(f)
+        if not d:
             continue
+        key = (d.get("workload_id", "?"), d.get("attack_path_id", "?"))
+        existing = latest.get(key)
+        if existing is None or f.stat().st_mtime > existing["_mtime"]:
+            d["_mtime"] = f.stat().st_mtime
+            d["_file"]  = str(f)
+            latest[key] = d
 
     field_state: dict[str, dict] = {}
-    for (wid, apid), d in sorted(latest.items()):
+    for (wid, apid), d in sorted(
+        latest.items(),
+        key=lambda item: (str(item[0][0] or ""), str(item[0][1] or "")),
+    ):
+        wid = str(wid or "")
+        apid = str(apid or "")
+        if not wid:
+            continue
         required = d.get("required_wickets", [])
         unknown  = d.get("unknown", [])
         blocked  = d.get("blocked", [])
@@ -580,20 +881,53 @@ def _compute_field_state() -> dict:
         for w in unknown:
             resolution_required[w] = _resolution_hint(w)
 
-        classification = d.get("classification", "unknown")
+        classification = _normalize_projection_classification(d.get("classification", "unknown"))
+        ident = parse_workload_ref(wid)
+        target_domains = set()
+        if apid.startswith("host_"):
+            target_domains.add("host")
+        elif apid.startswith("web_"):
+            target_domains.add("web")
+        elif apid.startswith("container_escape_"):
+            target_domains.add("container_escape")
+        elif apid.startswith("data_"):
+            target_domains.add("data_pipeline")
+        elif apid.startswith("ad_"):
+            target_domains.add("ad_lateral")
+        elif apid.startswith("ai_"):
+            target_domains.add("ai_target")
+        elif apid.startswith("iot_"):
+            target_domains.add("iot_firmware")
+        elif apid.startswith("supply_chain_"):
+            target_domains.add("supply_chain")
+
+        field_pull = (
+            anchored_field_pull(
+                ident["identity_key"],
+                target_domains,
+                field_map,
+                fiber_clusters,
+                sphere_persistence=persistence_map,
+            )
+            if anchored_field_pull is not None else 0.0
+        )
         key = f"{wid}/{apid}"
         field_state[key] = {
             "workload_id":          wid,
+            "identity_key":         ident["identity_key"],
+            "manifestation_key":    ident["manifestation_key"],
             "attack_path_id":       apid,
             "classification":       classification,
-            "E":                    round(E, 4),
+            "E":                    round(E + field_pull, 4),
             "E_base":               round(E_base, 4),
             "fold_contribution":    round(fold_contribution, 4),
+            "field_pull":           round(field_pull, 4),
             "E_note":               (
                 "0.0 = fully determined" if E == 0.0
                 else (
                     f"{round(E_base * 100)}% nodes unobserved"
                     + (f" + {fold_boost:.1f} fold weight" if fold_boost > 0 else "")
+                    + (f" + {field_pull:.1f} field pull" if field_pull > 0 else "")
                 )
             ),
             "n_required":           n,
@@ -601,6 +935,10 @@ def _compute_field_state() -> dict:
             "n_blocked":            len(blocked),
             "n_unknown":            len(unknown),
             "unknown_nodes":        unknown,
+            "compatibility_score":  round(float(d.get("compatibility_score", 0.0) or 0.0), 4),
+            "compatibility_span":   int(d.get("compatibility_span", 0) or 0),
+            "decoherence":          round(float(d.get("decoherence", 0.0) or 0.0), 4),
+            "unresolved_reason":    d.get("unresolved_reason", ""),
             "resolution_required":  resolution_required,
             "folds":                fold_summary,
             "computed_at":          d.get("computed_at", ""),
@@ -701,9 +1039,28 @@ def get_projection_field(workload_id: str, domain: str = "host"):
     from pathlib import Path as _P
     from fastapi import HTTPException as _H
 
-    interp_dir = _P("/var/lib/skg/interp")
+    interp_dir = INTERP_DIR
+    def _load_interp_payload(path: _P) -> dict | None:
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return None
+        return data.get("payload", data) if isinstance(data, dict) else None
+
+    def _normalize_projection_classification(classification: str) -> str:
+        if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
+            return classification
+        if classification in {"fully_realized"}:
+            return "realized"
+        if classification in {"blocked"}:
+            return "not_realized"
+        if classification in {"partial", "indeterminate_h1"}:
+            return "indeterminate"
+        return classification or "unknown"
+
     files = sorted(
-        interp_dir.glob(f"{domain}_{workload_id}_*.json"),
+        list(interp_dir.glob(f"{domain}_{workload_id}_*.json")) +
+        list(interp_dir.glob(f"{domain}_{workload_id}_*_interp.ndjson")),
         key=lambda f: f.stat().st_mtime
     )
     if not files:
@@ -713,7 +1070,9 @@ def get_projection_field(workload_id: str, domain: str = "host"):
     import math as _math
     for f in files:
         try:
-            d = json.loads(f.read_text())
+            d = _load_interp_payload(f)
+            if not d:
+                continue
             n = len(d.get("required_wickets", []))
             unknown = d.get("unknown", [])
             # E = |unknown| / |required|  (Work 3 Section 4.2)
@@ -721,7 +1080,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
             history.append({
                 "run_id":         d.get("run_id", ""),
                 "computed_at":    d.get("computed_at", ""),
-                "classification": d.get("classification", ""),
+                "classification": _normalize_projection_classification(d.get("classification", "")),
                 "E":              round(E, 4),
                 "n_realized":     len(d.get("realized", [])),
                 "n_blocked":      len(d.get("blocked", [])),
@@ -730,7 +1089,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
         except Exception:
             continue
 
-    latest = json.loads(files[-1].read_text())
+    latest = _load_interp_payload(files[-1]) or {}
     required = latest.get("required_wickets", [])
     unknown  = latest.get("unknown", [])
     n = len(required)
@@ -747,7 +1106,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
         ),
         "workload_id":              workload_id,
         "attack_path_id":           latest.get("attack_path_id", ""),
-        "classification":           latest.get("classification", ""),
+        "classification":           _normalize_projection_classification(latest.get("classification", "")),
         "E":                        round(E, 4),
         "n_required":               n,
         "n_realized":               len(latest.get("realized", [])),
@@ -856,6 +1215,24 @@ class CollectRequest(BaseModel):
     auto_project:   bool       = False
 
 
+class ProposalRejectRequest(BaseModel):
+    reason: str = ""
+    cooldown_days: int = 30
+
+
+class ProposalDeferRequest(BaseModel):
+    days: int = 7
+
+
+class AssistantExplainRequest(BaseModel):
+    kind: str
+    id: str = ""
+    identity_key: str = ""
+    limit: int = 6
+    context: dict[str, Any] | None = None
+    task: str = ""
+
+
 @app.post("/collect")
 def collect(req: CollectRequest):
     """Trigger an immediate host collection sweep (or single-target collection)."""
@@ -918,7 +1295,1506 @@ def sensors_trigger():
 @app.get("/targets")
 def list_targets():
     from skg.sensors import _load_targets
-    return {"targets": _load_targets(SKG_CONFIG_DIR)}
+
+    merged = {
+        (t.get("ip") or t.get("host") or t.get("workload_id") or ""): dict(t)
+        for t in _all_targets_index()
+        if (t.get("ip") or t.get("host") or t.get("workload_id") or "")
+    }
+
+    for key, target in list(merged.items()):
+        identity_key = target.get("ip") or target.get("host") or key
+        try:
+            target["profile"] = _identity_profile(identity_key)
+        except Exception:
+            target["profile"] = {"evidence_count": 0}
+        try:
+            target["world_summary"] = _identity_world(identity_key, target).get("world_summary", {})
+        except Exception:
+            target["world_summary"] = {}
+        try:
+            target["relations"] = _identity_relations(identity_key, target)[:12]
+        except Exception:
+            target["relations"] = []
+        merged[key] = target
+
+    targets = sorted(
+        merged.values(),
+        key=lambda row: (
+            str(row.get("ip") or row.get("host") or ""),
+            str(row.get("workload_id") or ""),
+        ),
+    )
+    return {"targets": targets}
+
+
+@app.get("/world/{identity_key}")
+def identity_world(identity_key: str):
+    try:
+        targets = list_targets().get("targets", [])
+        target = next((t for t in targets if (t.get("ip") or t.get("host")) == identity_key), {})
+        world = _identity_world(identity_key, target)
+        world["computed_at"] = datetime.now(timezone.utc).isoformat()
+        return world
+    except Exception as exc:
+        raise HTTPException(500, f"World error: {exc}")
+
+
+@app.get("/surface")
+def field_surface(min_score: float = 0.0):
+    """Current operator-facing attack surface synthesized from latest projections."""
+    try:
+        from skg.intel.surface import surface as build_surface
+
+        result = build_surface(
+            interp_dir=INTERP_DIR,
+            delta_store=kernel.delta,
+            graph=kernel.graph,
+            min_score=min_score,
+        )
+        result["computed_at"] = datetime.now(timezone.utc).isoformat()
+        return result
+    except Exception as exc:
+        raise HTTPException(500, f"Surface error: {exc}")
+
+
+def _normalized_identity_token(identity_key: str) -> str:
+    return (identity_key or "").replace(".", "_").replace(":", "_").lower()
+
+
+def _latest_matching_files(patterns: list[str], limit: int = 12, per_pattern: int = 3) -> list[str]:
+    seen: set[str] = set()
+    files: list[str] = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        for path in matches[:max(1, int(per_pattern))]:
+            if path in seen:
+                continue
+            seen.add(path)
+            files.append(path)
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files[:limit]
+
+
+def _identity_profile(identity_key: str) -> dict[str, Any]:
+    token = _normalized_identity_token(identity_key)
+    rows: list[dict[str, Any]] = []
+    patterns = [
+        str(DISCOVERY_DIR / f"gravity_ssh_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_ssh_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_audit_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_audit_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_sysaudit_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_sysaudit_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_postexp_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_http_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_http_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_auth_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_auth_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_nmap_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_nmap_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_pcap_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_pcap_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_binary_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_binary_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_data_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_data_{token}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_data_*_{identity_key}*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_data_*_{token}*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_ce_{identity_key}_*.ndjson"),
+        str(DISCOVERY_DIR / f"gravity_ce_{token}_*.ndjson"),
+    ]
+    for path in _latest_matching_files(patterns, limit=12):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    ev = json.loads(line)
+                    payload = ev.get("payload", {}) or {}
+                    wid = payload.get("workload_id", "")
+                    target_ip = payload.get("target_ip") or ""
+                    if identity_key not in wid and identity_key != target_ip:
+                        continue
+                    rows.append(ev)
+        except Exception:
+            continue
+
+    profile: dict[str, Any] = {
+        "users": [],
+        "groups": [],
+        "id_output": None,
+        "passwd_samples": [],
+        "kernel_version": None,
+        "package_count": None,
+        "package_manager": None,
+        "packages_sample": [],
+        "docker_access": None,
+        "interesting_suid": [],
+        "credential_indicators": [],
+        "env_key_samples": [],
+        "ssh_keys": [],
+        "av_edr": None,
+        "domain_membership": None,
+        "sudo_state": None,
+        "process_count": None,
+        "process_findings": [],
+        "datastore_access": [],
+        "datastore_observations": [],
+        "network_findings": [],
+        "network_flows": [],
+        "listening_baseline": None,
+        "container": {},
+        "notes": [],
+        "evidence_count": len(rows),
+    }
+
+    for ev in rows:
+        payload = ev.get("payload", {}) or {}
+        wicket = payload.get("wicket_id")
+        attrs = payload.get("attributes", {}) or {}
+        notes = payload.get("notes") or payload.get("detail") or ""
+        if notes and notes not in profile["notes"]:
+            profile["notes"].append(notes)
+        lowered_notes = str(notes).lower() if notes else ""
+        if any(token in lowered_notes for token in ("no route to host", "connection refused", "target unreachable", "timed out")):
+            finding = {
+                "wicket_id": wicket,
+                "detail": str(notes).strip(),
+                "pointer": ((ev.get("provenance") or {}).get("evidence") or {}).get("pointer"),
+            }
+            if finding not in profile["network_findings"]:
+                profile["network_findings"].append(finding)
+        if notes and "→" in str(notes):
+            m = re.search(r"([A-Z0-9_-]+)\s+([0-9.]+)→([0-9.]+):(\d+)", str(notes))
+            if m:
+                flow = {
+                    "protocol": m.group(1),
+                    "src": m.group(2),
+                    "dst": m.group(3),
+                    "port": int(m.group(4)),
+                }
+                if flow not in profile["network_flows"]:
+                    profile["network_flows"].append(flow)
+
+        if wicket == "HO-03" and attrs.get("user"):
+            if attrs["user"] not in profile["users"]:
+                profile["users"].append(attrs["user"])
+        if wicket == "HO-03" and notes:
+            sample = str(notes).strip()
+            if sample and sample not in profile["passwd_samples"]:
+                profile["passwd_samples"].append(sample)
+        if wicket == "HO-10":
+            profile["sudo_state"] = notes or profile["sudo_state"]
+            id_output = attrs.get("id_output", "")
+            if id_output:
+                profile["id_output"] = id_output
+            if "groups=" in id_output:
+                try:
+                    groups = id_output.split("groups=", 1)[1]
+                    for raw in groups.split(","):
+                        group = raw.strip()
+                        if group and group not in profile["groups"]:
+                            profile["groups"].append(group)
+                except Exception:
+                    pass
+        if wicket == "HO-06":
+            profile["sudo_state"] = notes or profile["sudo_state"]
+        if wicket == "HO-07":
+            for item in attrs.get("interesting_suid", []) or []:
+                if item not in profile["interesting_suid"]:
+                    profile["interesting_suid"].append(item)
+        if wicket == "HO-09":
+            for item in attrs.get("sources_with_hits", []) or []:
+                if item not in profile["credential_indicators"]:
+                    profile["credential_indicators"].append(item)
+            for item in attrs.get("sample_keys", []) or []:
+                if item not in profile["env_key_samples"]:
+                    profile["env_key_samples"].append(item)
+        if wicket == "HO-11":
+            profile["package_count"] = attrs.get("package_count") or profile["package_count"]
+            profile["package_manager"] = attrs.get("package_manager") or profile["package_manager"]
+            for item in attrs.get("packages_sample", []) or []:
+                if item not in profile["packages_sample"]:
+                    profile["packages_sample"].append(item)
+        if wicket == "HO-12":
+            profile["kernel_version"] = attrs.get("kernel_version") or profile["kernel_version"]
+        if wicket == "HO-13":
+            for item in attrs.get("key_files", []) or []:
+                if item not in profile["ssh_keys"]:
+                    profile["ssh_keys"].append(item)
+        if wicket == "HO-15" and attrs.get("docker_accessible") is not None:
+            profile["docker_access"] = bool(attrs.get("docker_accessible"))
+        if wicket == "HO-23":
+            profile["av_edr"] = notes or profile["av_edr"]
+            if attrs.get("checked_procs") is not None:
+                profile["process_count"] = attrs.get("checked_procs")
+        if wicket and str(wicket).startswith("PI-") and notes:
+            finding = {
+                "wicket_id": wicket,
+                "detail": str(notes).strip(),
+            }
+            if finding not in profile["process_findings"]:
+                profile["process_findings"].append(finding)
+            if wicket == "PI-03":
+                baseline_match = re.search(r"Listening port baseline:\s*(.+)$", str(notes))
+                if baseline_match:
+                    profile["listening_baseline"] = baseline_match.group(1).strip()
+        if wicket == "HO-24":
+            profile["domain_membership"] = notes or profile["domain_membership"]
+        if wicket == "DP-10" and notes:
+            access = str(notes).strip()
+            if access and access not in profile["datastore_access"]:
+                profile["datastore_access"].append(access)
+            workload_id = payload.get("workload_id", "")
+            service = workload_id.split("::", 1)[0] if "::" in workload_id else None
+            observation = {
+                "service": service,
+                "workload_id": workload_id or None,
+                "detail": access,
+            }
+            if observation not in profile["datastore_observations"]:
+                profile["datastore_observations"].append(observation)
+        if wicket and wicket.startswith("CE-"):
+            if "privileged" in payload:
+                profile["container"]["privileged"] = payload.get("privileged")
+            if "network_mode" in payload:
+                profile["container"]["network_mode"] = payload.get("network_mode")
+            if "cap_add" in payload:
+                profile["container"]["cap_add"] = payload.get("cap_add")
+
+    profile["notes"] = profile["notes"][:8]
+    profile["passwd_samples"] = profile["passwd_samples"][:4]
+    profile["packages_sample"] = profile["packages_sample"][:20]
+    profile["env_key_samples"] = profile["env_key_samples"][:12]
+    profile["datastore_access"] = profile["datastore_access"][:8]
+    profile["datastore_observations"] = profile["datastore_observations"][:12]
+    profile["network_findings"] = profile["network_findings"][:16]
+    profile["network_flows"] = profile["network_flows"][:32]
+    profile["process_findings"] = profile["process_findings"][:16]
+    return profile
+
+
+def _service_world_views(services: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    web_surfaces = []
+    remote_access = []
+    datastores = []
+    runtime_edges = []
+
+    for svc in services or []:
+        port = int(svc.get("port", 0) or 0)
+        name = (svc.get("service") or svc.get("name") or "").lower()
+        banner = svc.get("banner", "")
+        row = {"port": port, "service": name or svc.get("service") or "", "banner": banner}
+
+        if port in {80, 443, 8080, 8443, 8008, 8009} or any(x in name for x in ("http", "https", "ajp")):
+            web_surfaces.append(row)
+        if port in {21, 22, 23, 25, 139, 445, 5900, 3389} or name in {"ssh", "ftp", "telnet", "smtp", "vnc", "netbios-ssn"}:
+            remote_access.append(row)
+        if port in {3306, 5432, 5433, 6379, 27017} or name in {"mysql", "postgresql", "redis", "mongodb"}:
+            datastores.append(row)
+        if port in {2375, 2376, 8009} or name in {"docker", "ajp13"}:
+            runtime_edges.append(row)
+
+    return {
+        "web_surfaces": web_surfaces,
+        "remote_access": remote_access,
+        "datastores": datastores,
+        "runtime_edges": runtime_edges,
+    }
+
+
+def _all_targets_index() -> list[dict[str, Any]]:
+    from skg.sensors import _load_targets
+
+    merged: dict[str, dict[str, Any]] = {}
+    for target in _load_targets(SKG_CONFIG_DIR):
+        key = target.get("ip") or target.get("host") or target.get("workload_id") or ""
+        if key:
+            merged[key] = dict(target)
+
+    for surface_path in sorted(glob.glob(str(DISCOVERY_DIR / "surface_*.json")), key=_surface_score):
+        try:
+            surface_data = json.loads(Path(surface_path).read_text())
+        except Exception:
+            continue
+        for target in surface_data.get("targets", []) or []:
+            key = target.get("ip") or target.get("host") or target.get("workload_id") or ""
+            if not key:
+                continue
+            current = dict(merged.get(key, {}))
+            current.setdefault("host", target.get("ip") or key)
+            current["ip"] = target.get("ip") or current.get("ip") or current.get("host") or ""
+            current["os"] = target.get("os") or current.get("os")
+            current["kind"] = target.get("kind") or current.get("kind")
+            if len(target.get("services") or []) >= len(current.get("services") or []):
+                current["services"] = target.get("services") or current.get("services") or []
+            domains = set(current.get("domains") or [])
+            domains.update(target.get("domains") or [])
+            current["domains"] = sorted(domains)
+            merged[key] = current
+
+    for target in _configured_local_targets():
+        key = target.get("ip") or target.get("host") or target.get("workload_id") or ""
+        if key:
+            current = dict(merged.get(key, {}))
+            current.update({k: v for k, v in target.items() if v})
+            merged[key] = current
+
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            str(row.get("ip") or row.get("host") or ""),
+            str(row.get("workload_id") or ""),
+        ),
+    )
+
+
+def _identity_relations(identity_key: str, target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    target = dict(target or {})
+    ip = target.get("ip") or identity_key
+    all_targets = _all_targets_index()
+    bonds: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_relation(other_ip: str, relation: str, strength: float, detail: str = "") -> None:
+        if not other_ip or other_ip == ip:
+            return
+        key = tuple(sorted((other_ip, relation)))
+        if key in seen:
+            return
+        seen.add(key)
+        bonds.append({
+            "other_identity": other_ip,
+            "relation": relation,
+            "strength": round(float(strength), 4),
+            "detail": detail,
+        })
+
+    parts = ip.rsplit(".", 1)
+    if len(parts) == 2:
+        subnet_prefix = parts[0] + "."
+        for other in all_targets:
+            other_ip = other.get("ip") or ""
+            if other_ip.startswith(subnet_prefix) and other_ip != ip:
+                add_relation(other_ip, "same_subnet", 0.40, f"shared /24 {parts[0]}.0/24")
+
+    if ip.startswith(("172.17.", "172.18.")):
+        gateway = ".".join(ip.split(".")[:3]) + ".1"
+        if gateway != ip:
+            add_relation(gateway, "docker_host", 0.90, "shared bridge gateway")
+        bridge_prefix = ".".join(ip.split(".")[:2]) + "."
+        for other in all_targets:
+            other_ip = other.get("ip") or ""
+            if other_ip.startswith(bridge_prefix) and other_ip != ip and not other_ip.endswith(".1"):
+                add_relation(other_ip, "same_compose", 0.80, "shared bridge/network family")
+
+    ssh_keys = set((_identity_profile(identity_key).get("ssh_keys") or []))
+    if ssh_keys:
+        for other in all_targets:
+            other_ip = other.get("ip") or ""
+            if other_ip == ip:
+                continue
+            other_keys = set((_identity_profile(other_ip).get("ssh_keys") or []))
+            if ssh_keys & other_keys:
+                add_relation(other_ip, "shared_cred", 0.70, "shared key material observed")
+
+    return sorted(bonds, key=lambda row: (-row["strength"], row["other_identity"]))
+
+
+def _world_access_paths(target: dict[str, Any], profile: dict[str, Any], service_views: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    access_paths: list[dict[str, Any]] = []
+    users = list(profile.get("users") or [])
+    ssh_keys = list(profile.get("ssh_keys") or [])
+    env_keys = list(profile.get("env_key_samples") or [])
+    datastore_obs = list(profile.get("datastore_observations") or [])
+    network_findings = list(profile.get("network_findings") or [])
+
+    for svc in service_views.get("remote_access", []):
+        service = str(svc.get("service") or "").lower()
+        candidates: list[str] = []
+        if service in {"ssh", "ftp", "telnet", "smb", "netbios-ssn", "vnc", "rdp"}:
+            candidates.extend(users)
+        if service == "ssh":
+            candidates.extend(ssh_keys)
+            candidates.extend(env_keys)
+        constraints = [
+            finding["detail"]
+            for finding in network_findings
+            if str(svc.get("port")) in str(finding.get("pointer") or "")
+        ][:4]
+        access_paths.append({
+            "kind": "remote_access",
+            "service": service or svc.get("service"),
+            "port": svc.get("port"),
+            "banner": svc.get("banner"),
+            "credential_candidates": candidates[:8],
+            "network_constraints": constraints,
+        })
+
+    for svc in service_views.get("datastores", []):
+        service = str(svc.get("service") or "").lower()
+        confirmed = [
+            obs["detail"]
+            for obs in datastore_obs
+            if (obs.get("service") or "").lower() in {service, ""}
+        ]
+        access_paths.append({
+            "kind": "datastore",
+            "service": service or svc.get("service"),
+            "port": svc.get("port"),
+            "banner": svc.get("banner"),
+            "confirmed_access": confirmed[:4],
+        })
+
+    if profile.get("docker_access"):
+        access_paths.append({
+            "kind": "runtime_control",
+            "service": "docker",
+            "port": 2375 if any(int(s.get("port", 0) or 0) == 2375 for s in target.get("services", []) or []) else None,
+            "banner": "docker runtime access observed",
+            "credential_candidates": users[:4],
+        })
+
+    return access_paths[:24]
+
+
+def _credential_bindings(profile: dict[str, Any], service_views: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    bindings: list[dict[str, Any]] = []
+    users = list(profile.get("users") or [])
+    ssh_keys = list(profile.get("ssh_keys") or [])
+    env_keys = list(profile.get("env_key_samples") or [])
+    indicators = list(profile.get("credential_indicators") or [])
+
+    for svc in service_views.get("remote_access", []):
+        service = str(svc.get("service") or "").lower()
+        candidates: list[str] = []
+        rationale: list[str] = []
+
+        if service in {"ssh", "ftp", "telnet", "smb", "netbios-ssn", "vnc", "rdp"} and users:
+            candidates.extend(users)
+            rationale.append("observed local principals")
+        if service == "ssh" and ssh_keys:
+            candidates.extend(ssh_keys)
+            rationale.append("observed ssh key material")
+        if env_keys:
+            candidates.extend(env_keys)
+            rationale.append("observed env-key indicators")
+        if indicators and not rationale:
+            rationale.append("generic credential indicators")
+
+        deduped: list[str] = []
+        for item in candidates:
+            if item not in deduped:
+                deduped.append(item)
+
+        bindings.append({
+            "service": service or svc.get("service"),
+            "port": svc.get("port"),
+            "credentials": deduped[:8],
+            "rationale": rationale[:4],
+        })
+
+    return bindings[:24]
+
+
+def _network_topology(identity_key: str, profile: dict[str, Any], relations: list[dict[str, Any]]) -> dict[str, Any]:
+    flows = list(profile.get("network_flows") or [])
+    inbound_peers: dict[str, dict[str, Any]] = {}
+    outbound_peers: dict[str, dict[str, Any]] = {}
+    local_ports: dict[int, dict[str, Any]] = {}
+
+    for flow in flows:
+        src = str(flow.get("src") or "")
+        dst = str(flow.get("dst") or "")
+        port = int(flow.get("port") or 0)
+        proto = str(flow.get("protocol") or "")
+        if dst == identity_key:
+            row = inbound_peers.setdefault(src, {"peer": src, "ports": set(), "protocols": set()})
+            row["ports"].add(port)
+            row["protocols"].add(proto)
+            local_ports.setdefault(port, {"port": port, "protocols": set(), "peer_count": 0})
+            local_ports[port]["protocols"].add(proto)
+            local_ports[port]["peer_count"] += 1
+        elif src == identity_key:
+            row = outbound_peers.setdefault(dst, {"peer": dst, "ports": set(), "protocols": set()})
+            row["ports"].add(port)
+            row["protocols"].add(proto)
+
+    relation_peers = [row.get("other_identity") for row in relations if row.get("other_identity")]
+
+    return {
+        "findings": list(profile.get("network_findings") or []),
+        "flows": flows[:24],
+        "inbound_peers": [
+            {
+                "peer": row["peer"],
+                "ports": sorted(row["ports"]),
+                "protocols": sorted(row["protocols"]),
+            }
+            for row in sorted(inbound_peers.values(), key=lambda r: r["peer"])
+        ][:16],
+        "outbound_peers": [
+            {
+                "peer": row["peer"],
+                "ports": sorted(row["ports"]),
+                "protocols": sorted(row["protocols"]),
+            }
+            for row in sorted(outbound_peers.values(), key=lambda r: r["peer"])
+        ][:16],
+        "local_ports": [
+            {
+                "port": row["port"],
+                "protocols": sorted(row["protocols"]),
+                "peer_count": row["peer_count"],
+            }
+            for row in sorted(local_ports.values(), key=lambda r: r["port"])
+        ][:16],
+        "listening_baseline": profile.get("listening_baseline"),
+        "relation_peers": relation_peers[:16],
+    }
+
+
+def _identity_manifestations(identity_key: str, limit: int = 64) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for interp_file in list(INTERP_DIR.glob("*.json")) + list(INTERP_DIR.glob("*_interp.ndjson")):
+        try:
+            data = json.loads(interp_file.read_text())
+        except Exception:
+            continue
+        payload = data.get("payload", data) if isinstance(data, dict) else {}
+        workload_id = payload.get("workload_id")
+        if not workload_id:
+            continue
+        parsed = parse_workload_ref(workload_id)
+        if parsed.get("identity_key") != identity_key:
+            continue
+        key = (workload_id, payload.get("attack_path_id", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "workload_id": workload_id,
+            "manifestation_key": parsed.get("manifestation_key"),
+            "attack_path_id": payload.get("attack_path_id", ""),
+            "classification": payload.get("classification", "unknown"),
+            "score": payload.get("host_score", payload.get("web_score", payload.get("data_score", payload.get("escape_score", payload.get("ai_score", 0.0))))),
+        })
+    rows.sort(key=lambda row: (str(row.get("manifestation_key") or ""), str(row.get("attack_path_id") or "")))
+    return rows[:limit]
+
+
+def _identity_world(identity_key: str, target: dict[str, Any] | None = None) -> dict[str, Any]:
+    target = dict(target or {})
+    profile = _identity_profile(identity_key)
+    services = list(target.get("services") or [])
+    service_views = _service_world_views(services)
+    manifestations = _identity_manifestations(identity_key)
+    likely_containerized = bool(
+        target.get("kind") == "container"
+        or identity_key.startswith(("172.17.", "172.18."))
+        or "container_escape" in (target.get("domains") or [])
+        or profile.get("container")
+    )
+
+    neighbors = []
+    seen_neighbors: set[str] = set()
+    try:
+        candidate_workloads = [m["workload_id"] for m in manifestations if m.get("workload_id")]
+        for workload_id in candidate_workloads:
+            for neighbor_id, relationship, weight in kernel.graph.neighbors(workload_id):
+                if neighbor_id in seen_neighbors:
+                    continue
+                seen_neighbors.add(neighbor_id)
+                neighbors.append({
+                    "workload_id": neighbor_id,
+                    "relationship": relationship,
+                    "weight": round(float(weight), 4),
+                    "identity_key": parse_workload_ref(neighbor_id).get("identity_key"),
+                })
+    except Exception:
+        neighbors = []
+
+    relations = _identity_relations(identity_key, target)
+    access_paths = _world_access_paths(target, profile, service_views)
+    credential_bindings = _credential_bindings(profile, service_views)
+    network_topology = _network_topology(identity_key, profile, relations)
+
+    world = {
+        "identity_key": identity_key,
+        "hostname": target.get("hostname"),
+        "kind": target.get("kind"),
+        "os": target.get("os"),
+        "domains": list(target.get("domains") or []),
+        "services": services,
+        "manifestations": manifestations,
+        "principals": {
+            "users": list(profile.get("users") or []),
+            "groups": list(profile.get("groups") or []),
+            "id_output": profile.get("id_output"),
+            "passwd_samples": list(profile.get("passwd_samples") or []),
+        },
+        "credentials": {
+            "indicators": list(profile.get("credential_indicators") or []),
+            "env_key_samples": list(profile.get("env_key_samples") or []),
+            "ssh_keys": list(profile.get("ssh_keys") or []),
+            "sudo_state": profile.get("sudo_state"),
+            "bindings": credential_bindings,
+        },
+        "network": network_topology,
+        "runtime": {
+            "container": dict(profile.get("container") or {}),
+            "docker_access": profile.get("docker_access"),
+            "interesting_suid": list(profile.get("interesting_suid") or []),
+            "package_manager": profile.get("package_manager"),
+            "package_count": profile.get("package_count"),
+            "packages_sample": list(profile.get("packages_sample") or []),
+            "process_count": profile.get("process_count"),
+            "process_findings": list(profile.get("process_findings") or []),
+            "kernel_version": None if likely_containerized else profile.get("kernel_version"),
+            "shared_kernel_version": profile.get("kernel_version") if likely_containerized else None,
+            "kernel_scope": "shared_container_host" if likely_containerized and profile.get("kernel_version") else ("host_runtime" if profile.get("kernel_version") else None),
+            "av_edr": profile.get("av_edr"),
+            "domain_membership": profile.get("domain_membership"),
+            "manifestation_scope": "containerized" if likely_containerized else "host_like",
+        },
+        "surfaces": service_views,
+        "access_paths": access_paths,
+        "datastore_access": list(profile.get("datastore_access") or []),
+        "datastore_observations": list(profile.get("datastore_observations") or []),
+        "neighbors": neighbors[:24],
+        "relations": relations[:24],
+        "notes": list(profile.get("notes") or []),
+        "evidence_count": int(profile.get("evidence_count") or 0),
+        "world_summary": {
+            "service_count": len(services),
+            "manifestation_count": len(manifestations),
+            "principal_count": len(profile.get("users") or []) + len(profile.get("groups") or []),
+            "credential_count": len(profile.get("credential_indicators") or []) + len(profile.get("ssh_keys") or []),
+            "datastore_count": len(service_views["datastores"]),
+            "web_surface_count": len(service_views["web_surfaces"]),
+            "remote_access_count": len(service_views["remote_access"]),
+            "neighbor_count": len(neighbors),
+            "relation_count": len(relations),
+            "access_path_count": len(access_paths),
+            "credential_binding_count": len(credential_bindings),
+            "inbound_peer_count": len(network_topology.get("inbound_peers") or []),
+            "outbound_peer_count": len(network_topology.get("outbound_peers") or []),
+            "containerized_manifestation": likely_containerized,
+        },
+    }
+    if likely_containerized and profile.get("kernel_version"):
+        world["notes"].append(
+            "Kernel version is observed from a containerized manifestation and may reflect a shared host kernel rather than guest userspace vintage."
+        )
+    world["notes"] = world["notes"][:12]
+    return world
+
+
+def _artifact_matches_identity(path: Path, identity_key: str) -> tuple[bool, str | None]:
+    identity = (identity_key or "").strip()
+    if not identity:
+        return False, None
+    token = _normalized_identity_token(identity)
+    name = path.name.lower()
+    if identity.lower() in name or token in name:
+        return True, None
+
+    try:
+        if path.suffix == ".json":
+            data = json.loads(path.read_text())
+            payload = data.get("payload", data) if isinstance(data, dict) else {}
+            workload_id = payload.get("workload_id")
+            if workload_id:
+                parsed = parse_workload_ref(workload_id)
+                if parsed.get("identity_key") == identity:
+                    return True, workload_id
+        elif path.suffix == ".ndjson":
+            for line in path.read_text(errors="replace").splitlines()[:40]:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                payload = event.get("payload", event) if isinstance(event, dict) else {}
+                workload_id = payload.get("workload_id")
+                if workload_id:
+                    parsed = parse_workload_ref(workload_id)
+                    if parsed.get("identity_key") == identity:
+                        return True, workload_id
+        return False, None
+    except Exception:
+        return False, None
+
+
+@app.get("/artifacts/{identity_key}")
+def identity_artifacts(identity_key: str, limit: int = 12):
+    """Recent runtime artifacts tied to one parsed identity."""
+    try:
+        limit = max(1, min(limit, 40))
+        buckets = [
+            ("events", EVENTS_DIR, ("*.ndjson", "*.json")),
+            ("interp", INTERP_DIR, ("*.json", "*_interp.ndjson")),
+            ("discovery", SKG_STATE_DIR / "discovery", ("*.ndjson", "*.json")),
+        ]
+        rows: list[dict] = []
+        for category, base_dir, patterns in buckets:
+            if not base_dir.exists():
+                continue
+            for pattern in patterns:
+                for path in base_dir.glob(pattern):
+                    matched, workload_id = _artifact_matches_identity(path, identity_key)
+                    if not matched:
+                        continue
+                    stat = path.stat()
+                    rows.append({
+                        "category": category,
+                        "file": path.name,
+                        "path": str(path),
+                        "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                        "size": stat.st_size,
+                        "workload_id": workload_id,
+                    })
+        rows.sort(key=lambda row: row["mtime"], reverse=True)
+        return {
+            "identity_key": identity_key,
+            "count": len(rows),
+            "artifacts": rows[:limit],
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Artifact lookup error: {exc}")
+
+
+@app.get("/timeline/{identity_key}")
+def identity_timeline(identity_key: str, limit: int = 40):
+    """Aggregate timeline across workload manifestations of one identity."""
+    try:
+        if kernel.feedback is None:
+            raise HTTPException(503, "Feedback ingester not initialized")
+
+        limit = max(1, min(limit, 200))
+        workloads: set[str] = set()
+        for interp_file in list(INTERP_DIR.glob("*.json")) + list(INTERP_DIR.glob("*_interp.ndjson")):
+            try:
+                data = json.loads(interp_file.read_text())
+            except Exception:
+                continue
+            payload = data.get("payload", data) if isinstance(data, dict) else {}
+            workload_id = payload.get("workload_id")
+            if not workload_id:
+                continue
+            parsed = parse_workload_ref(workload_id)
+            if parsed.get("identity_key") == identity_key:
+                workloads.add(workload_id)
+
+        timeline_rows = []
+        transition_rows = []
+        neighbor_rows = {}
+        for workload_id in sorted(workloads):
+            item = kernel.feedback.timeline(workload_id)
+            for snapshot in item.get("snapshots", []):
+                snapshot["_workload_id"] = workload_id
+                timeline_rows.append(snapshot)
+            for transition in item.get("transitions", []):
+                transition["_workload_id"] = workload_id
+                transition_rows.append(transition)
+            for neighbor in item.get("graph_neighbors", []):
+                try:
+                    neighbor_id, weight = neighbor
+                    neighbor_rows[neighbor_id] = max(float(weight), float(neighbor_rows.get(neighbor_id, 0.0)))
+                except Exception:
+                    continue
+
+        def _sort_key(row: dict) -> str:
+            return row.get("computed_at") or row.get("ts") or ""
+
+        timeline_rows.sort(key=_sort_key, reverse=True)
+        transition_rows.sort(key=_sort_key, reverse=True)
+
+        return {
+            "identity_key": identity_key,
+            "workload_count": len(workloads),
+            "workloads": sorted(workloads),
+            "snapshot_count": len(timeline_rows),
+            "transition_count": len(transition_rows),
+            "snapshots": timeline_rows[:limit],
+            "transitions": transition_rows[:limit],
+            "graph_neighbors": [
+                {"workload_id": wid, "weight": round(weight, 4)}
+                for wid, weight in sorted(neighbor_rows.items(), key=lambda item: -item[1])[:20]
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Timeline error: {exc}")
+
+
+@app.get("/history/actions")
+def action_history(limit: int = 30):
+    """Recent operator-visible lifecycle actions across proposals and folds."""
+    try:
+        limit = max(1, min(limit, 100))
+        ledger = PearlLedger(SKG_STATE_DIR / "pearls.jsonl")
+        rows: list[dict] = []
+        for pearl in ledger.all():
+            ts = pearl.timestamp.isoformat()
+            identity_key = (
+                pearl.energy_snapshot.get("identity_key")
+                or pearl.target_snapshot.get("identity_key")
+                or ""
+            )
+            for reason in pearl.reason_changes or []:
+                kind = reason.get("kind")
+                if kind not in {"proposal_lifecycle", "operator_action"}:
+                    continue
+                rows.append({
+                    "timestamp": ts,
+                    "kind": kind,
+                    "identity_key": identity_key,
+                    "domain": reason.get("domain") or pearl.energy_snapshot.get("domain") or "",
+                    "proposal_id": reason.get("proposal_id"),
+                    "proposal_kind": reason.get("proposal_kind"),
+                    "status": reason.get("status"),
+                    "reason": reason.get("reason"),
+                    "fold_id": reason.get("fold_id"),
+                    "action": reason.get("action"),
+                    "target_ip": reason.get("target_ip") or pearl.energy_snapshot.get("target_ip") or "",
+                })
+        rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+        bounded = rows[:limit]
+        return {"count": len(rows), "actions": bounded, "items": bounded}
+    except Exception as exc:
+        raise HTTPException(500, f"Action history error: {exc}")
+
+
+def _assistant_group_surface(workloads: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for row in workloads or []:
+        identity_key = row.get("identity_key") or row.get("workload_id") or "unknown"
+        group = groups.setdefault(identity_key, {
+            "identity_key": identity_key,
+            "manifestations": set(),
+            "paths": [],
+        })
+        if row.get("manifestation_key"):
+            group["manifestations"].add(row["manifestation_key"])
+        group["paths"].append(row)
+    for group in groups.values():
+        group["manifestations"] = sorted(group["manifestations"])
+        group["paths"] = sorted(group["paths"], key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
+    return groups
+
+
+def _assistant_compact_target(group: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    paths = []
+    for row in (group.get("paths") or [])[:6]:
+        paths.append({
+            "workload_id": row.get("workload_id"),
+            "manifestation_key": row.get("manifestation_key"),
+            "domain": row.get("domain"),
+            "attack_path_id": row.get("attack_path_id"),
+            "classification": row.get("classification"),
+            "score": row.get("score"),
+            "realized": len(row.get("realized") or []),
+            "blocked": len(row.get("blocked") or []),
+            "unknown": len(row.get("unknown") or []),
+        })
+    return {
+        "identity_key": group.get("identity_key"),
+        "manifestations": group.get("manifestations") or [],
+        "services": [
+            f"{svc.get('port')}/{svc.get('service')}"
+            for svc in (target.get("services") or [])[:8]
+        ],
+        "os": target.get("os"),
+        "kind": target.get("kind"),
+        "profile": target.get("profile") or {},
+        "paths": paths,
+    }
+
+
+def _assistant_compact_fold(fold: dict[str, Any]) -> dict[str, Any]:
+    why = fold.get("why") or {}
+    return {
+        "fold_id": fold.get("fold_id"),
+        "fold_type": fold.get("fold_type"),
+        "target_ip": fold.get("target_ip") or fold.get("location"),
+        "gravity_weight": fold.get("gravity_weight"),
+        "detail": fold.get("detail"),
+        "why": {
+            "mismatch": why.get("mismatch"),
+            "service": why.get("service"),
+            "attack_path_id": why.get("attack_path_id"),
+        },
+    }
+
+
+def _assistant_compact_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    growth = ((proposal.get("recall") or {}).get("growth_memory") or {})
+    return {
+        "id": proposal.get("id"),
+        "kind": proposal.get("proposal_kind"),
+        "status": proposal.get("status"),
+        "description": proposal.get("description"),
+        "domain": proposal.get("domain"),
+        "hosts": proposal.get("hosts") or [],
+        "confidence": proposal.get("confidence"),
+        "fold_ids": proposal.get("fold_ids") or [],
+        "growth_memory": {
+            "delta": growth.get("delta"),
+            "proposal_reasons": growth.get("proposal_reasons") or [],
+        },
+        "command_hint": ((proposal.get("action") or {}).get("command_hint")),
+    }
+
+
+def _assistant_compact_memory(neighborhood: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "identity_key": neighborhood.get("identity_key"),
+        "domain": neighborhood.get("domain"),
+        "pearl_count": neighborhood.get("pearl_count"),
+        "mean_energy": neighborhood.get("mean_energy"),
+        "transition_density": neighborhood.get("transition_density"),
+        "manifestation_keys": neighborhood.get("manifestation_keys") or [],
+        "reinforced_wickets": neighborhood.get("reinforced_wickets") or [],
+        "reinforced_reasons": neighborhood.get("reinforced_reasons") or [],
+    }
+
+
+def _assistant_find_memory(neighborhoods: list[dict[str, Any]], selection_id: str, identity_key: str) -> dict[str, Any] | None:
+    for index, row in enumerate(neighborhoods):
+        row_id = f"{row.get('identity_key')}:{row.get('domain') or 'unknown'}:{index}"
+        if selection_id and row_id == selection_id:
+            return row
+    for row in neighborhoods:
+        if identity_key and row.get("identity_key") == identity_key:
+            return row
+    return None
+
+
+def _assistant_find_fold(folds: list[dict[str, Any]], selection_id: str, identity_key: str) -> dict[str, Any] | None:
+    for index, row in enumerate(folds):
+        row_id = row.get("fold_id") or f"{row.get('target_ip') or row.get('location') or 'fold'}:{index}"
+        if selection_id and row_id == selection_id:
+            return row
+    for row in folds:
+        target_ip = row.get("target_ip") or row.get("location")
+        if identity_key and target_ip == identity_key:
+            return row
+    return None
+
+
+def _assistant_json_prompt(context: dict[str, Any]) -> str:
+    task = str(context.get("task") or "target_summary")
+    task_notes = str((context.get("assistant_config") or {}).get("task_prompt") or "")
+    note_line = f"Task note: {task_notes}\n" if task_notes else ""
+    return (
+        "You are the SKG AI assistant. You are not the substrate and you may not invent measurements.\n"
+        "Use only the provided JSON context. Treat realized/blocked/indeterminate exactly as given.\n"
+        "If something is unresolved, say it is indeterminate or unsupported.\n"
+        f"Current task: {task}.\n"
+        f"{note_line}"
+        "Return only valid JSON with this schema:\n"
+        '{"summary":"string","findings":["string"],"next_actions":["string"],"cautions":["string"]}\n'
+        "Context JSON:\n"
+        f"{json.dumps(context, ensure_ascii=True)}"
+    )
+
+
+def _assistant_parse_json(raw: str) -> dict[str, Any] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(text[start:])
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        return None
+    return None
+
+
+def _assistant_try_ollama(context: dict[str, Any], timeout_s: float = 8.0) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        from skg.resonance.ollama_backend import OllamaBackend
+    except Exception:
+        return None, None
+
+    backend = OllamaBackend()
+    if not backend.available():
+        return None, None
+
+    model = backend.model()
+    result: dict[str, Any] = {"payload": None}
+    error: dict[str, Any] = {"raised": None}
+
+    def _worker() -> None:
+        try:
+            prompt = _assistant_json_prompt(context)
+            raw = backend.generate(
+                prompt,
+                model=model,
+                num_predict=int((context.get("assistant_config") or {}).get("num_predict") or 220),
+            )
+            result["payload"] = _assistant_parse_json(raw)
+        except Exception as exc:
+            error["raised"] = exc
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        return None, model
+    if error["raised"] is not None:
+        return None, model
+    payload = result.get("payload")
+    if isinstance(payload, dict):
+        return payload, model
+    return None, model
+
+
+def _assistant_fallback(context: dict[str, Any]) -> dict[str, Any]:
+    kind = context.get("kind")
+    task = str(context.get("task") or "")
+    subject = context.get("subject") or {}
+    summary = "SKG assistant could not derive a summary."
+    findings: list[str] = []
+    next_actions: list[str] = []
+    cautions: list[str] = [
+        "This explanation is grounded only in the current SKG substrate snapshot.",
+        "Do not treat remembered state as current state without re-observation.",
+    ]
+
+    if task == "fold_cluster_summary":
+        summary = (
+            f"Structural pressure around {context.get('identity_key') or 'the selected identity'} "
+            f"is clustering into {context.get('fold_count') or 0} folds and {context.get('proposal_count') or 0} related proposals."
+        )
+        if context.get("related_folds"):
+            services = sorted({
+                (fold.get("why") or {}).get("service") or fold.get("fold_type") or "unknown"
+                for fold in (context.get("related_folds") or [])
+            })
+            findings.append(f"Clustered pressure centers on {', '.join(services[:4])}.")
+        findings.append("Treat this as one structural deficit until new observation separates it into distinct causes.")
+        next_actions.append("Review the clustered growth proposal and the top supporting fold together.")
+    elif task == "engagement_note":
+        summary = (
+            f"Engagement note for {context.get('identity_key') or 'selection'}: "
+            f"{context.get('fold_count') or 0} folds, {context.get('proposal_count') or 0} proposals, "
+            f"{(context.get('timeline') or {}).get('transition_count', 0)} transitions."
+        )
+        findings.append("Preserve explicit uncertainty and measured classification labels in operator notes.")
+        if subject.get("paths"):
+            top_path = (subject.get("paths") or [{}])[0]
+            findings.append(
+                f"Top current path: {top_path.get('attack_path_id') or 'n/a'} as {top_path.get('classification') or 'unknown'}."
+            )
+        next_actions.append("Capture measured support references and the next bounded observation in the engagement note.")
+    elif kind == "target":
+        top_path = ((subject.get("paths") or [{}])[0]) if subject.get("paths") else {}
+        summary = (
+            f"SKG currently sees {subject.get('identity_key') or 'this identity'} through "
+            f"{len(subject.get('manifestations') or [])} manifestations and "
+            f"{len(subject.get('paths') or [])} active attack-path rows."
+        )
+        if top_path:
+            findings.append(
+                f"Strongest current path is {top_path.get('attack_path_id') or 'n/a'} "
+                f"as {top_path.get('classification') or 'unknown'} with score {float(top_path.get('score') or 0.0):.2f}."
+            )
+        if subject.get("services"):
+            findings.append(f"Observed services include {', '.join(subject.get('services')[:5])}.")
+        if task == "next_observation":
+            if context.get("related_folds"):
+                fold = (context.get("related_folds") or [{}])[0]
+                next_actions.append(
+                    f"Start with fold pressure around {fold.get('why', {}).get('service') or fold.get('fold_type') or 'the target'} before proposing growth."
+                )
+            if context.get("related_memory"):
+                memory = (context.get("related_memory") or [{}])[0]
+                wickets = memory.get("reinforced_wickets") or []
+                if wickets:
+                    next_actions.append(f"Bias observation toward reinforced wickets {', '.join(wickets[:4])}.")
+            if context.get("artifacts"):
+                next_actions.append("Inspect the newest measured-support artifact before selecting the next live instrument.")
+        else:
+            next_actions.append("Use folds and proposal pressure to decide whether the next move is observation, growth, or review.")
+    elif kind == "fold":
+        summary = (
+            f"This {subject.get('fold_type') or 'fold'} fold marks unresolved structure around "
+            f"{subject.get('target_ip') or 'the selected identity'}."
+        )
+        why = subject.get("why") or {}
+        if why.get("mismatch"):
+            findings.append(f"Mismatch is {why.get('mismatch')}.")
+        if why.get("service"):
+            findings.append(f"Service context is {why.get('service')}.")
+        next_actions.append("Decide whether this requires re-observation, catalog growth, or toolchain growth.")
+    elif kind == "proposal":
+        summary = (
+            f"This {subject.get('kind') or 'proposal'} proposal is a bounded response to structural pressure, "
+            f"not a measurement."
+        )
+        growth = subject.get("growth_memory") or {}
+        findings.append(
+            f"Status is {subject.get('status') or 'unknown'} with confidence {float(subject.get('confidence') or 0.0):.3f}."
+        )
+        if growth.get("delta"):
+            findings.append(f"Growth memory delta is {float(growth.get('delta') or 0.0):.3f}.")
+        if subject.get("command_hint"):
+            next_actions.append(f"Review command hint: {subject.get('command_hint')}")
+    elif kind == "memory":
+        summary = (
+            f"This pearl neighborhood is structural memory for {subject.get('identity_key') or 'the selected identity'} "
+            f"in domain {subject.get('domain') or 'unknown'}."
+        )
+        if subject.get("reinforced_wickets"):
+            findings.append(f"Reinforced wickets: {', '.join(subject.get('reinforced_wickets')[:6])}.")
+        if subject.get("reinforced_reasons"):
+            findings.append(f"Reinforced reasons: {', '.join(subject.get('reinforced_reasons')[:4])}.")
+        next_actions.append("Use reinforced neighborhoods to bias observation, not to assign new state.")
+
+    if context.get("timeline", {}).get("transition_count"):
+        findings.append(
+            f"Timeline contains {context['timeline'].get('transition_count')} recorded transitions and "
+            f"{context['timeline'].get('snapshot_count')} snapshots."
+        )
+    if context.get("fold_count"):
+        findings.append(f"Related fold pressure count is {context.get('fold_count')}.")
+    if context.get("proposal_count"):
+        findings.append(f"Related proposal count is {context.get('proposal_count')}.")
+    if context.get("artifacts"):
+        next_actions.append("Inspect measured-support artifacts before making any destructive or growth decision.")
+
+    return {
+        "summary": summary,
+        "findings": findings[:5],
+        "next_actions": next_actions[:4],
+        "cautions": cautions[:4],
+    }
+
+
+def _assistant_config() -> dict[str, Any]:
+    try:
+        import yaml
+        candidates = [
+            SKG_CONFIG_DIR / "skg_config.yaml",
+            SKG_HOME / "config" / "skg_config.yaml",
+        ]
+        for cfg_path in candidates:
+            if not cfg_path.exists():
+                continue
+            data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            resonance = data.get("resonance", {}) or {}
+            assistant = resonance.get("assistant", {}) or {}
+            if isinstance(assistant, dict):
+                return assistant
+    except Exception:
+        pass
+    return {}
+
+
+def _assistant_default_task(kind: str) -> str:
+    return {
+        "target": "target_summary",
+        "fold": "fold_explanation",
+        "proposal": "proposal_explanation",
+        "memory": "memory_summary",
+    }.get(kind, "target_summary")
+
+
+def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
+    targets = list_targets()
+    surface = field_surface()
+    folds = folds_summary()
+    proposals = list_proposals(status="all")
+    memory = pearl_memory_manifold()
+
+    groups = _assistant_group_surface(surface.get("workloads") or [])
+    targets_by_identity = {row.get("ip"): row for row in targets.get("targets") or [] if row.get("ip")}
+    identity_key = req.identity_key or ""
+
+    subject: dict[str, Any] | None = None
+    if req.kind == "target":
+        identity_key = identity_key or req.id
+        group = groups.get(identity_key)
+        if group:
+            subject = _assistant_compact_target(group, targets_by_identity.get(identity_key, {}))
+    elif req.kind == "fold":
+        fold = _assistant_find_fold(folds.get("folds") or [], req.id, identity_key)
+        if fold:
+            subject = _assistant_compact_fold(fold)
+            identity_key = identity_key or fold.get("target_ip") or fold.get("location") or ""
+    elif req.kind == "proposal":
+        proposal = None
+        for row in proposals.get("proposals") or []:
+            if row.get("id") == req.id:
+                proposal = row
+                break
+        if proposal:
+            subject = _assistant_compact_proposal(proposal)
+            hosts = proposal.get("hosts") or []
+            identity_key = identity_key or (hosts[0] if hosts else "")
+    elif req.kind == "memory":
+        neighborhood = _assistant_find_memory(memory.get("neighborhoods") or [], req.id, identity_key)
+        if neighborhood:
+            subject = _assistant_compact_memory(neighborhood)
+            identity_key = identity_key or neighborhood.get("identity_key") or ""
+
+    if not subject:
+        raise HTTPException(404, f"Assistant subject not found for {req.kind}:{req.id}")
+
+    identity_folds = [
+        _assistant_compact_fold(fold)
+        for fold in (folds.get("folds") or [])
+        if identity_key and (fold.get("target_ip") or fold.get("location")) == identity_key
+    ][:req.limit]
+    identity_proposals = [
+        _assistant_compact_proposal(proposal)
+        for proposal in (proposals.get("proposals") or [])
+        if not identity_key or identity_key in (proposal.get("hosts") or [])
+    ][:req.limit]
+    identity_memory = [
+        _assistant_compact_memory(row)
+        for row in (memory.get("neighborhoods") or [])
+        if not identity_key or row.get("identity_key") == identity_key
+    ][:req.limit]
+    timeline = identity_timeline(identity_key, limit=max(4, req.limit * 2)) if identity_key else {}
+    artifacts = identity_artifacts(identity_key, limit=req.limit).get("artifacts", []) if identity_key else []
+
+    return {
+        "kind": req.kind,
+        "id": req.id,
+        "identity_key": identity_key,
+        "subject": subject,
+        "fold_count": len(identity_folds),
+        "proposal_count": len(identity_proposals),
+        "related_folds": identity_folds,
+        "related_proposals": identity_proposals,
+        "related_memory": identity_memory,
+        "timeline": {
+            "workload_count": timeline.get("workload_count", 0),
+            "snapshot_count": timeline.get("snapshot_count", 0),
+            "transition_count": timeline.get("transition_count", 0),
+            "recent_transitions": (timeline.get("transitions") or [])[:req.limit],
+        },
+        "artifacts": [
+            {
+                "file": row.get("file"),
+                "category": row.get("category"),
+                "mtime": row.get("mtime"),
+                "workload_id": row.get("workload_id"),
+            }
+            for row in artifacts[:req.limit]
+        ],
+    }
+
+
+@app.post("/assistant/explain")
+def assistant_explain(req: AssistantExplainRequest):
+    try:
+        context = req.context or _assistant_context(req)
+        if not isinstance(context, dict):
+            raise HTTPException(400, "Assistant context must be an object")
+        assistant_cfg = _assistant_config()
+        task = req.task or _assistant_default_task(req.kind)
+        task_prompt = ((assistant_cfg.get("tasks") or {}).get(task) if isinstance(assistant_cfg.get("tasks"), dict) else "") or ""
+        context.setdefault("kind", req.kind)
+        context.setdefault("id", req.id)
+        context.setdefault("identity_key", req.identity_key)
+        context["task"] = task
+        context["assistant_config"] = {
+            "enabled": bool(assistant_cfg.get("enabled", True)),
+            "timeout_s": float(assistant_cfg.get("timeout_s", 8.0) or 8.0),
+            "num_predict": int(assistant_cfg.get("num_predict", 220) or 220),
+            "task_prompt": task_prompt,
+        }
+        mode = "fallback"
+        model = None
+        if context["assistant_config"]["enabled"]:
+            rendered, model = _assistant_try_ollama(
+                context,
+                timeout_s=float(context["assistant_config"]["timeout_s"]),
+            )
+            if rendered:
+                mode = "ollama"
+        else:
+            rendered = None
+
+        if not isinstance(rendered, dict):
+            rendered = _assistant_fallback(context)
+        return {
+            "mode": mode,
+            "model": model,
+            "task": task,
+            "selection": {
+                "kind": req.kind,
+                "id": req.id,
+                "identity_key": context.get("identity_key"),
+            },
+            "summary": rendered.get("summary") or "",
+            "findings": list(rendered.get("findings") or []),
+            "next_actions": list(rendered.get("next_actions") or []),
+            "cautions": list(rendered.get("cautions") or []),
+            "references": {
+                "identity_key": context.get("identity_key"),
+                "fold_count": context.get("fold_count"),
+                "proposal_count": context.get("proposal_count"),
+                "artifact_count": len(context.get("artifacts") or []),
+                "timeline": context.get("timeline") or {},
+            },
+            "assistant_config": context.get("assistant_config") or {},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Assistant error: {exc}")
+
+
+@app.get("/artifact/preview")
+def artifact_preview(path: str, lines: int = 12):
+    """Bounded preview of one runtime artifact file."""
+    try:
+        preview_lines = max(1, min(lines, 40))
+        candidate = Path(path)
+        allowed_roots = [EVENTS_DIR, INTERP_DIR, SKG_STATE_DIR / "discovery"]
+        resolved = candidate.resolve()
+        if not any(str(resolved).startswith(str(root.resolve())) for root in allowed_roots if root.exists()):
+            raise HTTPException(403, "Artifact path outside allowed runtime roots")
+        if not resolved.exists() or not resolved.is_file():
+            raise HTTPException(404, "Artifact not found")
+
+        payload: dict[str, object] = {
+            "path": str(resolved),
+            "file": resolved.name,
+            "preview_kind": "text",
+            "rows": [],
+        }
+
+        if resolved.suffix == ".ndjson":
+            payload["preview_kind"] = "ndjson"
+            rows = []
+            for index, line in enumerate(resolved.read_text(errors="replace").splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except Exception:
+                    parsed = {"raw": line[:500]}
+                rows.append({"line": index + 1, "data": parsed})
+                if len(rows) >= preview_lines:
+                    break
+            payload["rows"] = rows
+            return payload
+
+        if resolved.suffix == ".json":
+            payload["preview_kind"] = "json"
+            data = json.loads(resolved.read_text())
+            if isinstance(data, dict):
+                payload["rows"] = [{
+                    "keys": sorted(list(data.keys()))[:40],
+                    "data": data,
+                }]
+            else:
+                payload["rows"] = [{"data": data}]
+            return payload
+
+        payload["rows"] = [{"raw": line} for line in resolved.read_text(errors="replace").splitlines()[:preview_lines]]
+        return payload
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Artifact preview error: {exc}")
+
+
+@app.get("/proposals")
+def list_proposals(status: str = "all"):
+    try:
+        from skg.forge import proposals as forge_proposals
+        rows = forge_proposals.list_proposals(status=status)
+        return {
+            "count": len(rows),
+            "status": status,
+            "proposals": rows,
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Proposal error: {exc}")
+
+
+@app.get("/proposals/{proposal_id}")
+def proposal_detail(proposal_id: str):
+    try:
+        from skg.forge import proposals as forge_proposals
+
+        row = forge_proposals.get(proposal_id)
+        if not row:
+            raise HTTPException(404, f"Proposal not found: {proposal_id}")
+        return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Proposal detail error: {exc}")
+
+
+@app.post("/proposals/{proposal_id}/accept")
+def proposal_accept(proposal_id: str):
+    try:
+        from skg.forge import proposals as forge_proposals
+        return forge_proposals.accept(proposal_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(404, msg)
+        if "not pending" in msg.lower():
+            raise HTTPException(409, msg)
+        raise HTTPException(400, msg)
+    except Exception as exc:
+        raise HTTPException(500, f"Proposal accept error: {exc}")
+
+
+@app.post("/proposals/{proposal_id}/defer")
+def proposal_defer(proposal_id: str, req: ProposalDeferRequest):
+    try:
+        from skg.forge import proposals as forge_proposals
+        return forge_proposals.defer(proposal_id, days=req.days)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(404, msg)
+        raise HTTPException(400, msg)
+    except Exception as exc:
+        raise HTTPException(500, f"Proposal defer error: {exc}")
+
+
+@app.post("/proposals/{proposal_id}/reject")
+def proposal_reject(proposal_id: str, req: ProposalRejectRequest):
+    try:
+        from skg.forge import proposals as forge_proposals
+        return forge_proposals.reject(
+            proposal_id,
+            reason=req.reason,
+            cooldown_days=req.cooldown_days,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(404, msg)
+        raise HTTPException(400, msg)
+    except Exception as exc:
+        raise HTTPException(500, f"Proposal reject error: {exc}")
 
 
 # --- Temporal / graph / feedback endpoints ---
@@ -937,7 +2813,7 @@ def topology_energy():
     """Live G(t) — information field energy per domain sphere."""
     try:
         from skg.topology.energy import compute_field_energy_all
-        results = compute_field_energy_all(EVENTS_DIR, INTERP_DIR)
+        results = compute_field_energy_all(DISCOVERY_DIR, INTERP_DIR)
         return {
             "spheres": {s: e.as_dict() for s, e in results.items()},
             "computed_at": __import__('datetime').datetime.now(
@@ -945,6 +2821,34 @@ def topology_energy():
         }
     except Exception as exc:
         raise HTTPException(500, f"Topology energy error: {exc}")
+
+
+@app.get("/topology/field")
+def topology_field():
+    """Decomposed field topology: self-energy, coupling, dissipation, curvature,
+    and protected-state detection over the current substrate."""
+    try:
+        from skg.topology.energy import compute_field_topology
+        result = compute_field_topology(DISCOVERY_DIR, INTERP_DIR)
+        return result.as_dict()
+    except Exception as exc:
+        raise HTTPException(500, f"Topology field error: {exc}")
+
+
+@app.get("/topology/fibers")
+def topology_fibers():
+    """Overlapping field fibers built from canonical world snapshots."""
+    try:
+        from skg.topology.energy import compute_field_fibers
+        clusters = compute_field_fibers()
+        return {
+            "clusters": [c.as_dict() for c in clusters],
+            "count": len(clusters),
+            "computed_at": __import__('datetime').datetime.now(
+                __import__('datetime').timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Topology fibers error: {exc}")
 
 
 @app.get("/topology/manifold")
@@ -955,7 +2859,7 @@ def topology_manifold():
         from skg.topology.manifold import (
             build_full_complex, sphere_coupling_matrix, find_h1_obstructions
         )
-        sc = build_full_complex(EVENTS_DIR)
+        sc = build_full_complex(DISCOVERY_DIR)
         summary = sc.summary()
         C = sphere_coupling_matrix(sc)
         obstructions = find_h1_obstructions(sc)
@@ -977,6 +2881,22 @@ def topology_manifold():
         }
     except Exception as exc:
         raise HTTPException(500, f"Manifold error: {exc}")
+
+
+@app.get("/memory/pearls/manifold")
+def pearl_memory_manifold():
+    """Derived pearl neighborhoods over the append-only pearl ledger."""
+    try:
+        from skg.kernel.pearl_manifold import load_pearl_manifold
+        manifold = load_pearl_manifold(SKG_STATE_DIR / "pearls.jsonl")
+        neighborhoods = [n.as_dict() for n in manifold.neighborhoods()]
+        return {
+            "neighborhoods": neighborhoods,
+            "count": len(neighborhoods),
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Pearl manifold error: {exc}")
 
 
 @app.get("/topology/dynamics")
@@ -1158,6 +3078,27 @@ def fold_resolve(fold_id: str, target_ip: str = ""):
         resolved = fm.resolve(fold_id)
         if resolved:
             fm.persist(fold_file)
+            try:
+                PearlLedger(SKG_STATE_DIR / "pearls.jsonl").record(Pearl(
+                    reason_changes=[{
+                        "kind": "operator_action",
+                        "action": "fold_resolved",
+                        "fold_id": fold_id,
+                        "target_ip": target_ip,
+                    }],
+                    energy_snapshot={
+                        "target_ip": target_ip,
+                        "workload_id": f"growth::{target_ip}",
+                        "domain": "folds",
+                    },
+                    target_snapshot={
+                        "workload_id": f"growth::{target_ip}",
+                        "hosts": [target_ip],
+                        "identity_key": target_ip,
+                    },
+                ))
+            except Exception:
+                pass
             return {"ok": True, "resolved": fold_id,
                     "remaining_folds": len(fm.all()),
                     "remaining_gravity_weight": round(fm.total_gravity_weight(), 4)}

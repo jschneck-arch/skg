@@ -55,6 +55,7 @@ ok "system packages"
 log "Creating directory layout..."
 install -d \
     "$SKG_HOME/skg" \
+    "$SKG_HOME/bin" \
     "$SKG_STATE"/{events,interp,delta/{snapshots,transitions},graph,\
 brain/evolution,logs,resonance/{index,records,drafts},proposals,\
 bh_cache,discovery,cve,forge_staging,usb_drops,agent_queue,ssh_collection,\
@@ -82,7 +83,8 @@ cp -r "$SCRIPT_DIR/feeds"          "$SKG_HOME/" 2>/dev/null || true
 
 for tc in skg-aprs-toolchain skg-container-escape-toolchain \
           skg-ad-lateral-toolchain skg-host-toolchain skg-web-toolchain \
-          skg-iot_firmware-toolchain skg-supply-chain-toolchain; do
+          skg-iot_firmware-toolchain skg-supply-chain-toolchain \
+          skg-ai-toolchain; do
     [ -d "$SCRIPT_DIR/$tc" ] && cp -r "$SCRIPT_DIR/$tc" "$SKG_HOME/"
 done
 ok "SKG package tree"
@@ -131,7 +133,8 @@ log "Bootstrapping toolchains..."
 for tc in skg-aprs-toolchain skg-container-escape-toolchain \
           skg-ad-lateral-toolchain skg-host-toolchain skg-web-toolchain \
           skg-data-toolchain skg-iot_firmware-toolchain \
-          skg-supply-chain-toolchain skg-binary-toolchain; do
+          skg-supply-chain-toolchain skg-binary-toolchain \
+          skg-ai-toolchain; do
     bs="$SKG_HOME/$tc/bootstrap.sh"
     if [ -f "$bs" ]; then
         bash "$bs" "$SKG_HOME/$tc" >/dev/null 2>&1 \

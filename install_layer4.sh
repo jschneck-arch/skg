@@ -64,7 +64,8 @@ ok "nvd_ingester.py"
 log "Installing toolchains..."
 for tc in skg-aprs-toolchain skg-container-escape-toolchain \
           skg-ad-lateral-toolchain skg-host-toolchain skg-web-toolchain \
-          skg-iot_firmware-toolchain skg-supply-chain-toolchain; do
+          skg-iot_firmware-toolchain skg-supply-chain-toolchain \
+          skg-ai-toolchain; do
     src="$SCRIPT_DIR/$tc"
     [ -d "$src" ] || continue
     cp -r "$src" "$SKG_HOME/"
@@ -74,7 +75,8 @@ done
 # Bootstrap each active toolchain's venv (projectors run in-process but
 # the bootstrap.sh installs toolchain-specific deps)
 for tc in skg-aprs-toolchain skg-container-escape-toolchain \
-          skg-ad-lateral-toolchain skg-host-toolchain skg-web-toolchain; do
+          skg-ad-lateral-toolchain skg-host-toolchain skg-web-toolchain \
+          skg-ai-toolchain; do
     bs="$SKG_HOME/$tc/bootstrap.sh"
     if [ -f "$bs" ]; then
         log "Bootstrapping $tc..."

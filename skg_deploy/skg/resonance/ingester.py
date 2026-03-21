@@ -241,7 +241,15 @@ def ingest_all(engine: ResonanceEngine, skg_home: Path) -> dict:
         log.warning(f"No toolchains found under {skg_home}")
         return {"toolchains": 0}
 
-    summary = {"toolchains": len(toolchains), "domains": {}}
+    summary = {
+        "toolchains": len(toolchains),
+        "toolchains_processed": [],
+        "domains": {},
+        "wickets_added": 0,
+        "adapters_added": 0,
+        "domains_added": 0,
+        "errors": [],
+    }
 
     for tc_dir in toolchains:
         domain   = _domain_from_toolchain(tc_dir)
@@ -249,7 +257,9 @@ def ingest_all(engine: ResonanceEngine, skg_home: Path) -> dict:
         adapters = _find_adapters(tc_dir)
 
         if not catalogs:
-            log.warning(f"No catalogs found in {tc_dir}, skipping")
+            msg = f"No catalogs found in {tc_dir}, skipping"
+            log.warning(msg)
+            summary["errors"].append(msg)
             continue
 
         # Use the first catalog found (there's only one per toolchain currently)
@@ -264,6 +274,10 @@ def ingest_all(engine: ResonanceEngine, skg_home: Path) -> dict:
             "new_adapters": new_adapters,
             "catalog":      catalog_path.name,
         }
+        summary["toolchains_processed"].append(domain)
+        summary["wickets_added"] += wicket_counts["wickets"]
+        summary["adapters_added"] += new_adapters
+        summary["domains_added"] += 1
         log.info(f"  {domain}: +{wicket_counts['wickets']} wickets, "
                  f"+{new_adapters} adapters")
 

@@ -95,6 +95,10 @@ def compute_data_score(events: list[dict], catalog: dict,
             classification, catalog, attack_path_id,
             realized, blocked, unknown
         )
+        if classification == "indeterminate_h1":
+            sheaf_data = dict(sheaf_data or {})
+            sheaf_data["classification_detail"] = "indeterminate_h1"
+            classification = "indeterminate"
     except Exception:
         pass
     return {

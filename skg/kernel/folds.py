@@ -59,13 +59,26 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
+from skg.intel.gap_detector import detect_from_events, detect_from_web_fingerprints
+from skg.identity import parse_workload_ref
 
 log = logging.getLogger("skg.kernel.folds")
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def stable_fold_id(fold_type: str, location: str, constraint_source: str) -> str:
+    """Generate a stable ID for the same logical fold across cycles."""
+    key = f"{fold_type}|{location}|{constraint_source}"
+    return str(uuid5(NAMESPACE_URL, key))
+
+
+def _identity_key(workload_id: str) -> str:
+    return parse_workload_ref(workload_id).get("identity_key", workload_id)
 
 
 @dataclass(slots=True)
@@ -89,8 +102,20 @@ class Fold:
     constraint_source:     str
     discovery_probability: float = 0.5
     detail:                str   = ""
+    why:                   dict  = field(default_factory=dict)
+    hypotheses:            list[str] = field(default_factory=list)
+    discriminators:        list[str] = field(default_factory=list)
+    evidence_refs:         list[str] = field(default_factory=list)
     created_time:          datetime = field(default_factory=utcnow)
-    id:                    str   = field(default_factory=lambda: str(uuid4()))
+    id:                    str   = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = stable_fold_id(
+                self.fold_type,
+                self.location,
+                self.constraint_source,
+            )
 
     def gravity_weight(self) -> float:
         """
@@ -167,6 +192,10 @@ class Fold:
             "constraint_source":     self.constraint_source,
             "discovery_probability": self.discovery_probability,
             "detail":                self.detail,
+            "why":                   self.why,
+            "hypotheses":            self.hypotheses,
+            "discriminators":        self.discriminators,
+            "evidence_refs":         self.evidence_refs,
             "gravity_weight":        round(self.gravity_weight(), 4),
             "created_time":          self.created_time.isoformat(),
         }
@@ -200,10 +229,16 @@ class FoldManager:
     def resolve(self, fold_id: str) -> bool:
         """Remove a fold by ID. Returns True if found and removed."""
         before = len(self._folds)
-        self._folds = [f for f in self._folds if f.id != fold_id]
+        matches = [f.id for f in self._folds if f.id == fold_id or f.id.startswith(fold_id)]
+        if len(matches) > 1 and fold_id not in matches:
+            return False
+        target_id = fold_id if fold_id in matches else (matches[0] if matches else None)
+        if not target_id:
+            return False
+        self._folds = [f for f in self._folds if f.id != target_id]
         resolved = len(self._folds) < before
         if resolved:
-            log.debug(f"[fold] resolved {fold_id}")
+            log.debug(f"[fold] resolved {target_id}")
         return resolved
 
     def resolve_by_location(self, location: str) -> int:
@@ -256,7 +291,13 @@ class FoldManager:
                     constraint_source=d["constraint_source"],
                     discovery_probability=float(d.get("discovery_probability", 0.5)),
                     detail=d.get("detail", ""),
-                    id=d.get("id", str(uuid4())),
+                    why=dict(d.get("why", {})),
+                    hypotheses=list(d.get("hypotheses", [])),
+                    discriminators=list(d.get("discriminators", [])),
+                    evidence_refs=list(d.get("evidence_refs", [])),
+                    id=d.get("id") or stable_fold_id(
+                        d["fold_type"], d["location"], d["constraint_source"]
+                    ),
                 ))
         except Exception as exc:
             log.warning(f"FoldManager.load failed: {exc}")
@@ -338,6 +379,17 @@ class FoldDetector:
                         f"Attack surface: {gap.get('attack_surface', 'unknown')[:120]}. "
                         f"Collection hints: {'; '.join(gap.get('collection_hints', [])[:2])}"
                     ),
+                    why={
+                        "mismatch": "observed_service_without_toolchain",
+                        "service": svc,
+                        "attack_surface": gap.get("attack_surface", ""),
+                        "collection_hints": gap.get("collection_hints", [])[:4],
+                    },
+                    hypotheses=[
+                        f"{svc} exposes an attack surface not represented in the current catalogs",
+                        f"Existing domains do not explain the observations on {host}",
+                    ],
+                    discriminators=gap.get("collection_hints", [])[:4],
                 ))
 
         return folds
@@ -395,6 +447,21 @@ class FoldDetector:
                         f"Create a wicket with: skg catalog compile --domain <domain> "
                         f"--keywords {cve_id}"
                     ),
+                    why={
+                        "mismatch": "observed_vulnerability_without_mapping",
+                        "cve_id": cve_id,
+                        "service": service,
+                        "cvss": cvss,
+                        "target_ip": target_ip,
+                    },
+                    hypotheses=[
+                        f"{cve_id} reflects a real condition on {target_ip} that current wickets do not express",
+                        "The generic service model is underspecified for this observed version/configuration",
+                    ],
+                    discriminators=[
+                        f"Map {cve_id} to a concrete evidence-checkable wicket",
+                        f"Collect service/version/config detail for {service or target_ip}",
+                    ],
                 ))
 
         return folds
@@ -417,45 +484,79 @@ class FoldDetector:
         }
 
         if not events_dir.exists():
-            return folds
+            events_dir = None
 
-        # Track latest observation per (workload_id, wicket_id)
+        # Track latest observation per (identity_key, wicket_id)
         latest: dict[tuple, dict] = {}
 
-        for f in sorted(events_dir.glob("*.ndjson"))[-100:]:
-            for line in f.read_text(errors="replace").splitlines():
+        if events_dir and events_dir.exists():
+            for f in sorted(events_dir.glob("*.ndjson"))[-100:]:
+                for line in f.read_text(errors="replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("type") != "obs.attack.precondition":
+                        continue
+
+                    payload     = ev.get("payload", {})
+                    prov        = ev.get("provenance", {})
+                    wicket_id   = payload.get("wicket_id", "")
+                    workload_id = payload.get("workload_id", "")
+                    status      = payload.get("status", "unknown")
+                    ts_str      = ev.get("ts", "")
+                    decay_class = prov.get("evidence", {}).get(
+                        "source_kind", "operational")
+
+                    if not wicket_id or status != "realized":
+                        continue
+
+                    identity_key = _identity_key(workload_id)
+                    key = (identity_key, wicket_id)
+                    if key not in latest or ts_str > latest[key]["ts"]:
+                        latest[key] = {
+                            "ts":           ts_str,
+                            "decay_class":  decay_class,
+                            "workload_id":  workload_id,
+                            "identity_key": identity_key,
+                            "wicket_id":    wicket_id,
+                        }
+
+        pearls_file = Path("/var/lib/skg/pearls.jsonl")
+        if pearls_file.exists():
+            for line in pearls_file.read_text(errors="replace").splitlines()[-500:]:
                 if not line.strip():
                     continue
                 try:
-                    ev = json.loads(line)
+                    pearl = json.loads(line)
                 except Exception:
                     continue
-                if ev.get("type") != "obs.attack.precondition":
-                    continue
-
-                payload     = ev.get("payload", {})
-                prov        = ev.get("provenance", {})
-                wicket_id   = payload.get("wicket_id", "")
-                workload_id = payload.get("workload_id", "")
-                status      = payload.get("status", "unknown")
-                ts_str      = ev.get("ts", "")
-                decay_class = prov.get("evidence", {}).get(
-                    "source_kind", "operational")
-
-                if not wicket_id or status != "realized":
-                    continue
-
-                key = (workload_id, wicket_id)
-                if key not in latest or ts_str > latest[key]["ts"]:
-                    latest[key] = {
-                        "ts":           ts_str,
-                        "decay_class":  decay_class,
-                        "workload_id":  workload_id,
-                        "wicket_id":    wicket_id,
-                    }
+                ts_str = pearl.get("timestamp", "")
+                snapshot = pearl.get("energy_snapshot", {})
+                workload_id = snapshot.get("workload_id") or f"gravity::{snapshot.get('target_ip', '')}"
+                identity_key = snapshot.get("identity_key") or _identity_key(workload_id)
+                decay_class = snapshot.get("decay_class", "operational")
+                for change in pearl.get("state_changes", []):
+                    if change.get("to") != "realized":
+                        continue
+                    wicket_id = change.get("wicket_id", "")
+                    if not wicket_id:
+                        continue
+                    key = (identity_key, wicket_id)
+                    if key not in latest or ts_str > latest[key]["ts"]:
+                        latest[key] = {
+                            "ts": ts_str,
+                            "decay_class": decay_class,
+                            "workload_id": workload_id,
+                            "identity_key": identity_key,
+                            "wicket_id": wicket_id,
+                        }
 
         for key, rec in latest.items():
             workload_id = rec["workload_id"]
+            identity_key = rec.get("identity_key", _identity_key(workload_id))
             wicket_id   = rec["wicket_id"]
             decay_class = rec["decay_class"]
             ts_str      = rec["ts"]
@@ -482,7 +583,7 @@ class FoldDetector:
 
                 folds.append(Fold(
                     fold_type="temporal",
-                    location=workload_id,
+                    location=identity_key,
                     constraint_source=f"decay::{decay_class}::{wicket_id}",
                     discovery_probability=round(prob, 3),
                     detail=(
@@ -490,6 +591,22 @@ class FoldDetector:
                         f"(decay_class={decay_class}, TTL={int(ttl.total_seconds()/3600)}h). "
                         f"Evidence may be stale — re-observe to confirm."
                     ),
+                    why={
+                        "mismatch": "stale_realized_evidence",
+                        "wicket_id": wicket_id,
+                        "workload_id": workload_id,
+                        "identity_key": identity_key,
+                        "decay_class": decay_class,
+                        "age_hours": int(age.total_seconds() / 3600),
+                    },
+                    hypotheses=[
+                        f"{wicket_id} may still hold, but the evidence is past its trusted lifetime",
+                        f"{wicket_id} may have changed since the last confirming observation",
+                    ],
+                    discriminators=[
+                        f"Re-observe {wicket_id} on {workload_id}",
+                        "Refresh the shortest-path evidence rather than assuming persistence",
+                    ],
                 ))
 
         return folds
@@ -534,9 +651,53 @@ class FoldDetector:
                 except Exception:
                     continue
 
-        # Scan for gap signals in recent events
+        # Start with higher-level gap signals rather than only raw web output.
+        seen_constraints: set[str] = set()
+
+        for gap in detect_from_web_fingerprints() + detect_from_events(events_dir):
+            service = str(gap.get("service", "")).lower()
+            hosts = gap.get("hosts", []) or [gap.get("workload_id") or service or "unknown"]
+            detail = gap.get("detail") or gap.get("attack_surface") or gap.get("evidence") or service
+
+            for known_service, path_id in KNOWN_EXPLOIT_CHAINS.items():
+                if known_service not in service or path_id in catalogued_paths:
+                    continue
+                for host in hosts:
+                    constraint = f"gap::missing_path::{path_id}::{host}"
+                    if constraint in seen_constraints:
+                        continue
+                    seen_constraints.add(constraint)
+                    folds.append(Fold(
+                        fold_type="projection",
+                        location=host,
+                        constraint_source=constraint,
+                        discovery_probability=0.75,
+                        detail=(
+                            f"{service} observed at {host} but "
+                            f"attack path '{path_id}' is not catalogued. "
+                            f"Gap detail: {detail[:140]}"
+                        ),
+                        why={
+                            "mismatch": "observed_surface_implies_missing_path",
+                            "service": service,
+                            "attack_path_id": path_id,
+                            "host": host,
+                            "detail": detail[:140],
+                        },
+                        hypotheses=[
+                            f"{service} supports an exploitable path like {path_id}, but SKG has no projection for it",
+                            "Observed service semantics are richer than the current attack-path catalog",
+                        ],
+                        discriminators=[
+                            f"Generate or compile attack path {path_id}",
+                            f"Collect service-specific evidence for {service} on {host}",
+                        ],
+                    ))
+
+        # Also scan raw recent events for service/process/detail strings.
         if events_dir.exists():
-            for f in sorted(events_dir.glob("web_raw_*.ndjson"))[-20:]:
+            event_files = sorted(events_dir.glob("*.ndjson"))[-40:]
+            for f in event_files:
                 for line in f.read_text(errors="replace").splitlines():
                     if not line.strip():
                         continue
@@ -545,15 +706,30 @@ class FoldDetector:
                     except Exception:
                         continue
                     payload = ev.get("payload", {})
-                    svc     = payload.get("detail", "").lower()
-                    wid     = payload.get("workload_id", "")
+                    prov = ev.get("provenance", {}) or {}
+                    evidence = prov.get("evidence", {}) or {}
+                    svc = " ".join(
+                        str(x) for x in [
+                            payload.get("detail", ""),
+                            payload.get("classification", ""),
+                            payload.get("attack_path_id", ""),
+                            payload.get("service", ""),
+                            evidence.get("pointer", ""),
+                            evidence.get("source_kind", ""),
+                        ] if x
+                    ).lower()
+                    wid = payload.get("workload_id", "") or payload.get("target", "") or "unknown"
 
                     for service, path_id in KNOWN_EXPLOIT_CHAINS.items():
                         if service in svc and path_id not in catalogued_paths:
+                            constraint = f"gap::missing_path::{path_id}::{wid}"
+                            if constraint in seen_constraints:
+                                continue
+                            seen_constraints.add(constraint)
                             folds.append(Fold(
                                 fold_type="projection",
                                 location=wid,
-                                constraint_source=f"gap::missing_path::{path_id}",
+                                constraint_source=constraint,
                                 discovery_probability=0.75,
                                 detail=(
                                     f"{service} detected at {wid} but "
@@ -561,6 +737,21 @@ class FoldDetector:
                                     f"Generate with: skg catalog compile "
                                     f"--domain {service} --description '{service} exploit chain'"
                                 ),
+                                why={
+                                    "mismatch": "recent_observation_implies_missing_path",
+                                    "service": service,
+                                    "attack_path_id": path_id,
+                                    "location": wid,
+                                    "evidence_summary": svc[:140],
+                                },
+                                hypotheses=[
+                                    f"Recent observations partially fit an uncatalogued path {path_id}",
+                                    f"Existing paths do not explain {service} behavior at {wid}",
+                                ],
+                                discriminators=[
+                                    f"Generate {path_id} or equivalent {service} path",
+                                    "Collect discriminating evidence that separates config exposure from exploitability",
+                                ],
                             ))
 
         return folds

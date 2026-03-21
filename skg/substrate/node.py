@@ -140,6 +140,7 @@ class NodeState:
             confidence=0.0,
             observed_at=datetime.now(timezone.utc).isoformat(),
             notes="No observation recorded.",
+            attributes={"unresolved_reason": "unmeasured"},
         )
 
     @staticmethod

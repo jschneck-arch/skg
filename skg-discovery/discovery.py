@@ -197,6 +197,7 @@ SERVICE_DOMAIN_MAP = {
     "https": ["web"],
     "http-alt": ["web"],
     "https-alt": ["web"],
+    "ajp13": ["web"],
     "ssh": ["host"],
     "smb": ["host", "ad_lateral"],
     "msrpc": ["ad_lateral"],
@@ -234,7 +235,9 @@ SERVICE_DOMAIN_MAP = {
     "airplay": ["iot_firmware"],
     "ipp": ["host"],
     "lpd": ["host"],
-    "telnet": ["host", "iot_firmware"],
+    # Telnet by itself is too weak to imply IoT. Keep it as host evidence
+    # unless stronger device-specific services/banners also exist.
+    "telnet": ["host"],
 }
 
 
@@ -291,6 +294,8 @@ def _fingerprint_device(ip: str, ports: list) -> str:
     """
     port_set = {p for p, _, _ in ports}
     banners  = {p: b for p, _, b in ports if b}
+    service_names = {svc for _, svc, _ in ports}
+    banner_text = " ".join(banners.values()).lower()
 
     # Android Debug Bridge open = Android device in debug mode
     if 5555 in port_set:
@@ -304,8 +309,9 @@ def _fingerprint_device(ip: str, ports: list) -> str:
     if port_set & {9295, 9296}:
         return "playstation"
 
-    # Chromecast / Android TV
-    if port_set & {8008, 8009}:
+    # Chromecast / Android TV. Do not treat 8009 alone as Chromecast when
+    # higher-confidence service detection says ajp13 or a broader Linux stack.
+    if 8008 in port_set or "chromecast" in service_names or "google cast" in banner_text:
         return "chromecast"
 
     # Roku
@@ -328,11 +334,22 @@ def _fingerprint_device(ip: str, ports: list) -> str:
     if port_set & {515, 631, 9100}:
         return "printer"
 
+    # Multi-service Unix/Linux host. This must come before the generic
+    # Windows SMB heuristic; labs like Metasploitable often expose SMB too.
+    if (
+        22 in port_set
+        and (23 in port_set or 3306 in port_set or 5432 in port_set or 5900 in port_set)
+        and "windows" not in banner_text
+        and "microsoft" not in banner_text
+    ):
+        return "linux"
+
     # Windows indicators
     if port_set & {135, 445, 3389}:
-        banner_text = " ".join(banners.values()).lower()
         if "windows" in banner_text or "microsoft" in banner_text:
             return "windows"
+        if service_names & {"ssh", "telnet", "mysql", "postgresql", "postgres"}:
+            return "linux"
         return "windows"
 
     # Router / gateway — typically has 80/443 admin + port 53
@@ -365,6 +382,14 @@ def classify_target(ip: str, services: list, os_guess: str = "unknown",
                     is_container: bool = False) -> dict:
     domains = set()
     applicable_paths = []
+    inferred_kind = _fingerprint_device(ip, services)
+    if os_guess == "external-web":
+        effective_os = os_guess
+        inferred_kind = "external-web"
+    elif inferred_kind and inferred_kind != "unknown":
+        effective_os = inferred_kind
+    else:
+        effective_os = os_guess or "unknown"
 
     for _, svc, _ in services:
         if svc in SERVICE_DOMAIN_MAP:
@@ -381,7 +406,8 @@ def classify_target(ip: str, services: list, os_guess: str = "unknown",
 
     return {
         "ip": ip,
-        "os": os_guess,
+        "os": effective_os,
+        "kind": inferred_kind,
         "services": [{"port": p, "service": s, "banner": b} for p, s, b in services],
         "domains": sorted(domains),
         "applicable_attack_paths": applicable_paths,

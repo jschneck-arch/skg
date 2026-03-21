@@ -1,0 +1,64 @@
+{
+  "domain": "web",
+  "version": "1.0.0",
+  "description": "CVE-2007-4723 has no wicket mapping. Service: Apache/2.2.8 (Ubuntu) DAV/2. CVSS: 7.5. Create a wicket with: skg catalog compile --domain <domain> --keywords CVE",
+  "generated_by": "skg.forge.compiler",
+  "generated_at": "2026-03-16T18:21:03.947258+00:00",
+  "source_cves": [
+    "CVE-1999-0236"
+  ],
+  "wickets": {
+    "W-01": {
+      "id": "W-01",
+      "label": "target_reachable_and_responsive",
+      "description": "Target system or service responds to network probes; collection or exploitation is feasible.",
+      "evidence_hint": "TCP connect or ICMP probe confirms reachability; confirm via port scan or HTTP HEAD request"
+    },
+    "W-02": {
+      "id": "W-02",
+      "label": "target_service_exposed",
+      "description": "Target service is listening on a reachable port and accepting connections.",
+      "evidence_hint": "Service banner grab or HTTP 200/401 response confirms service is listening"
+    },
+    "W-03": {
+      "id": "W-03",
+      "label": "apache_high_vuln_present",
+      "description": "ScriptAlias directory in NCSA and Apache httpd allowed attackers to read CGI programs. (CVE-1999-0236, CVSS 7.5)",
+      "evidence_hint": "Network-accessible service probe; confirm reachability via TCP connect or banner grab"
+    }
+  },
+  "attack_paths": {
+    "web_network_exploit_v1": {
+      "id": "web_network_exploit_v1",
+      "description": "Remote exploitation via network-accessible vulnerability in web environment.",
+      "required_wickets": [
+        "W-01",
+        "W-03"
+      ],
+      "references": [
+        "https://exchange.xforce.ibmcloud.com/vulnerabilities/CVE-1999-0236"
+      ]
+    },
+    "web_local_exploit_v1": {
+      "id": "web_local_exploit_v1",
+      "description": "Local exploitation of web environment requiring initial access.",
+      "required_wickets": [
+        "W-01",
+        "W-02"
+      ],
+      "references": []
+    },
+    "web_full_chain_v1": {
+      "id": "web_full_chain_v1",
+      "description": "Full exploitation chain: remote access through local privilege escalation in web.",
+      "required_wickets": [
+        "W-01",
+        "W-03",
+        "W-02"
+      ],
+      "references": [
+        "https://exchange.xforce.ibmcloud.com/vulnerabilities/CVE-1999-0236"
+      ]
+    }
+  }
+}

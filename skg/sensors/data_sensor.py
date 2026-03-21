@@ -77,8 +77,29 @@ class DataSensor(BaseSensor):
     def __init__(self, cfg: dict, events_dir=None):
         super().__init__(cfg, events_dir=events_dir)
         self.interval = cfg.get("collect_interval_s", 300)
-        self.sources  = cfg.get("sources", [])
+        self.sources  = self._load_sources(cfg)
         self._state   = self._load_state()
+
+    def _load_sources(self, cfg: dict) -> list[dict]:
+        sources = cfg.get("sources", [])
+        if sources:
+            return sources
+
+        for candidate in (
+            Path("/etc/skg/data_sources.yaml"),
+            Path(__file__).resolve().parents[2] / "config" / "data_sources.yaml",
+        ):
+            if not candidate.exists():
+                continue
+            try:
+                import yaml
+                data = yaml.safe_load(candidate.read_text()) or {}
+                loaded = data.get("data_sources", [])
+                if loaded:
+                    return loaded
+            except Exception as exc:
+                log.warning(f"[data] failed to load {candidate}: {exc}")
+        return []
 
     def _load_state(self) -> dict:
         if DATA_STATE_FILE.exists():
@@ -104,7 +125,7 @@ class DataSensor(BaseSensor):
 
         # Import adapter — lazy so missing SQLAlchemy doesn't break startup
         try:
-            adapter_path = (Path(__file__).resolve().parents[1]
+            adapter_path = (Path(__file__).resolve().parents[2]
                             / "skg-data-toolchain" / "adapters" / "db_profiler")
             sys.path.insert(0, str(adapter_path.parent.parent))
             from adapters.db_profiler.profile import profile_table

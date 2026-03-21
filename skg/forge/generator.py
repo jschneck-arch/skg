@@ -36,10 +36,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("skg.forge.generator")
+from skg.core.paths import FORGE_STAGING, SKG_HOME
 
-SKG_HOME = Path(os.environ.get("SKG_HOME", Path(__file__).resolve().parents[3]))
-FORGE_STAGING = SKG_HOME / "forge_staging"
+log = logging.getLogger("skg.forge.generator")
 
 # ---------------------------------------------------------------------------
 # Projector boilerplate template — pure boilerplate, domain name only variable
@@ -385,6 +384,7 @@ def generate_toolchain(
     # ----- Step 1: Generate catalog ----------------------------------------
     log.info(f"[forge] generating catalog for: {domain}")
     catalog = None
+    generation_backend = None
 
     if resonance_engine:
         query = f"{domain}: {description} {gap.get('attack_surface','')}"
@@ -392,17 +392,40 @@ def generate_toolchain(
     else:
         context = {"wickets": [], "adapters": [], "domains": []}
 
+    # Deterministic-first path: if the gap carries compiler hints from a fold or
+    # gap detector, try to derive the catalog from CVE/NVD data before asking a
+    # model to synthesize it.
+    compiler_hints = gap.get("compiler_hints") or {}
+    if compiler_hints:
+        try:
+            from skg.forge.compiler import compile_catalog
+            compiled = compile_catalog(
+                domain=domain,
+                description=description,
+                packages=list(compiler_hints.get("packages") or []),
+                keywords=list(compiler_hints.get("keywords") or []),
+                prefix=compiler_hints.get("prefix"),
+                api_key=compiler_hints.get("api_key"),
+                min_cvss=float(compiler_hints.get("min_cvss", 4.0)),
+                max_wickets=int(compiler_hints.get("max_wickets", 20)),
+            )
+            if compiled and compiled.get("wickets"):
+                catalog = compiled
+                generation_backend = "compiler"
+        except Exception as exc:
+            errors.append(f"Compiler catalog generation failed: {exc}")
+
     # Try ollama first, then Anthropic API
-    generation_backend = None
-    try:
-        from skg.resonance.ollama_backend import OllamaBackend
-        backend = OllamaBackend()
-        if backend.available():
-            catalog, cat_errors = backend.draft_catalog(domain, description, context)
-            errors.extend(cat_errors)
-            generation_backend = f"ollama:{backend.model()}"
-    except Exception as exc:
-        log.debug(f"[forge] ollama unavailable: {exc}")
+    if catalog is None:
+        try:
+            from skg.resonance.ollama_backend import OllamaBackend
+            backend = OllamaBackend()
+            if backend.available():
+                catalog, cat_errors = backend.draft_catalog(domain, description, context)
+                errors.extend(cat_errors)
+                generation_backend = f"ollama:{backend.model()}"
+        except Exception as exc:
+            log.debug(f"[forge] ollama unavailable: {exc}")
 
     if catalog is None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -540,46 +563,80 @@ def generate_toolchain(
 
 
 def install_toolchain(staging_path: str | Path,
-                      install_dir: Path | None = None) -> Path:
+                      install_dir: Path | None = None) -> dict:
     """
     Install a staged toolchain into the main SKG directory.
-    Returns the installed path.
+    Returns installation metadata.
     """
     staging_path = Path(staging_path)
     install_dir = install_dir or SKG_HOME
     dest = install_dir / staging_path.name
+    result = {
+        "installed_path": str(dest),
+        "installed": False,
+        "preserved_existing": False,
+    }
+
+    staged_catalogs = list(staging_path.glob("contracts/catalogs/*.json"))
+    existing_catalogs = list(dest.glob("contracts/catalogs/*.json")) if dest.exists() else []
+    if staged_catalogs and existing_catalogs:
+        try:
+            staged = json.loads(staged_catalogs[0].read_text())
+            existing = json.loads(existing_catalogs[0].read_text())
+            staged_wickets = staged.get("wickets", {}) or {}
+            existing_wickets = existing.get("wickets", {}) or {}
+            staged_paths = staged.get("attack_paths", {}) or {}
+            existing_paths = existing.get("attack_paths", {}) or {}
+
+            staged_score = (len(staged_wickets), len(staged_paths))
+            existing_score = (len(existing_wickets), len(existing_paths))
+            has_new_ids = bool(
+                set(staged_wickets) - set(existing_wickets)
+                or set(staged_paths) - set(existing_paths)
+            )
+
+            # Refuse to overwrite a stronger active toolchain with a weaker
+            # staged draft. Keep the accepted record, but preserve the active
+            # runtime substrate until a non-regressive merge/install exists.
+            if staged_score < existing_score and not has_new_ids:
+                log.warning(
+                    "[forge] refusing regressive install: %s weaker than %s",
+                    staging_path, dest,
+                )
+                result["preserved_existing"] = True
+                return result
+        except Exception as exc:
+            log.warning(f"[forge] install comparison failed: {exc}")
 
     if dest.exists():
-        # Backup existing
+        # Backup existing active tree before merging. Do not replace the whole
+        # toolchain; staged forge output usually only contains generated
+        # catalogs/projections and should not strip live adapters/runtime code.
         backup = dest.with_name(dest.name + ".backup")
         if backup.exists():
             shutil.rmtree(backup)
         shutil.copytree(dest, backup)
-        shutil.rmtree(dest)
-
-    shutil.copytree(staging_path, dest)
+        shutil.copytree(staging_path, dest, dirs_exist_ok=True)
+    else:
+        shutil.copytree(staging_path, dest)
     log.info(f"[forge] installed: {dest}")
+    result["installed"] = True
 
-    # Register with projector cache (clear so it reloads)
+    # Load through the shared projector discovery path so install-time
+    # activation matches runtime activation.
     try:
-        from skg.sensors.projector import _projector_cache, TOOLCHAIN_PROJECTOR
-        tc_name = staging_path.name
-        safe = tc_name.replace("skg-", "").replace("-toolchain", "")
-        domain = safe
+        from skg.sensors.projector import _discover_toolchain_projector, _projector_cache
 
-        # Find projector run.py
-        proj_files = list(dest.glob("projections/*/run.py"))
-        if proj_files:
-            rel = proj_files[0].relative_to(dest)
-            fn_name = f"compute_{domain.replace('-','_')}"
-            TOOLCHAIN_PROJECTOR[tc_name] = (tc_name, str(rel), fn_name)
-            # Clear cache so projector reloads
-            _projector_cache.pop(tc_name, None)
+        tc_name = staging_path.name
+        _projector_cache.pop(tc_name, None)
+        if _discover_toolchain_projector(tc_name):
             log.info(f"[forge] registered projector: {tc_name}")
+        else:
+            log.warning(f"[forge] projector discovery failed: {tc_name}")
     except Exception as exc:
         log.warning(f"[forge] projector registration failed: {exc}")
 
-    return dest
+    return result
 
 
 # ---------------------------------------------------------------------------

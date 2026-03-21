@@ -1,4 +1,9 @@
 # SKG Platform Configuration — /etc/skg/skg_config.yaml
+gravity:
+  autostart: false
+  cycle_interval_s: 120
+  convergence_epsilon: 0.01
+
 sensors:
   enabled:
     - usb
@@ -50,8 +55,21 @@ sensors:
 resonance:
   ollama:
     url: "http://localhost:11434"
-    # model: "llama3.2:3b"   # auto-selected if omitted
+    model: "tinyllama:latest"
     temperature: 0.1
+
+  assistant:
+    enabled: true
+    timeout_s: 4.0
+    num_predict: 160
+    tasks:
+      target_summary: "Explain the measured target shape, strongest current paths, and bounded next observations."
+      fold_explanation: "Explain why the fold exists, what is missing, and whether the pressure is re-observation or growth."
+      proposal_explanation: "Explain why this proposal exists, what it would change, and what evidence or memory reinforces it."
+      memory_summary: "Explain what the pearl neighborhood reinforces and how it should bias observation without assigning new state."
+      next_observation: "Recommend the next bounded observation using folds, measured support, reinforced wickets, and timeline change without assigning new state."
+      engagement_note: "Draft a concise operator engagement note that preserves uncertainty, current measured state, and immediate next steps."
+      fold_cluster_summary: "Summarize clustered fold and growth pressure as one structural deficit, not a list of separate alerts."
 
   web:
     timeout_s: 15

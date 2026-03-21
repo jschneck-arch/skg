@@ -87,6 +87,18 @@ RE_KERB_USER = re.compile(
 RE_VULN_CONFIRMED = re.compile(
     r'\[\+\].+?is\s+vulnerable', re.I)
 
+RE_ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
+# Dir scanner/web enum: "[+] Found http://host:80/phpMyAdmin/ 200 (host)"
+RE_FOUND_HTTP = re.compile(
+    r'\[\+\]\s+Found\s+(https?://\S+?)\s+(\d{3})\s+\(([\d\.]+)\)', re.I)
+
+# Resource script / module failures that should be surfaced in reports
+RE_MODULE_LOAD_FAIL = re.compile(
+    r'Failed to load module:\s+(\S+)', re.I)
+RE_UNKNOWN_COMMAND = re.compile(
+    r'Unknown command:\s+(\S+)', re.I)
+
 
 def _parse_console_output(output: str, workload_id: str,
                            module_name: str = "") -> list[dict]:
@@ -95,7 +107,8 @@ def _parse_console_output(output: str, workload_id: str,
     Pure text parsing — no database required.
     """
     events = []
-    lines  = output.splitlines()
+    clean = RE_ANSI.sub("", output)
+    lines  = clean.splitlines()
 
     for line in lines:
         # Open port → host reachable + service exposed
@@ -180,7 +193,54 @@ def _parse_console_output(output: str, workload_id: str,
                                f"msf://console/{module_name}"))
             continue
 
+        # HTTP path discovery from dir_scanner and similar modules.
+        # Feed it back as web reachability + exposed path evidence.
+        m = RE_FOUND_HTTP.search(line)
+        if m:
+            url, status_code, host = m.group(1), m.group(2), m.group(3)
+            wid = f"msf::console::{host}"
+            detail = f"Metasploit discovered {url} ({status_code})"
+            events.append(_ev("WB-01", "http_service_reachable",
+                               "web", wid, True, 4,
+                               f"Web service responded during MSF scan: {url}",
+                               f"msf://console/{module_name}"))
+            if status_code in {"200", "401", "403"}:
+                events.append(_ev("WB-05", "sensitive_paths_exposed",
+                                   "web", wid, True, 5,
+                                   detail,
+                                   f"msf://console/{module_name}"))
+            continue
+
     return events
+
+
+def summarize_console_output(output: str) -> dict[str, list[str]]:
+    """
+    Extract a compact human-readable summary from MSF output.
+    Used for proposal reporting even when no structured events are emitted.
+    """
+    clean = RE_ANSI.sub("", output or "")
+    findings: list[str] = []
+    errors: list[str] = []
+    for line in clean.splitlines():
+        m = RE_FOUND_HTTP.search(line)
+        if m:
+            findings.append(f"{m.group(1)} [{m.group(2)}]")
+            continue
+        m = RE_MODULE_LOAD_FAIL.search(line)
+        if m:
+            errors.append(f"module load failed: {m.group(1)}")
+            continue
+        m = RE_UNKNOWN_COMMAND.search(line)
+        if m:
+            errors.append(f"unknown command after module failure: {m.group(1)}")
+            continue
+        if RE_VULN_CONFIRMED.search(line):
+            findings.append(line.strip()[:140])
+    return {
+        "findings": findings[:10],
+        "errors": errors[:10],
+    }
 
 
 def _ev(wicket_id, label, domain, workload_id, realized, rank,

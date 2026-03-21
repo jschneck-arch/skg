@@ -13,10 +13,57 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _host_from_locator(locator: str) -> str:
+    text = str(locator or "").strip()
+    if not text:
+        return ""
+
+    if "://" in text:
+        try:
+            parsed = urlparse(text)
+            return parsed.hostname or text
+        except Exception:
+            return text
+
+    base = text.split("/", 1)[0]
+    if base.count(":") == 1 and "." in base:
+        return base.split(":", 1)[0]
+    return base
+
+
+def parse_workload_ref(workload_id: str) -> dict:
+    """
+    Compatibility parser for workload identifiers.
+
+    Existing runtime behavior is preserved: workload_id remains the manifestation key.
+    This helper exposes the likely stable identity underneath it so callers can stop
+    treating every workload string as the identity itself.
+    """
+    raw = str(workload_id or "")
+    if "::" in raw:
+        domain, locator = raw.split("::", 1)
+    else:
+        domain, locator = "", raw
+
+    host = _host_from_locator(locator)
+    identity_key = host or locator or raw or "unknown"
+    manifestation_key = raw or identity_key
+
+    return {
+        "workload_id": raw,
+        "domain_hint": domain,
+        "locator": locator or raw,
+        "host": host,
+        "identity_key": identity_key,
+        "manifestation_key": manifestation_key,
+    }
 
 
 @dataclass

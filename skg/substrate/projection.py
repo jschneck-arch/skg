@@ -18,8 +18,8 @@ Current scoring remains intentionally conservative:
 
 classification:
   realized      — all required nodes realized
-  not_realized  — at least one node blocked and no remaining unknowns
-  indeterminate — some unknown exists, or mixed evidence remains
+  not_realized  — at least one node blocked
+  indeterminate — some unknown exists and no blocking evidence exists
 
 E = H(projection | telemetry) ~ |unknown| / |required|
 
@@ -85,6 +85,24 @@ def _set_optional_pathscore_fields(ps: PathScore,
         pass
 
 
+def _unresolved_reason_for_support(contrib, observations: list) -> str:
+    reason = "unmeasured"
+    if any(bool(item[0].payload.get("is_latent", False)) for item in observations):
+        reason = "latent"
+    elif getattr(contrib, "contradiction", 0.0) > 0.0:
+        reason = "conflicted"
+    elif getattr(contrib, "decoherence", 0.0) > 0.0 and getattr(contrib, "unresolved", 0.0) > 0.0:
+        reason = "decohered"
+    elif getattr(contrib, "unresolved", 0.0) > 0.0 and not contrib.realized and not contrib.blocked:
+        reason = "inconclusive"
+    elif contrib.realized > 0.0 or contrib.blocked > 0.0:
+        reason = "insufficient_support"
+
+    if getattr(contrib, "compatibility_span", 0) <= 1 and getattr(contrib, "unresolved", 0.0) > 0.0:
+        reason = "single_basis"
+    return reason
+
+
 def project_path(path: Path,
                  states: dict[str, NodeState],
                  workload_id: str = "",
@@ -135,6 +153,14 @@ def project_path(path: Path,
         blocked=blocked,
         unknown=unknown,
         latest_status=latest_status,
+        unresolved_detail={
+            nid: {
+                "reason": states.get(nid, _safe_unknown(nid)).attributes.get("unresolved_reason", "unmeasured"),
+                "local_energy": round(_node_energy(states.get(nid, _safe_unknown(nid))), 6),
+                "is_latent": _node_is_latent(states.get(nid, _safe_unknown(nid))),
+            }
+            for nid in unknown
+        },
         workload_id=workload_id,
         run_id=run_id,
         computed_at=datetime.now(timezone.utc).isoformat(),
@@ -152,24 +178,42 @@ def classify(realized: list[str],
     Tri-state classification of a path given its node states.
 
     realized      — all required nodes realized, path is traversable
-    not_realized  — path is closed by confirmed blocking evidence and no unknowns remain
+    not_realized  — path is closed by confirmed blocking evidence
     indeterminate — insufficient evidence to determine traversability
     """
     if len(realized) == len(required):
         return "realized"
 
-    # Keep conservative semantics:
-    # if any unknown remains, do not over-assert closure.
-    if blocked and not unknown:
+    # Work 3 semantics: any blocked precondition collapses the path.
+    # Unknowns elsewhere do not re-open a path once a required node is blocked.
+    if blocked:
         return "not_realized"
 
     return "indeterminate"
 
 
+def _target_for_events(events: list[dict]) -> str:
+    for ev in reversed(events):
+        payload = ev.get("payload", {})
+        target = payload.get("target_ip") or payload.get("workload_id")
+        if target:
+            return target.split("::")[-1]
+    return "unknown"
+
+
+def _best_support_observation(observations, target: str):
+    return max(
+        observations,
+        key=lambda item: item[0].support_mapping.get(target, {}).get("R", 0.0)
+        + item[0].support_mapping.get(target, {}).get("B", 0.0),
+        default=None,
+    )
+
+
 def load_states_from_events(events: list[dict]) -> dict[str, NodeState]:
     """
     Build a NodeState dict from a list of event dicts.
-    Latest observation per node_id wins (by observed_at timestamp).
+    Collapse aggregated support per node_id into NodeState.
 
     Accepts both:
     - obs.attack.precondition
@@ -182,73 +226,73 @@ def load_states_from_events(events: list[dict]) -> dict[str, NodeState]:
     Backward compatible with older event payloads while seeding richer
     substrate state when available.
     """
-    latest_ts: dict[str, str] = {}
+    from skg.kernel.adapters import event_to_observation
+    from skg.kernel.state import CollapseThresholds, StateEngine
+    from skg.kernel.support import SupportEngine
+
     states: dict[str, NodeState] = {}
+    grouped: dict[str, list] = {}
+    target = _target_for_events(events)
 
     for ev in events:
         if ev.get("type") not in ("obs.attack.precondition", "obs.substrate.node"):
             continue
 
-        payload = ev.get("payload", {})
-        prov = ev.get("provenance", {})
+        obs = event_to_observation(ev)
+        if obs is None:
+            continue
+        grouped.setdefault(obs.context, []).append((obs, ev))
 
-        # Support both wicket_id (security) and node_id (substrate)
-        nid = payload.get("node_id") or payload.get("wicket_id", "")
-        if not nid:
+    if not grouped:
+        return states
+
+    support = SupportEngine()
+    state_engine = StateEngine(CollapseThresholds(realized=0.5, blocked=0.5))
+
+    for nid, observations in grouped.items():
+        obs_only = [item[0] for item in observations]
+        as_of = max(obs.event_time for obs in obs_only)
+        contrib = support.aggregate(obs_only, target, nid, as_of)
+        best = _best_support_observation(observations, target)
+
+        if best is None:
             continue
 
-        obs_at = payload.get("observed_at") or ev.get("ts", "")
-        if nid in latest_ts and obs_at <= latest_ts[nid]:
-            continue
-
-        latest_ts[nid] = obs_at
-
-        status_str = payload.get("status", "unknown")
-        try:
-            state = TriState(status_str)
-        except ValueError:
-            state = TriState.UNKNOWN
-
-        evidence = prov.get("evidence", {})
+        best_obs, best_event = best
+        payload = best_event.get("payload", {})
+        evidence = best_event.get("provenance", {}).get("evidence", {})
+        collapsed = state_engine.collapse(contrib)
 
         ns = NodeState(
             node_id=nid,
-            state=state,
-            confidence=evidence.get("confidence", 0.5),
-            observed_at=obs_at,
+            state=collapsed,
+            confidence=max(contrib.realized, contrib.blocked),
+            observed_at=as_of.isoformat(),
             source_kind=evidence.get("source_kind", ""),
             pointer=evidence.get("pointer", ""),
-            notes=payload.get("notes", ""),
-            attributes=payload.get("attributes", {}),
+            notes=payload.get("detail", "") or payload.get("notes", ""),
+            attributes=dict(payload.get("attributes", {})),
         )
 
-        # Optional richer field hints from events, if present.
-        if "confidence_vector" in evidence and hasattr(ns, "set_confidence_vector"):
-            try:
-                ns.set_confidence_vector(evidence.get("confidence_vector", []), sync_scalar=True)
-            except Exception:
-                pass
-
-        if "local_energy" in evidence:
-            try:
-                ns.local_energy = float(evidence.get("local_energy", 0.0) or 0.0)
-            except Exception:
-                ns.local_energy = 0.0
-
-        if "phase" in evidence:
-            try:
-                ns.phase = float(evidence.get("phase", 0.0) or 0.0)
-            except Exception:
-                ns.phase = 0.0
-
-        if "is_latent" in payload:
-            ns.is_latent = bool(payload.get("is_latent", False))
-
-        if "projection_sources" in payload:
-            try:
-                ns.projection_sources = list(payload.get("projection_sources", []) or [])
-            except Exception:
-                ns.projection_sources = []
+        ns.attributes.update({
+            "phi_r": round(contrib.realized, 6),
+            "phi_b": round(contrib.blocked, 6),
+            "phi_u": round(getattr(contrib, "unresolved", 0.0), 6),
+            "contradiction": round(getattr(contrib, "contradiction", 0.0), 6),
+            "decoherence": round(getattr(contrib, "decoherence", 0.0), 6),
+            "compatibility_score": round(getattr(contrib, "compatibility_score", 0.0), 6),
+            "compatibility_span": int(getattr(contrib, "compatibility_span", 0) or 0),
+            "support_basis": "aggregated_observation_support",
+            "support_observation_count": len(obs_only),
+            "unresolved_reason": _unresolved_reason_for_support(contrib, observations),
+        })
+        ns.local_energy = round(
+            getattr(contrib, "unresolved", 0.0)
+            + getattr(contrib, "contradiction", 0.0)
+            + getattr(contrib, "decoherence", 0.0),
+            6,
+        )
+        ns.is_latent = any(bool(obs.payload.get("is_latent", False)) for obs in obs_only)
 
         states[nid] = ns
 
@@ -272,62 +316,80 @@ def load_states_from_events_priority(
     If required is provided, only states for nodes in that list are returned.
     All other behavior (event types, field hints) is identical to load_states_from_events.
     """
-    _PRIORITY = {"blocked": 2, "realized": 1, "unknown": 0}
+    from skg.kernel.adapters import event_to_observation
+    from skg.kernel.state import CollapseThresholds, StateEngine
+    from skg.kernel.support import SupportEngine
 
-    # First pass: collect all observations per node
-    all_obs: dict[str, list[dict]] = {}
+    all_obs: dict[str, list] = {}
+    target = _target_for_events(events)
     for ev in events:
         if ev.get("type") not in ("obs.attack.precondition", "obs.substrate.node"):
             continue
-        payload = ev.get("payload", {})
-        nid = payload.get("node_id") or payload.get("wicket_id", "")
-        if not nid:
+        obs = event_to_observation(ev)
+        if obs is None:
             continue
+        nid = obs.context
         if required and nid not in required:
             continue
-        all_obs.setdefault(nid, []).append(ev)
+        all_obs.setdefault(nid, []).append((obs, ev))
 
-    # Second pass: pick best state per node using priority rule
     states: dict[str, NodeState] = {}
+    support = SupportEngine()
+    state_engine = StateEngine(CollapseThresholds(realized=0.5, blocked=0.5))
     for nid, evs in all_obs.items():
-        best_ev = evs[0]
-        best_priority = _PRIORITY.get(
-            evs[0].get("payload", {}).get("status", "unknown"), 0
-        )
-        for ev in evs[1:]:
-            p = _PRIORITY.get(ev.get("payload", {}).get("status", "unknown"), 0)
-            if p > best_priority:
-                best_ev = ev
-                best_priority = p
+        obs_only = [item[0] for item in evs]
+        as_of = max(obs.event_time for obs in obs_only)
+        contrib = support.aggregate(obs_only, target, nid, as_of)
 
+        blocked_evs = [
+            item for item in evs
+            if item[0].support_mapping.get(target, {}).get("B", 0.0) > 0.0
+        ]
+        if blocked_evs:
+            collapsed = TriState.BLOCKED
+            best = _best_support_observation(blocked_evs, target)
+        else:
+            collapsed = state_engine.collapse(contrib)
+            best = _best_support_observation(evs, target)
+
+        if best is None:
+            continue
+
+        _best_obs, best_ev = best
         payload = best_ev.get("payload", {})
         prov = best_ev.get("provenance", {})
         evidence = prov.get("evidence", {})
 
-        status_str = payload.get("status", "unknown")
-        try:
-            state = TriState(status_str)
-        except ValueError:
-            state = TriState.UNKNOWN
-
         ns = NodeState(
             node_id=nid,
-            state=state,
-            confidence=evidence.get("confidence", 0.5),
-            observed_at=payload.get("observed_at") or best_ev.get("ts", ""),
+            state=collapsed,
+            confidence=max(contrib.realized, contrib.blocked),
+            observed_at=as_of.isoformat(),
             source_kind=evidence.get("source_kind", ""),
             pointer=evidence.get("pointer", ""),
-            notes=payload.get("notes", ""),
-            attributes=payload.get("attributes", {}),
+            notes=payload.get("detail", "") or payload.get("notes", ""),
+            attributes=dict(payload.get("attributes", {})),
         )
-
-        if "confidence_vector" in evidence and hasattr(ns, "set_confidence_vector"):
-            try:
-                ns.set_confidence_vector(evidence.get("confidence_vector", []), sync_scalar=True)
-            except Exception:
-                pass
+        ns.attributes.update({
+            "phi_r": round(contrib.realized, 6),
+            "phi_b": round(contrib.blocked, 6),
+            "phi_u": round(getattr(contrib, "unresolved", 0.0), 6),
+            "contradiction": round(getattr(contrib, "contradiction", 0.0), 6),
+            "decoherence": round(getattr(contrib, "decoherence", 0.0), 6),
+            "compatibility_score": round(getattr(contrib, "compatibility_score", 0.0), 6),
+            "compatibility_span": int(getattr(contrib, "compatibility_span", 0) or 0),
+            "support_basis": "priority_support_aggregation",
+            "support_observation_count": len(obs_only),
+            "unresolved_reason": _unresolved_reason_for_support(contrib, evs),
+        })
+        ns.local_energy = round(
+            getattr(contrib, "unresolved", 0.0)
+            + getattr(contrib, "contradiction", 0.0)
+            + getattr(contrib, "decoherence", 0.0),
+            6,
+        )
+        ns.is_latent = any(bool(obs.payload.get("is_latent", False)) for obs in obs_only)
 
         states[nid] = ns
 
     return states
-

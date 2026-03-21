@@ -3,6 +3,7 @@ from .support import SupportContribution, SupportEngine
 from .state import TriState, StateEngine
 from .projections import ProjectionEngine
 from .pearls import Pearl, PearlLedger
+from .pearl_manifold import PearlManifold, PearlNeighborhood
 from .reason import ReasonTrace
 from .folds import Fold, FoldManager, FoldDetector
 from .energy import EnergyEngine

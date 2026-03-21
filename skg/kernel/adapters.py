@@ -14,12 +14,12 @@ Each event has:
   provenance.evidence.confidence — how confident the instrument is
 
 The kernel needs Observation with support_mapping:
-  support_mapping[target_ip][context] = {"R": phi_R, "B": phi_B}
+  support_mapping[target_ip][context] = {"R": phi_R, "B": phi_B, "U": phi_U}
 
 Mapping:
-  status=realized  → phi_R = confidence, phi_B = 0.0
-  status=blocked   → phi_R = 0.0,        phi_B = confidence
-  status=unknown   → phi_R = 0.0,        phi_B = 0.0  (contributes nothing)
+  status=realized  → phi_R = confidence, phi_B = 0.0,        phi_U = 0.0
+  status=blocked   → phi_R = 0.0,        phi_B = confidence, phi_U = 0.0
+  status=unknown   → phi_R = 0.0,        phi_B = 0.0,        phi_U = confidence
 
 Decay class assignment:
   evidence_rank 1 (runtime)    → operational (moderate decay)
@@ -45,6 +45,8 @@ from typing import Dict, List, Optional, Tuple
 from .observations import Observation
 
 log = logging.getLogger("skg.kernel.adapters")
+
+MAX_RECENT_BROAD_EVENT_FILES = 64
 
 # Instruments whose evidence decays quickly
 EPHEMERAL_INSTRUMENTS = {"pcap", "net_sensor", "tshark"}
@@ -73,13 +75,13 @@ def _decay_class(instrument: str, evidence_rank: int) -> str:
     return INSTRUMENT_DECAY.get(instrument, "operational")
 
 
-def _phi_from_event(status: str, confidence: float) -> Tuple[float, float]:
-    """Convert (status, confidence) → (phi_R, phi_B) support vector."""
+def _phi_from_event(status: str, confidence: float) -> Tuple[float, float, float]:
+    """Convert (status, confidence) → (phi_R, phi_B, phi_U) support vector."""
     if status == "realized":
-        return (confidence, 0.0)
+        return (confidence, 0.0, 0.0)
     if status == "blocked":
-        return (0.0, confidence)
-    return (0.0, 0.0)
+        return (0.0, confidence, 0.0)
+    return (0.0, 0.0, confidence)
 
 
 def event_to_observation(event: dict) -> Optional[Observation]:
@@ -121,7 +123,7 @@ def event_to_observation(event: dict) -> Optional[Observation]:
 
     decay = _decay_class(instrument, rank)
 
-    phi_r, phi_b = _phi_from_event(status, confidence)
+    phi_r, phi_b, phi_u = _phi_from_event(status, confidence)
 
     # Parse timestamp
     ts_str = event.get("ts") or evidence.get("collected_at") or ""
@@ -139,7 +141,7 @@ def event_to_observation(event: dict) -> Optional[Observation]:
         payload=payload,
         event_time=event_time,
         decay_class=decay,
-        support_mapping={target_ip: {"R": phi_r, "B": phi_b}},
+        support_mapping={target_ip: {"R": phi_r, "B": phi_b, "U": phi_u}},
     )
 
 
@@ -196,46 +198,69 @@ def load_observations_for_target(
         str(discovery_dir / f"gravity_events_{_ip_dot}_*.ndjson"),
         str(discovery_dir / f"gravity_events_{_ip_us}_*.ndjson"),
         str(discovery_dir / f"web_events_{_ip_dot}_*.ndjson"),
+        # Post-exploitation session output
+        str(discovery_dir / f"gravity_postexp_{_ip_dot}_*.ndjson"),
+        str(discovery_dir / f"gravity_postexp_{_ip_us}_*.ndjson"),
     ]
     if cve_dir:
-        patterns.append(str(cve_dir / "cve_events_*.ndjson"))
-    patterns.append(str(events_dir / "*.ndjson"))
+        patterns.extend([
+            str(cve_dir / f"cve_events_{_ip_dot}_*.ndjson"),
+            str(cve_dir / f"cve_events_{_ip_us}_*.ndjson"),
+        ])
 
     seen_event_ids = set()
+    candidate_files: list[str] = []
+    seen_files = set()
 
     for pattern in patterns:
         for filepath in glob.glob(pattern):
-            try:
-                with open(filepath) as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            event = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+            if filepath not in seen_files:
+                seen_files.add(filepath)
+                candidate_files.append(filepath)
 
-                        # Dedup by event id
-                        ev_id = event.get("id")
-                        if ev_id and ev_id in seen_event_ids:
-                            continue
-                        if ev_id:
-                            seen_event_ids.add(ev_id)
+    broad_event_files = []
+    if events_dir.exists():
+        broad_event_files = sorted(
+            glob.glob(str(events_dir / "*.ndjson")),
+            key=lambda p: Path(p).stat().st_mtime,
+            reverse=True,
+        )[:MAX_RECENT_BROAD_EVENT_FILES]
+    for filepath in broad_event_files:
+        if filepath not in seen_files:
+            seen_files.add(filepath)
+            candidate_files.append(filepath)
 
-                        # Filter by target for broad files (events_dir)
-                        payload = event.get("payload", {})
-                        ev_target = (
-                            payload.get("target_ip")
-                            or payload.get("workload_id", "").split("::")[-1]
-                        )
-                        if ev_target and ev_target != target_ip:
-                            continue
+    for filepath in candidate_files:
+        try:
+            with open(filepath) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                        obs = event_to_observation(event)
-                        if obs is not None:
-                            observations.append(obs)
-            except Exception as e:
-                log.debug(f"Failed to read {filepath}: {e}")
+                    # Dedup by event id
+                    ev_id = event.get("id")
+                    if ev_id and ev_id in seen_event_ids:
+                        continue
+                    if ev_id:
+                        seen_event_ids.add(ev_id)
+
+                    payload = event.get("payload", {})
+                    ev_target = (
+                        payload.get("target_ip")
+                        or payload.get("workload_id", "").split("::")[-1]
+                    )
+                    if ev_target and ev_target != target_ip:
+                        continue
+
+                    obs = event_to_observation(event)
+                    if obs is not None:
+                        observations.append(obs)
+        except Exception as e:
+            log.debug(f"Failed to read {filepath}: {e}")
 
     return observations

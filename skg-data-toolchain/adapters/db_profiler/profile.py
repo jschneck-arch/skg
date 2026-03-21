@@ -154,6 +154,7 @@ class DBConnection:
         self._conn = None
         self._engine = None
         self._is_sqlite_stdlib = False
+        self._dialect = ""
 
     def connect(self) -> None:
         if self.url.startswith("sqlite:///"):
@@ -170,6 +171,7 @@ class DBConnection:
                                               connect_args={"connect_timeout": 10})
                 self._conn = self._engine.connect()
                 self._text = text
+                self._dialect = getattr(self._engine.dialect, "name", "")
             except ImportError:
                 raise RuntimeError(
                     "SQLAlchemy not installed. "
@@ -197,10 +199,25 @@ class DBConnection:
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=:t",
                     {"t": table})
                 return bool(r)
+            if self._dialect in {"mysql", "mariadb"}:
+                r = self.query(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = DATABASE() AND table_name = :t",
+                    {"t": table},
+                )
+                return bool(r)
+            if self._dialect in {"postgresql", "postgres"}:
+                r = self.query(
+                    "SELECT to_regclass(:t) AS t", {"t": table}
+                )
+                return bool(r and r[0].get("t"))
             else:
                 r = self.query(
-                    "SELECT to_regclass(:t) AS t", {"t": table})
-                return bool(r and r[0].get("t"))
+                    "SELECT 1 AS present FROM information_schema.tables "
+                    "WHERE table_name = :t",
+                    {"t": table},
+                )
+                return bool(r)
         except Exception:
             return False
 

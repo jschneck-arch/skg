@@ -15,12 +15,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from skg.identity import parse_workload_ref
 
 log = logging.getLogger("skg.resonance.observation_memory")
 
 
 def _safe_condition_id(wicket_id: str | None = None, node_id: str | None = None) -> str:
     return node_id or wicket_id or ""
+
+
+def _extract_target_hint(text: str) -> str:
+    for tok in str(text or "").replace("[", " ").replace("]", " ").replace(",", " ").split():
+        if tok.count(".") == 3:
+            return tok.split(":")[0]
+    return ""
 
 
 class _FallbackIndex:
@@ -68,6 +76,7 @@ class ObservationRecord:
     projection_confirmed: str | None
     confidence_at_emit: float
     workload_id: str
+    identity_key: str
     ts: str
     embed_text: str
     local_energy_at_emit: float = 0.0
@@ -87,6 +96,12 @@ class ObservationRecord:
         if "wicket_id" not in d and "node_id" in d:
             d = dict(d)
             d["wicket_id"] = d["node_id"]
+        if "identity_key" not in d:
+            d = dict(d)
+            d["identity_key"] = parse_workload_ref(d.get("workload_id", "")).get(
+                "identity_key",
+                d.get("workload_id", ""),
+            )
         return cls(**{k: v for k, v in d.items() if k != "node_id"})
 
     @staticmethod
@@ -169,6 +184,7 @@ class ObservationMemory:
             projection_confirmed=None,
             confidence_at_emit=float(confidence_at_emit),
             workload_id=workload_id,
+            identity_key=parse_workload_ref(workload_id).get("identity_key", workload_id),
             ts=ts,
             embed_text=embed_text,
             local_energy_at_emit=float(local_energy_at_emit or 0.0),
@@ -222,6 +238,7 @@ class ObservationMemory:
         domain: str = "",
         k: int = 10,
         node_id: str | None = None,
+        workload_id: str = "",
     ) -> list[tuple[ObservationRecord, float]]:
         if self._index is None or len(self._records) == 0:
             return []
@@ -234,11 +251,26 @@ class ObservationMemory:
         scores, indices = self._index.search(vec, k)
 
         results = []
+        query_target = _extract_target_hint(evidence_text)
+        query_identity = parse_workload_ref(workload_id).get("identity_key", workload_id) if workload_id else ""
         for score, idx in zip(scores[0], indices[0]):
             if idx < 0 or idx >= len(self._records):
                 continue
             rec = self._records[int(idx)]
             if rec.wicket_id == condition_id:
+                results.append((rec, float(score)))
+                continue
+
+            same_domain = bool(domain) and rec.domain == domain
+            same_target = False
+            if query_identity:
+                same_target = rec.identity_key == query_identity
+            if query_target:
+                same_target = same_target or query_target in str(rec.workload_id) or query_target in str(rec.evidence_text)
+
+            # Fallback match when the exact wicket/node is absent but the
+            # observation is from the same target/domain neighborhood.
+            if same_domain and same_target:
                 results.append((rec, float(score)))
 
         return results
@@ -250,6 +282,7 @@ class ObservationMemory:
         domain: str = "",
         k: int = 10,
         node_id: str | None = None,
+        workload_id: str = "",
     ) -> float | None:
         similar = self.recall(
             evidence_text=evidence_text,
@@ -257,6 +290,7 @@ class ObservationMemory:
             node_id=node_id,
             domain=domain,
             k=k,
+            workload_id=workload_id,
         )
         confirmed = [r for r, _ in similar if r.projection_confirmed is not None]
 

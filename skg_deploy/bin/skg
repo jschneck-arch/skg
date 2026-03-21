@@ -50,6 +50,11 @@ TOOLCHAINS (direct):
 
 import json, sys, os, argparse, subprocess, urllib.request, urllib.error, glob
 from pathlib import Path
+from urllib.parse import urlparse
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 API      = "http://127.0.0.1:5055"
 SKG_HOME = Path("/opt/skg")
@@ -127,6 +132,11 @@ def _run_python(script_path, *args, env_extra=None):
     if env_extra:
         env.update(env_extra)
     return subprocess.call([sys.executable, str(script_path)] + list(args), env=env)
+
+
+def _interp_payload(rec):
+    payload = rec.get("payload")
+    return payload if isinstance(payload, dict) else rec
 
 
 # ── Field commands ───────────────────────────────────────────────────────
@@ -259,13 +269,16 @@ def cmd_surface(a):
                 with open(ef) as f:
                     for line in f:
                         rec = json.loads(line.strip())
-                        apid = rec.get("attack_path_id", "")
+                        payload = _interp_payload(rec)
+                        apid = payload.get("attack_path_id", "")
                         if apid in seen:
                             continue
                         seen.add(apid)
-                        cls = rec.get("classification", "?")
-                        score = rec.get("aprs", 0)
-                        realized = rec.get("realized", [])
+                        cls = payload.get("classification", "?")
+                        score = payload.get("aprs", payload.get("lateral_score",
+                                payload.get("escape_score", payload.get("host_score",
+                                payload.get("web_score", payload.get("ai_score", 0))))))
+                        realized = payload.get("realized", [])
                         marker = "✓" if cls == "realized" else "~" if cls == "indeterminate" else "✗"
                         print(f"    {marker} {apid:45s} {cls:15s} {score:.0%}")
             except Exception:
@@ -446,7 +459,7 @@ def cmd_target(a):
 # ── Observation commands ─────────────────────────────────────────────────
 def _queue_msf_proposal(ip: str):
     sys.path.insert(0, "/opt/skg")
-    from skg.forge.proposals import create_action
+    from skg.forge.proposals import create_action, interactive_review
 
     out_dir = DISCOVERY_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -519,13 +532,27 @@ def _queue_msf_proposal(ip: str):
     print(f"  [MSF] Proposal queued: {proposal['id']}")
     print(f"  [MSF] RC script: {rc_file}")
     print(f"  [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
+    review = interactive_review(proposal["id"])
+    if review.get("decision") == "approved":
+        print(f"  [MSF] Approved interactively: {proposal['id']}")
+    elif review.get("decision") == "rejected":
+        print(f"  [MSF] Rejected interactively: {proposal['id']}")
+    elif review.get("decision") == "deferred":
+        print(f"  [MSF] Deferred interactively: {proposal['id']}")
 
 
 def cmd_observe(a):
     """Trigger observation on a target — gravity selects instrument, or operator specifies."""
-    ip = a.ip
+    raw_target = a.ip
     instrument = getattr(a, "instrument", None)
     auth = getattr(a, "auth", False)
+    parsed = urlparse(raw_target) if "://" in raw_target else None
+    is_url = parsed is not None and parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    ip = parsed.hostname if is_url else raw_target
+    target_url = raw_target.rstrip("/") if is_url else None
+
+    if is_url and instrument is None:
+        instrument = "web"
 
     if instrument == "web" and auth:
         # Authenticated web scan
@@ -533,8 +560,9 @@ def cmd_observe(a):
         if not script.exists():
             print(f"  Error: {script} not found")
             return
-        events_file = DISCOVERY_DIR / f"observe_auth_{ip}.ndjson"
-        args = [str(script), "--target", f"http://{ip}", "--try-defaults",
+        safe_host = (ip or "target").replace(":", "_")
+        events_file = DISCOVERY_DIR / f"observe_auth_{safe_host}.ndjson"
+        args = [str(script), "--target", target_url or f"http://{ip}", "--try-defaults",
                 "--out", str(events_file)]
         subprocess.call([sys.executable] + args)
 
@@ -544,12 +572,18 @@ def cmd_observe(a):
         if not script.exists():
             print(f"  Error: {script} not found")
             return
-        events_file = DISCOVERY_DIR / f"observe_web_{ip}.ndjson"
-        # Find web port
-        port = _find_web_port(ip)
-        scheme = "http"
-        args = [str(script), "--target", f"{scheme}://{ip}:{port}",
-                "--out", str(events_file), "--attack-path-id", "web_sqli_to_shell_v1"]
+        safe_host = (ip or "target").replace(":", "_")
+        events_file = DISCOVERY_DIR / f"observe_web_{safe_host}.ndjson"
+        if target_url:
+            resolved_target = target_url
+            attack_path_id = "web_surface_v1"
+        else:
+            port = _find_web_port(ip)
+            scheme = "http"
+            resolved_target = f"{scheme}://{ip}:{port}"
+            attack_path_id = "web_sqli_to_shell_v1"
+        args = [str(script), "--target", resolved_target,
+                "--out", str(events_file), "--attack-path-id", attack_path_id]
         subprocess.call([sys.executable] + args)
 
     elif instrument == "ssh":
@@ -609,7 +643,7 @@ def cmd_observe(a):
 
     else:
         # No instrument specified — let gravity decide
-        print(f"  Observing {ip} — gravity selecting instrument...")
+        print(f"  Observing {raw_target} — gravity selecting instrument...")
         gravity_script = SKG_HOME / "skg-gravity" / "gravity_field.py"
         if gravity_script.exists():
             # Run one gravity cycle focused on this target
@@ -899,29 +933,51 @@ def cmd_audit(a):
         apid   = getattr(a, "attack_path_id", "full_system_integrity_v1")
         checks = getattr(a, "checks", None)
 
+        selected_checks = [c.strip().lower() for c in (checks or "").split(",") if c.strip()] or None
         out_file = DISCOVERY_DIR / f"audit_{wid.replace('::', '_')}_{run_id}.ndjson"
-        ssh_args = [
-            str(SKG_HOME / "skg-host-toolchain" / "adapters" / "ssh_collect" / "parse.py"),
-            "--host",        a.target,
-            "--user",        getattr(a, "user", None) or "root",
-            "--out",         str(out_file),
-            "--attack-path-id", apid,
-            "--run-id",      run_id,
-            "--workload-id", wid,
-            "--audit-only",
-        ]
-        if getattr(a, "key", None):
-            ssh_args += ["--key", a.key]
-        if getattr(a, "password", None):
-            ssh_args += ["--password", a.password]
-        if checks:
-            ssh_args += ["--audit-checks", checks]
 
         print(f"\n  Auditing {a.target} ({wid})")
         print(f"  Checks: {checks or 'all (FI+PI+LI)'}")
         print()
         DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
-        subprocess.call([sys.executable] + ssh_args)
+        try:
+            import paramiko
+        except ImportError:
+            print("  paramiko not installed")
+            return
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            connect_args = {
+                "hostname": a.target,
+                "port": int(getattr(a, "port", 22) or 22),
+                "username": getattr(a, "user", None) or "root",
+                "timeout": 20,
+            }
+            if getattr(a, "key", None):
+                connect_args["key_filename"] = str(Path(a.key).expanduser())
+            elif getattr(a, "password", None):
+                connect_args["password"] = a.password
+            client.connect(**connect_args)
+        except Exception as exc:
+            print(f"  SSH connect failed: {exc}")
+            return
+
+        try:
+            sys.path.insert(0, str(SKG_HOME / "skg-host-toolchain" / "adapters" / "sysaudit"))
+            from audit import run_sysaudit
+            events = run_sysaudit(client, a.target, wid, apid, run_id, checks=selected_checks)
+        except Exception as exc:
+            print(f"  Sysaudit failed: {exc}")
+            return
+        finally:
+            client.close()
+
+        with open(out_file, "w") as fh:
+            for ev in events:
+                ev.setdefault("payload", {})["target_ip"] = a.target
+                fh.write(json.dumps(ev) + "\n")
 
         if out_file.exists():
             events = [json.loads(l) for l in out_file.read_text().splitlines() if l.strip()]
@@ -1038,10 +1094,11 @@ def cmd_folds(a):
             print(f"    {ft:14s}: {count}")
         print()
         if folds:
-            print(f"  {'Target':18s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
-            print(f"  {'-'*18} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
+            print(f"  {'Target':18s} {'ID':12s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
+            print(f"  {'-'*18} {'-'*12} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
             for fold in folds[:20]:
                 print(f"  {fold.get('target_ip','?'):18s} "
+                      f"{fold.get('id','?')[:12]:12s} "
                       f"{fold.get('fold_type','?'):12s} "
                       f"{fold.get('discovery_probability',0):5.2f} "
                       f"{fold.get('gravity_weight',0):5.2f}  "
@@ -1061,7 +1118,7 @@ def cmd_folds(a):
         print(f"  Action: {result.get('action','')}")
         print()
         for fold in folds:
-            print(f"  {fold.get('target_ip','?'):18s}  Φ={fold.get('gravity_weight',0):.2f}")
+            print(f"  {fold.get('target_ip','?'):18s}  {fold.get('id','?')[:12]:12s} Φ={fold.get('gravity_weight',0):.2f}")
             print(f"    {fold.get('detail','')[:100]}")
             print()
 
@@ -1076,6 +1133,15 @@ def cmd_folds(a):
             print(f"  Remaining folds: {result.get('remaining_folds', '?')}")
             print(f"  Remaining gravity weight: {result.get('remaining_gravity_weight', '?')}")
         else:
+            offline = _resolve_fold_offline(a.target, a.fold_id)
+            if offline and offline.get("ok"):
+                print(f"  Fold {a.fold_id} resolved.")
+                print(f"  Remaining folds: {offline.get('remaining_folds', '?')}")
+                print(f"  Remaining gravity weight: {offline.get('remaining_gravity_weight', '?')}")
+                return
+            if offline and offline.get("error"):
+                print(f"  Failed: {offline['error']}")
+                return
             err = result.get("error", "unknown") if result else "daemon not running"
             print(f"  Failed: {err}")
 
@@ -1095,7 +1161,7 @@ def _print_folds_offline():
             folds = json.loads(fold_file.read_text())
             ip = fold_file.stem.replace("folds_", "").replace("_", ".")
             for fold in folds:
-                print(f"  {ip:18s} [{fold.get('fold_type','?'):12s}] "
+                print(f"  {ip:18s} {fold.get('id','?')[:12]:12s} [{fold.get('fold_type','?'):12s}] "
                       f"p={fold.get('discovery_probability',0):.2f}  "
                       f"{fold.get('detail','')[:70]}")
                 total += 1
@@ -1105,6 +1171,28 @@ def _print_folds_offline():
         print("  No folds detected yet. Run: skg gravity --cycles 1")
     else:
         print(f"\n  Total: {total} folds")
+
+
+def _resolve_fold_offline(target_ip: str, fold_id: str):
+    fold_file = Path("/var/lib/skg/discovery/folds") / f"folds_{target_ip.replace('.', '_')}.json"
+    if not fold_file.exists():
+        return None
+    folds = json.loads(fold_file.read_text())
+    matches = [f for f in folds if f.get("id", "") == fold_id or f.get("id", "").startswith(fold_id)]
+    if len(matches) > 1 and fold_id not in {f.get("id", "") for f in matches}:
+        return {"error": f"ambiguous fold id prefix for {target_ip}"}
+    if not matches:
+        return {"error": f"fold {fold_id} not found for {target_ip}"}
+    target_full_id = matches[0].get("id", "")
+    remaining = [f for f in folds if f.get("id", "") != target_full_id]
+    fold_file.write_text(json.dumps(remaining, indent=2))
+    remaining_weight = round(sum(float(f.get("gravity_weight", 0.0)) for f in remaining), 4)
+    return {
+        "ok": True,
+        "resolved": target_full_id,
+        "remaining_folds": len(remaining),
+        "remaining_gravity_weight": remaining_weight,
+    }
 
 
 def cmd_feed(a):
@@ -1118,7 +1206,18 @@ def cmd_feed(a):
 
         api_key = os.environ.get("NIST_NVD_API_KEY", "")
         if not api_key:
+            _env_file = Path("/etc/skg/skg.env")
+            if _env_file.exists():
+                for _line in _env_file.read_text().splitlines():
+                    if _line.startswith("NIST_NVD_API_KEY="):
+                        api_key = _line.split("=", 1)[1].strip()
+                        if api_key:
+                            os.environ["NIST_NVD_API_KEY"] = api_key
+                            print(f"  [feed] Loaded NIST_NVD_API_KEY from /etc/skg/skg.env")
+                        break
+        if not api_key:
             print("  Error: Set NIST_NVD_API_KEY environment variable")
+            print("         or add NIST_NVD_API_KEY=<key> to /etc/skg/skg.env")
             return
 
         service = getattr(a, "service", None)
@@ -1197,7 +1296,14 @@ def cmd_resonance(a):
         from skg.core.paths import RESONANCE_DIR
         engine = _resonance_engine()
         summary = ingest_all(engine, SKG_HOME)
-        print(json.dumps(summary, indent=2))
+        domains = summary.get("domains", {})
+        print(f"  Wickets   : {summary.get('wickets_added', sum(v.get('new_wickets', 0) for v in domains.values()))}")
+        print(f"  Adapters  : {summary.get('adapters_added', sum(v.get('new_adapters', 0) for v in domains.values()))}")
+        print(f"  Domains   : {summary.get('domains_added', len(domains))}")
+        print(f"  Toolchains: {', '.join(summary.get('toolchains_processed', sorted(domains.keys())))}")
+        if summary.get("errors"):
+            for e in summary["errors"]:
+                print(f"  [WARN] {e}")
 
     elif subcmd == "query":
         engine = _resonance_engine()
@@ -1255,6 +1361,23 @@ def cmd_resonance(a):
             print(f"  {d['file']}")
             print(f"    domain:  {meta.get('domain', '?')}")
             print(f"    drafted: {meta.get('drafted_at', '?')}")
+
+    elif subcmd == "ollama":
+        from skg.resonance.ollama_backend import OllamaBackend
+        backend = OllamaBackend()
+        status = backend.status()
+        print(f"  Available : {'yes' if status.get('available') else 'no'}")
+        print(f"  URL       : {status.get('url', '?')}")
+        print(f"  Selected  : {status.get('selected_model') or '(none)'}")
+        print(f"  Configured: {status.get('configured_model') or '(auto)'}")
+        print(f"  Temp      : {status.get('temperature', '?')}")
+        models = status.get("models", [])
+        if models:
+            print(f"  Models    : {', '.join(models)}")
+        elif status.get("available"):
+            print("  Models    : none")
+        if status.get("error"):
+            print(f"  Error     : {status['error']}")
 
 
 # ── Field command (per-workload) ─────────────────────────────────────────
@@ -1438,7 +1561,7 @@ def cmd_proposals(a):
         return
 
     if subcmd == "defer":
-        result = _props.defer(a.proposal_id, defer_days=getattr(a, "days", 7))
+        result = _props.defer(a.proposal_id, days=getattr(a, "days", 7))
         print(json.dumps(result, indent=2))
         return
 
@@ -1673,6 +1796,7 @@ def main():
     rps = rp.add_subparsers(dest="resonance_cmd", required=True)
     rps.add_parser("status")
     rps.add_parser("ingest")
+    rps.add_parser("ollama")
     rq = rps.add_parser("query")
     rq.add_argument("text")
     rq.add_argument("--type", default="all",

@@ -1,0 +1,13 @@
+{
+  "domain": "web",
+  "description": "CVE-2007-4723 has no wicket mapping. Service: Apache/2.2.8 (Ubuntu) DAV/2. CVSS: 7.5. Create a wicket with: skg catalog compile --domain <domain> --keywords CVE",
+  "attack_surface": "CVE-2007-4723 has no wicket mapping. Service: Apache/2.2.8 (Ubuntu) DAV/2. CVSS: 7.5. Create a wicket with: skg catalog compile --domain <domain> --keywords CVE-2007-4723",
+  "hosts": [
+    "172.17.0.3"
+  ],
+  "generated_at": "2026-03-16T18:21:03.956268+00:00",
+  "generation_backend": "compiler",
+  "errors": [
+    "Used template adapter \u2014 check collection commands"
+  ]
+}

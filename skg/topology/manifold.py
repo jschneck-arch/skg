@@ -376,17 +376,18 @@ def find_h1_obstructions(sc: "SimplicialComplex") -> list[dict]:
                 continue
             if neighbor in visited:
                 # Found a cycle — extract it
-                cycle_start = path.index(neighbor)
-                cycle = path[cycle_start:]
-                # Only record minimal cycles (length 3-6 are operationally meaningful)
-                if 2 < len(cycle) <= 6:
-                    # Deduplicate: normalize to lowest-ID-first rotation
-                    normalized = sorted(
-                        [cycle[i:] + cycle[:i] for i in range(len(cycle))],
-                        key=lambda c: c[0]
-                    )[0]
-                    if normalized not in cycles:
-                        cycles.append(normalized)
+                if neighbor in path:
+                    cycle_start = path.index(neighbor)
+                    cycle = path[cycle_start:]
+                    # Only record minimal cycles (length 3-6 are operationally meaningful)
+                    if 2 < len(cycle) <= 6:
+                        # Deduplicate: normalize to lowest-ID-first rotation
+                        normalized = sorted(
+                            [cycle[i:] + cycle[:i] for i in range(len(cycle))],
+                            key=lambda c: c[0]
+                        )[0]
+                        if normalized not in cycles:
+                            cycles.append(normalized)
             else:
                 _dfs(neighbor, node, path)
         path.pop()

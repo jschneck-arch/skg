@@ -455,6 +455,26 @@ def run_ssh_host(
         _out = out_file or (Path(tmpdir) / "events.ndjson")
         try:
             mod = _adapter_module("skg-host-toolchain", "ssh_collect")
+            # Emit the initial-access wickets first so partial SSH runs still
+            # preserve the fact that connectivity and authentication succeeded.
+            fn = getattr(mod, "eval_ho01_reachability", None)
+            if fn:
+                try:
+                    fn(host, _out, attack_path_id, run_id, workload_id)
+                except Exception as exc:
+                    log.debug(f"host eval_ho01_reachability: {exc}")
+            fn = getattr(mod, "eval_ho02_ssh", None)
+            if fn:
+                try:
+                    fn(host, port, _out, attack_path_id, run_id, workload_id)
+                except Exception as exc:
+                    log.debug(f"host eval_ho02_ssh: {exc}")
+            fn = getattr(mod, "eval_ho03_credential", None)
+            if fn:
+                try:
+                    fn(host, user, auth_type, _out, attack_path_id, run_id, workload_id)
+                except Exception as exc:
+                    log.debug(f"host eval_ho03_credential: {exc}")
             # Call all eval_ functions directly with the live client
             for fn_name in [
                 "eval_ho10_root", "eval_ho06_sudo", "eval_ho07_suid",
@@ -469,29 +489,6 @@ def run_ssh_host(
                         fn(client, host, _out, attack_path_id, run_id, workload_id)
                     except Exception as exc:
                         log.debug(f"host {fn_name}: {exc}")
-
-            # Connectivity wickets (no client needed)
-            # HO-01 reachability
-            fn = getattr(mod, "eval_ho01_reachability", None)
-            if fn:
-                try:
-                    fn(host, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho01_reachability: {exc}")
-            # HO-02 SSH confirmed — pass port
-            fn = getattr(mod, "eval_ho02_ssh", None)
-            if fn:
-                try:
-                    fn(host, port, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho02_ssh: {exc}")
-            # HO-03 — credential valid, confirmed by live session
-            fn = getattr(mod, "eval_ho03_credential", None)
-            if fn:
-                try:
-                    fn(host, user, auth_type, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho03_credential: {exc}")
 
         except Exception as exc:
             log.warning(f"host ssh_collect adapter error: {exc}")

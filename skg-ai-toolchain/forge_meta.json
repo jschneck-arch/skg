@@ -1,0 +1,9 @@
+{
+  "toolchain": "skg-ai-toolchain",
+  "domain": "ai_target",
+  "version": "1.0.0",
+  "description": "AI/ML system attack surface — LLM inference endpoints, vector databases, model registries, notebook servers.",
+  "wicket_prefix": "AI",
+  "instrument": "ai_probe",
+  "attack_path_ids": ["ai_llm_extract_v1", "ai_rce_via_notebook_v1", "ai_model_poison_v1"]
+}

@@ -11,9 +11,18 @@ Score: |realized| / |required|
 Classification: realized | not_realized | indeterminate
 """
 
-import argparse, json, uuid
+import argparse, json, sys, uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from skg.kernel.adapters import event_to_observation
+from skg.kernel.state import CollapseThresholds, StateEngine
+from skg.kernel.support import SupportEngine
 
 
 def get_version() -> str:
@@ -39,6 +48,39 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _target_for_events(events, workload_id: str | None = None) -> str:
+    if workload_id:
+        return workload_id.split("::")[-1]
+    for ev in reversed(events):
+        payload = ev.get("payload", {})
+        target = payload.get("target_ip") or payload.get("workload_id")
+        if target:
+            return target
+    return "unknown"
+
+
+def _support_statuses(events, required: list[str], workload_id: str | None = None) -> dict[str, str]:
+    observations = []
+    for ev in events:
+        obs = event_to_observation(ev)
+        if obs is None or obs.context not in required:
+            continue
+        observations.append(obs)
+
+    if not observations:
+        return {w: "unknown" for w in required}
+
+    as_of = max(obs.event_time for obs in observations)
+    target = _target_for_events(events, workload_id)
+    support = SupportEngine()
+    state = StateEngine(CollapseThresholds(realized=0.5, blocked=0.5))
+    latest = {}
+    for wicket_id in required:
+        contrib = support.aggregate(observations, target, wicket_id, as_of)
+        latest[wicket_id] = state.collapse(contrib).value
+    return latest
+
+
 def compute_host_score(events, catalog: dict, attack_path_id: str,
                         run_id: str = None, workload_id: str = None) -> dict:
     paths = catalog.get("attack_paths", {})
@@ -47,21 +89,7 @@ def compute_host_score(events, catalog: dict, attack_path_id: str,
         raise SystemExit(f"Unknown attack_path_id: {attack_path_id}")
     required = ap["required_wickets"]
 
-    # Pick latest observation per wicket (by timestamp)
-    latest: dict[str, str] = {}
-    latest_ts: dict[str, str] = {}
-    for ev in events:
-        if ev.get("type") != "obs.attack.precondition":
-            continue
-        payload = ev.get("payload", {})
-        # wicket observations are facts about the host — valid across all paths
-        wid = payload.get("wicket_id")
-        if wid not in required:
-            continue
-        obs_at = payload.get("observed_at") or ev.get("ts", "")
-        if wid not in latest_ts or obs_at > latest_ts[wid]:
-            latest_ts[wid] = obs_at
-            latest[wid] = payload.get("status", "unknown")
+    latest = _support_statuses(events, required, workload_id=workload_id)
 
     realized = [w for w in required if latest.get(w) == "realized"]
     blocked  = [w for w in required if latest.get(w) == "blocked"]
@@ -70,7 +98,7 @@ def compute_host_score(events, catalog: dict, attack_path_id: str,
     score = round(len(realized) / len(required), 6) if required else 0.0
 
     if blocked:
-        classification = "not_realized" if not unknown else "indeterminate"
+        classification = "not_realized"
     else:
         classification = "realized" if len(realized) == len(required) else "indeterminate"
 
@@ -103,7 +131,7 @@ def compute_host_score(events, catalog: dict, attack_path_id: str,
         "run_id":           run_id,
         "workload_id":      workload_id,
         "derivation": {
-            "rule": "host_score=|realized|/|required|; classification uses blocked/unknown sets",
+            "rule": "host_score=|realized|/|required|; wickets collapse from aggregated support before path classification",
             "h1_note": (
                 "indeterminate_h1 means H¹ obstruction detected — "
                 "mutual dependency cycle prevents global section. "

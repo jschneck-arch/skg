@@ -37,6 +37,15 @@ from pathlib import Path
 log = logging.getLogger("skg.sensors.projector")
 
 SKG_HOME = Path(os.environ.get("SKG_HOME", Path(__file__).resolve().parents[2]))
+TOOLCHAIN_ALIASES = {
+    "aprs": "skg-aprs-toolchain",
+    "container_escape": "skg-container-escape-toolchain",
+    "ad_lateral": "skg-ad-lateral-toolchain",
+    "host": "skg-host-toolchain",
+    "web": "skg-web-toolchain",
+    "data": "skg-data-toolchain",
+    "ai_target": "skg-ai-toolchain",
+}
 
 TOOLCHAIN_PROJECTOR = {
     "skg-aprs-toolchain":             ("skg-aprs-toolchain",            "projections/aprs/run.py",     "compute_aprs"),
@@ -44,7 +53,7 @@ TOOLCHAIN_PROJECTOR = {
     "skg-ad-lateral-toolchain":       ("skg-ad-lateral-toolchain",      "projections/lateral/run.py",  "compute_lateral"),
     "skg-host-toolchain":             ("skg-host-toolchain",            "projections/host/run.py",     "compute_host_score"),
     "skg-web-toolchain":              ("skg-web-toolchain",             "projections/web/run.py",      "compute_web"),
-    "skg-web-toolchain":              ("skg-web-toolchain",             "projections/web/run.py",      "compute_web"),
+    "skg-ai-toolchain":               ("skg-ai-toolchain",              "projections/run.py",          "compute_ai"),
 }
 
 # Attack path defaults per domain
@@ -53,11 +62,43 @@ DEFAULT_ATTACK_PATH = {
     "skg-container-escape-toolchain": "container_escape_privileged_v1",
     "skg-ad-lateral-toolchain":       "ad_kerberoast_v1",
     "skg-host-toolchain":             "host_ssh_initial_access_v1",
-    "skg-web-toolchain":              "web_surface_v1",
     "skg-web-toolchain":              "web_initial_access_v1",
+    "skg-ai-toolchain":               "ai_llm_extract_v1",
 }
 
 _projector_cache: dict[str, object] = {}
+
+
+def _canonical_toolchain_name(toolchain: str) -> str:
+    return TOOLCHAIN_ALIASES.get(toolchain, toolchain)
+
+
+def _normalize_event(ev: dict) -> dict:
+    payload = dict(ev.get("payload", {}))
+    status = payload.get("status")
+    if status is None:
+        realized = payload.get("realized")
+        if realized is True:
+            status = "realized"
+        elif realized is False:
+            status = "blocked"
+        else:
+            status = "unknown"
+        payload["status"] = status
+
+    source = dict(ev.get("source", {}))
+    source["toolchain"] = _canonical_toolchain_name(source.get("toolchain", ""))
+
+    normalized = dict(ev)
+    normalized["payload"] = payload
+    normalized["source"] = source
+    return normalized
+
+
+def _unwrap_interp_payload(result: dict) -> dict:
+    if isinstance(result, dict) and isinstance(result.get("payload"), dict):
+        return result["payload"]
+    return result
 
 
 def _load_projector(toolchain: str):
@@ -120,6 +161,7 @@ def project_events(
     Project a list of events for one workload+toolchain+attack_path.
     Writes result to interp_dir. Returns output path or None.
     """
+    events = [_normalize_event(ev) for ev in events]
     mod = _load_projector(toolchain)
     if mod is None:
         log.warning(f"No projector for toolchain: {toolchain}")
@@ -138,13 +180,14 @@ def project_events(
             result = compute_fn(events, catalog, attack_path_id,
                                 run_id=run_id, workload_id=workload_id)
             if result:
+                payload = _unwrap_interp_payload(result)
                 domain = toolchain.replace("skg-","").replace("-toolchain","").replace("-","_")
                 wid_safe = workload_id.replace("/","_").replace(":","_").replace(" ","_")[:60]
                 out_path = interp_dir / f"{domain}_{wid_safe}_{run_id}.json"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, indent=2))
                 log.info(f"[projector] {workload_id}/{attack_path_id} → {out_path.name} "
-                         f"(score={result.get('aprs', result.get('lateral_score', result.get('escape_score', result.get('host_score','?'))))})")
+                         f"(score={payload.get('aprs', payload.get('lateral_score', payload.get('escape_score', payload.get('host_score', payload.get('web_score', payload.get('ai_score', '?'))))))})")
                 return out_path
         except Exception as exc:
             log.debug(f"[projector] compute_fn failed, trying file path: {exc}")
@@ -218,6 +261,7 @@ def project_event_file(
         if ev.get("type") != "obs.attack.precondition":
             continue
 
+        ev = _normalize_event(ev)
         payload    = ev.get("payload", {})
         toolchain  = ev.get("source", {}).get("toolchain", "")
         wid        = payload.get("workload_id", "unknown")

@@ -14,11 +14,36 @@ DECAY_LAMBDAS = {
     "ephemeral": 0.1,
 }
 
+INSTRUMENT_FAMILIES = {
+    "nmap": "network_scan",
+    "pcap": "packet_capture",
+    "net_sensor": "packet_capture",
+    "tshark": "packet_capture",
+    "ssh_sensor": "host_access",
+    "sysaudit": "host_runtime",
+    "container_inspect": "container_runtime",
+    "http_collector": "web_active",
+    "auth_scanner": "web_active",
+    "bloodhound": "graph_identity",
+    "supply_chain": "package_structure",
+    "nvd_feed": "vuln_intel",
+    "msf_sensor": "exploit_runtime",
+}
+
 
 @dataclass(slots=True)
 class SupportContribution:
     realized: float = 0.0
     blocked: float = 0.0
+    unresolved: float = 0.0
+    contradiction: float = 0.0
+    decoherence: float = 0.0
+    compatibility_score: float = 0.0
+    compatibility_span: int = 0
+
+
+def instrument_family(instrument: str) -> str:
+    return INSTRUMENT_FAMILIES.get(instrument, instrument or "unknown")
 
 
 class SupportEngine:
@@ -40,11 +65,58 @@ class SupportEngine:
     def aggregate(self, observations: Iterable[Observation], target: str, context: str, as_of: datetime) -> SupportContribution:
         realized = 0.0
         blocked = 0.0
+        unresolved = 0.0
+        raw_realized = 0.0
+        raw_blocked = 0.0
+        raw_unresolved = 0.0
+        family_weights: Dict[str, float] = {}
+        observed_families: set[str] = set()
         for obs in observations:
             if obs.context != context or target not in obs.targets:
                 continue
             mapping = obs.support_mapping.get(target, {})
             w = self.weight(obs, as_of)
-            realized += w * float(mapping.get("R", 0.0))
-            blocked += w * float(mapping.get("B", 0.0))
-        return SupportContribution(realized=realized, blocked=blocked)
+            family = instrument_family(obs.instrument)
+            realized_part = float(mapping.get("R", 0.0))
+            blocked_part = float(mapping.get("B", 0.0))
+            unresolved_part = float(mapping.get("U", 0.0))
+            if max(realized_part, blocked_part, unresolved_part) > 0.0:
+                observed_families.add(family)
+            realized += w * realized_part
+            blocked += w * blocked_part
+            unresolved += w * unresolved_part
+            raw_realized += realized_part
+            raw_blocked += blocked_part
+            raw_unresolved += unresolved_part
+            family_weights[family] = family_weights.get(family, 0.0) + w * max(
+                realized_part,
+                blocked_part,
+                unresolved_part,
+            )
+        contradiction = min(realized, blocked)
+        total_weight = sum(family_weights.values())
+        active_families = {fam: mass for fam, mass in family_weights.items() if mass > 0.05}
+        compatibility_span = len(observed_families)
+        if total_weight > 0.0 and compatibility_span > 0 and active_families:
+            concentration = max(active_families.values()) / total_weight
+            compatibility_score = max(0.0, min(1.0, 1.0 - concentration + (0.1 * (compatibility_span - 1))))
+        else:
+            compatibility_score = 0.0
+        raw_total = raw_realized + raw_blocked + raw_unresolved
+        decayed_total = realized + blocked + unresolved
+        if raw_total > 0.0:
+            decoherence = max(0.0, raw_total - decayed_total) / raw_total
+        else:
+            decoherence = 0.0
+        if compatibility_span <= 1 and raw_total > 0.0:
+            decoherence += 0.15
+        decoherence = max(0.0, min(1.0, decoherence))
+        return SupportContribution(
+            realized=realized,
+            blocked=blocked,
+            unresolved=unresolved,
+            contradiction=contradiction,
+            decoherence=decoherence,
+            compatibility_score=compatibility_score,
+            compatibility_span=compatibility_span,
+        )

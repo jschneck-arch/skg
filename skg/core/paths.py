@@ -44,6 +44,7 @@ INTERP_DIR    = SKG_STATE_DIR / "interp"
 DELTA_DIR     = SKG_STATE_DIR / "delta"
 DISCOVERY_DIR = SKG_STATE_DIR / "discovery"
 GRAPH_DIR     = SKG_STATE_DIR / "graph"
+CVE_DIR       = SKG_STATE_DIR / "cve"
 
 # Logs
 LOG_DIR  = SKG_STATE_DIR / "logs"
@@ -55,7 +56,7 @@ def ensure_runtime_dirs() -> None:
     for d in [
         BRAIN_DIR, EVOLUTION_DIR, EVENTS_DIR, INTERP_DIR, LOG_DIR,
         DELTA_DIR / "snapshots", DELTA_DIR / "transitions",
-        GRAPH_DIR,
+        GRAPH_DIR, CVE_DIR,
         RESONANCE_INDEX, RESONANCE_RECORDS, RESONANCE_DRAFTS,
         FORGE_STAGING,
         SKG_STATE_DIR / "proposals",

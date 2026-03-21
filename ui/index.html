@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SKG Field Surface</title>
+    <link rel="stylesheet" href="/ui/static/styles.css?v=20260319d" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">SKG Operator Surface</p>
+          <h1>Field workspace for one live engagement.</h1>
+          <p class="lede">SKG should open into something operable: choose a target, inspect measured support, review folds, approve work, and move the engagement forward.</p>
+          <div class="toolbar toolbar-row">
+            <label class="filter-box" for="focus-filter">
+              <span>Focus</span>
+              <input id="focus-filter" type="search" placeholder="Filter by host, domain, fold, or path" />
+            </label>
+            <div class="quick-actions">
+              <button id="jump-primary-target" class="action-button">Primary Target</button>
+              <button id="jump-top-fold" class="action-button">Top Fold</button>
+              <button id="jump-pending-proposal" class="action-button">Pending Approval</button>
+            </div>
+          </div>
+        </div>
+        <div class="hero-meta">
+          <div class="metric"><span>Mode</span><strong id="mode">-</strong></div>
+          <div class="metric"><span>Targets</span><strong id="target-count">-</strong></div>
+          <div class="metric"><span>Pending Growth</span><strong id="growth-count">-</strong></div>
+        </div>
+      </header>
+
+      <section class="grid top-grid">
+        <article class="panel">
+          <h2>Field Summary</h2>
+          <div id="field-summary" class="stack"></div>
+        </article>
+        <article class="panel">
+          <h2>Assistant Overview</h2>
+          <div id="assistant-status" class="assistant-status">
+            <span id="assistant-mode-badge" class="badge">deterministic</span>
+            <span id="assistant-task-badge" class="badge warn">overview</span>
+          </div>
+          <div id="assistant" class="assistant-copy">
+            Loading substrate summary...
+          </div>
+        </article>
+      </section>
+
+      <section class="mode-bar">
+        <button class="mode-tab selected" data-mode="operate">Operate</button>
+        <button class="mode-tab" data-mode="inspect">Inspect</button>
+        <button class="mode-tab" data-mode="history">History</button>
+        <button class="mode-tab" data-mode="report">Report</button>
+      </section>
+
+      <section class="workspace-shell">
+        <aside id="workspace-left" class="workspace-left">
+          <article class="panel sidebar-panel">
+            <div class="section-head">
+              <h2>Targets</h2>
+              <span class="badge">focus</span>
+            </div>
+            <div id="targets" class="list"></div>
+          </article>
+          <article class="panel sidebar-panel">
+            <div class="section-head">
+              <h2>Folds</h2>
+              <span class="badge warn">pressure</span>
+            </div>
+            <div id="folds" class="list"></div>
+          </article>
+        </aside>
+
+        <section id="workspace-main" class="workspace-main">
+          <article class="panel workspace-panel">
+            <div class="section-head">
+              <h2>Workspace</h2>
+              <span id="selection-kind" class="badge">none</span>
+            </div>
+            <div class="view-tabs">
+              <button class="view-tab selected" data-view="surface">Surface</button>
+              <button class="view-tab" data-view="artifacts">Artifacts</button>
+              <button class="view-tab" data-view="timeline">Timeline</button>
+              <button class="view-tab" data-view="memory">Memory</button>
+              <button class="view-tab" data-view="actions">Actions</button>
+            </div>
+            <div id="workspace-state" class="workspace-state"></div>
+            <div id="action-status" class="action-status" hidden></div>
+
+            <div id="view-surface" class="view-panel active">
+              <div id="detail" class="detail-empty">
+                Select a target, fold, proposal, or pearl neighborhood to inspect its shape.
+              </div>
+            </div>
+
+            <div id="view-artifacts" class="view-panel">
+              <section class="workspace-subgrid">
+                <article>
+                  <h3>Measured Support</h3>
+                  <div id="artifacts" class="list">
+                    Select an object to load recent events, discovery, and interp artifacts for its identity.
+                  </div>
+                  <div id="artifacts-assistant" class="assistant-copy">
+                    Artifact summaries will appear here once an identity is selected.
+                  </div>
+                </article>
+                <article>
+                  <h3>Artifact Preview</h3>
+                  <div id="artifact-preview" class="detail-empty">
+                    Select one measured-support artifact to inspect its first rows or keys.
+                  </div>
+                  <div id="artifact-preview-assistant" class="assistant-copy">
+                    Preview notes will appear here once an artifact is selected.
+                  </div>
+                </article>
+              </section>
+            </div>
+
+            <div id="view-timeline" class="view-panel">
+              <h3>Temporal Change</h3>
+              <div id="timeline" class="list">
+                Select an object to load its identity timeline.
+              </div>
+              <div id="timeline-assistant" class="assistant-copy">
+                Timeline notes will appear here once an identity is selected.
+              </div>
+            </div>
+
+            <div id="view-memory" class="view-panel">
+              <section class="workspace-subgrid">
+                <article>
+                  <h3>Pearl Manifold</h3>
+                  <div id="memory" class="list"></div>
+                </article>
+                <article>
+                  <h3>Memory Notes</h3>
+                  <div id="memory-assistant" class="assistant-copy">
+                    Select a target or pearl neighborhood to inspect structural memory and reinforced wavelengths.
+                  </div>
+                </article>
+              </section>
+            </div>
+
+            <div id="view-actions" class="view-panel">
+              <section class="workspace-subgrid">
+                <article>
+                  <h3>Recent Actions</h3>
+                  <div id="actions" class="list">
+                    Recent operator-visible actions will appear here.
+                  </div>
+                </article>
+                <article>
+                  <h3>Action Notes</h3>
+                  <div id="actions-assistant" class="assistant-copy">
+                    Action history notes will appear here.
+                  </div>
+                </article>
+              </section>
+            </div>
+          </article>
+        </section>
+
+        <aside id="workspace-right" class="workspace-right">
+          <article id="panel-run-monitor" class="panel rail-panel">
+            <div class="section-head">
+              <h2>Run Monitor</h2>
+              <span class="badge">live</span>
+            </div>
+            <div class="button-row">
+              <button id="gravity-run-target" class="action-button">Run Focused Target</button>
+              <button id="gravity-start" class="action-button">Start Gravity</button>
+              <button id="gravity-stop" class="action-button">Stop Gravity</button>
+            </div>
+            <div id="run-monitor" class="assistant-copy">
+              Loading gravity status...
+            </div>
+          </article>
+
+          <article id="panel-proposals" class="panel rail-panel">
+            <div class="section-head">
+              <h2>Approvals</h2>
+              <span class="badge warn">queue</span>
+            </div>
+            <div id="proposals" class="list"></div>
+          </article>
+
+          <article id="panel-command-desk" class="panel rail-panel">
+            <div class="section-head">
+              <h2>Command Desk</h2>
+              <span class="badge">run</span>
+            </div>
+            <div id="command-desk" class="assistant-copy">
+              Select a target, fold, or proposal to see the next useful commands.
+            </div>
+          </article>
+
+          <article id="panel-assistant" class="panel rail-panel">
+            <h2>Assistant</h2>
+            <div id="assistant-detail-status" class="assistant-status">
+              <span id="assistant-detail-mode-badge" class="badge">deterministic</span>
+              <span id="assistant-detail-task-badge" class="badge warn">selection</span>
+            </div>
+            <div id="assistant-detail-actions" class="button-row">
+              <button class="action-button" data-assistant-task="selection">Selection</button>
+              <button class="action-button" data-assistant-task="next_observation">Next Observation</button>
+              <button class="action-button" data-assistant-task="engagement_note">Engagement Note</button>
+              <button class="action-button" data-assistant-task="fold_cluster_summary">Fold Cluster</button>
+            </div>
+            <div id="assistant-detail" class="assistant-copy">
+              The assistant will explain the selected object from live substrate state.
+            </div>
+            <div id="engagement-note-panel" class="engagement-note" hidden>
+              <div class="section-head">
+                <h3>Engagement Note</h3>
+                <button id="engagement-note-copy" class="action-button">Copy</button>
+              </div>
+              <pre id="engagement-note-text" class="engagement-note-text"></pre>
+            </div>
+          </article>
+
+          <article id="panel-report" class="panel rail-panel" hidden>
+            <div class="section-head">
+              <h2>Report</h2>
+              <span class="badge">closeout</span>
+            </div>
+            <div id="report-pane" class="assistant-copy">
+              Select a target, fold, or proposal to build a bounded report view from the current substrate.
+            </div>
+          </article>
+        </aside>
+      </section>
+    </main>
+    <script src="/ui/static/app.js?v=20260319d"></script>
+  </body>
+</html>

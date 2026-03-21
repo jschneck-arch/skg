@@ -15,6 +15,14 @@ log = logging.getLogger("skg.sensors")
 # ── Sensor registry ──────────────────────────────────────────────────────────
 
 _SENSOR_REGISTRY: dict[str, type] = {}
+_TOOLCHAIN_ALIASES = {
+    "aprs": "skg-aprs-toolchain",
+    "container_escape": "skg-container-escape-toolchain",
+    "ad_lateral": "skg-ad-lateral-toolchain",
+    "host": "skg-host-toolchain",
+    "web": "skg-web-toolchain",
+    "data": "skg-data-toolchain",
+}
 
 
 def register(name: str):
@@ -31,6 +39,10 @@ def available_sensors() -> list[str]:
 
 def _safe_condition_id(wicket_id: str | None = None, node_id: str | None = None) -> str:
     return node_id or wicket_id or ""
+
+
+def _canonical_toolchain_name(toolchain: str) -> str:
+    return _TOOLCHAIN_ALIASES.get(toolchain, toolchain)
 
 
 # ── Envelope factory ─────────────────────────────────────────────────────────
@@ -92,7 +104,7 @@ def envelope(
         "type": event_type,
         "source": {
             "source_id": source_id,
-            "toolchain": toolchain,
+            "toolchain": _canonical_toolchain_name(toolchain),
             "version": version,
         },
         "payload": payload,
@@ -109,6 +121,7 @@ def precondition_payload(
     domain: str = "",
     workload_id: str = "",
     realized: bool | None = None,
+    status: str | None = None,
     detail: str = "",
     attack_path_id: str = "",
     node_id: str | None = None,
@@ -122,6 +135,14 @@ def precondition_payload(
     """
     condition_id = _safe_condition_id(wicket_id=wicket_id, node_id=node_id)
 
+    if status is None:
+        if realized is True:
+            status = "realized"
+        elif realized is False:
+            status = "blocked"
+        else:
+            status = "unknown"
+
     return {
         "wicket_id": condition_id,
         "node_id": condition_id,
@@ -129,6 +150,7 @@ def precondition_payload(
         "domain": domain,
         "workload_id": workload_id,
         "realized": realized,
+        "status": status,
         "detail": detail,
         "attack_path_id": attack_path_id,
     }

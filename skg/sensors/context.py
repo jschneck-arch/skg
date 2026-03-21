@@ -85,6 +85,7 @@ class SensorContext:
                     evidence_text=evidence_text,
                     wicket_id=condition_id,
                     domain=domain,
+                    workload_id=workload_id,
                     k=k,
                 )
             except Exception as exc:

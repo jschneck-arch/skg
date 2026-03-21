@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import urllib.request
 import urllib.error
@@ -42,6 +43,7 @@ from typing import Any
 log = logging.getLogger("skg.resonance.ollama")
 
 DEFAULT_URL   = "http://localhost:11434"
+DEFAULT_TEMPERATURE = 0.1
 MODEL_PREFS   = ["tinyllama:latest", "tinyllama", "tinydolphin:latest", "tinydolphin",
                  "phi3:mini", "phi3", "llama3.2:3b", "llama3.2", "mistral:7b", "mistral"]
 
@@ -132,10 +134,50 @@ class OllamaBackend:
     """Local Ollama model backend for catalog drafting."""
 
     def __init__(self, url: str = DEFAULT_URL, model: str | None = None,
-                 temperature: float = 0.1):
-        self.url         = url.rstrip("/")
-        self._model      = model or OllamaBackend.load_model_override()
-        self.temperature = temperature
+                 temperature: float = DEFAULT_TEMPERATURE):
+        cfg = OllamaBackend.load_config()
+        cfg_url = cfg.get("url") or url
+        cfg_model = cfg.get("model")
+        cfg_temp = cfg.get("temperature", temperature)
+
+        env_url = os.getenv("SKG_OLLAMA_URL")
+        env_model = os.getenv("SKG_OLLAMA_MODEL")
+        env_temp = os.getenv("SKG_OLLAMA_TEMPERATURE")
+
+        self.url = (env_url or cfg_url or DEFAULT_URL).rstrip("/")
+        self._model = (
+            model
+            or OllamaBackend.load_model_override()
+            or env_model
+            or cfg_model
+        )
+        self.temperature = float(env_temp) if env_temp else float(cfg_temp)
+
+    @staticmethod
+    def load_config() -> dict[str, Any]:
+        """Load resonance.ollama config from SKG config if available."""
+        try:
+            import yaml
+            from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME
+
+            candidates = [
+                SKG_CONFIG_DIR / "skg_config.yaml",
+                SKG_HOME / "config" / "skg_config.yaml",
+            ]
+            for cfg_path in candidates:
+                if not cfg_path.exists():
+                    continue
+                data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                resonance = data.get("resonance", {}) or {}
+                ollama = resonance.get("ollama", {}) or {}
+                if isinstance(ollama, dict):
+                    return ollama
+            return {}
+        except ImportError:
+            log.warning("PyYAML is not installed; Ollama config file loading is unavailable")
+            return {}
+        except Exception:
+            return {}
 
     def available(self) -> bool:
         """Check if Ollama is running."""
@@ -173,7 +215,10 @@ class OllamaBackend:
         self._model = available[0]
         return self._model
 
-    def generate(self, prompt: str, model: str | None = None) -> str:
+    def generate(self,
+                 prompt: str,
+                 model: str | None = None,
+                 num_predict: int = 2048) -> str:
         """Send a generation request to Ollama. Returns raw text response."""
         m = model or self.model()
         if not m:
@@ -185,7 +230,7 @@ class OllamaBackend:
             "stream": False,
             "options": {
                 "temperature": self.temperature,
-                "num_predict": 2048,
+                "num_predict": int(num_predict),
                 "stop": ["```\n", "\n\nHuman:", "\n\nUser:"],
             },
         }).encode()
@@ -304,4 +349,5 @@ class OllamaBackend:
             "models":         models,
             "selected_model": selected,
             "temperature":    self.temperature,
+            "configured_model": self._model,
         }

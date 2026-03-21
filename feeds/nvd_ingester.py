@@ -96,6 +96,22 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def load_nvd_api_key() -> str:
+    api_key = os.environ.get("NIST_NVD_API_KEY", "")
+    if api_key:
+        return api_key
+
+    env_file = Path("/etc/skg/skg.env")
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("NIST_NVD_API_KEY="):
+                api_key = line.split("=", 1)[1].strip()
+                if api_key:
+                    os.environ["NIST_NVD_API_KEY"] = api_key
+                    return api_key
+    return ""
+
+
 # ── NVD API client ───────────────────────────────────────────────────────
 
 def nvd_query(params: dict, api_key: str = None) -> dict:
@@ -490,10 +506,11 @@ def main():
                         help="Output directory (for --surface mode)")
     args = parser.parse_args()
 
-    api_key = os.environ.get("NIST_NVD_API_KEY", "")
+    api_key = load_nvd_api_key()
     if not api_key:
         print("[!] Set NIST_NVD_API_KEY environment variable for NVD access")
         print("    export NIST_NVD_API_KEY=your_key_here")
+        print("    or add NIST_NVD_API_KEY=<key> to /etc/skg/skg.env")
         sys.exit(1)
 
     if args.service:

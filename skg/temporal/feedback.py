@@ -55,6 +55,13 @@ def _extract_workload_run(filename: str) -> tuple[str, str]:
     return stem, "unknown"
 
 
+def _extract_target_hint(text: str) -> str:
+    for tok in str(text or "").replace("[", " ").replace("]", " ").replace(",", " ").split():
+        if tok.count(".") == 3:
+            return tok.split(":")[0]
+    return ""
+
+
 def _transition_subject_id(t: WicketTransition) -> str:
     """
     Backward-compatible alias:
@@ -251,6 +258,7 @@ class FeedbackIngester:
             return
 
         lines = self.obs.pending_path.read_text(errors="replace").splitlines()
+        workload_target = _extract_target_hint(workload_id)
         for line in lines:
             if not line.strip():
                 continue
@@ -260,7 +268,15 @@ class FeedbackIngester:
                 rec = ObservationRecord.from_dict(json.loads(line))
                 rec_subject_id = getattr(rec, "node_id", getattr(rec, "wicket_id", ""))
 
-                if rec.workload_id == workload_id and rec_subject_id in outcomes:
+                same_workload = rec.workload_id == workload_id
+                same_target = False
+                if workload_target:
+                    same_target = (
+                        workload_target in str(rec.workload_id)
+                        or workload_target in str(rec.evidence_text)
+                    )
+
+                if (same_workload or same_target) and rec.domain == domain and rec_subject_id in outcomes:
                     self.obs.record_outcome(rec.record_id, outcomes[rec_subject_id])
             except Exception:
                 pass

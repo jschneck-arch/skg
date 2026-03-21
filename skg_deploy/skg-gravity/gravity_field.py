@@ -41,11 +41,12 @@ import math
 import glob
 import re
 import subprocess
+import importlib.util
 from pathlib import Path
 
 import sys
 sys.path.insert(0, "/opt/skg")
-from skg.forge.proposals import create_action
+from skg.forge.proposals import create_action, interactive_review
 from datetime import datetime, timezone
 from typing import Optional
 from collections import defaultdict
@@ -60,6 +61,16 @@ EVENTS_DIR = Path("/var/lib/skg/events")
 
 if WEB_ADAPTER.exists():
     sys.path.insert(0, str(WEB_ADAPTER))
+
+
+def _load_module_from_file(module_name: str, file_path: Path):
+    """Load a module by explicit file path to avoid sys.modules name collisions."""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load module from {file_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def iso_now() -> str:
@@ -87,8 +98,10 @@ class Instrument:
     def failed_to_reduce(self, ip: str) -> bool:
         """Did this instrument fail to reduce entropy on this target?"""
         history = self.entropy_history.get(ip, [])
-        if len(history) >= 2:
-            return history[-1] >= history[-2]  # Entropy didn't decrease
+        if history and history[-1] >= 500:
+            return True
+        if len(history) >= 3:
+            return history[-1] >= history[-2] >= history[-3]
         return False
 
 
@@ -789,6 +802,23 @@ def _exec_metasploit(ip, target, run_id, out_dir, result):
     print(f"    [MSF] RC script written: {rc_file}")
     print(f"    [MSF] Proposal queued: {proposal['id']}")
     print(f"    [MSF] Trigger after approval: skg proposals trigger {proposal['id']}")
+    review = interactive_review(proposal["id"])
+    if review.get("decision") == "approved":
+        print(f"    [MSF] Approved interactively: {proposal['id']}")
+    elif review.get("decision") == "rejected":
+        print(f"    [MSF] Rejected interactively: {proposal['id']}")
+        result["success"] = True
+        result["action"] = "reviewed"
+        result["proposal_id"] = proposal["id"]
+        result["suggestion"] = "rejected"
+        return result
+    elif review.get("decision") == "deferred":
+        print(f"    [MSF] Deferred interactively: {proposal['id']}")
+        result["success"] = True
+        result["action"] = "reviewed"
+        result["proposal_id"] = proposal["id"]
+        result["suggestion"] = "deferred"
+        return result
 
     result["success"] = True
     result["action"] = "operator"
@@ -1236,11 +1266,12 @@ def _exec_binary_analysis(ip, target, run_id, out_dir, result):
 
 def _exec_iot_firmware(ip, target, run_id, out_dir, result):
     """Run the IoT firmware probe against ip (live) or a local firmware image."""
-    import sys as _sys
-    _sys.path.insert(0, "/opt/skg/skg-iot_firmware-toolchain/adapters/firmware_probe")
+    probe_path = Path("/opt/skg/skg-iot_firmware-toolchain/adapters/firmware_probe/probe.py")
     try:
-        from probe import probe_device, probe_from_image
-    except ImportError:
+        firmware_probe = _load_module_from_file("skg_iot_firmware_probe", probe_path)
+        probe_device = firmware_probe.probe_device
+        probe_from_image = firmware_probe.probe_from_image
+    except Exception:
         result["error"] = "firmware_probe adapter not found at /opt/skg"
         return result
 
@@ -2052,10 +2083,9 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                 best_inst.entropy_history.setdefault(ip, []).append(E_after)
             else:
                 print(f"    ○ No entropy change (E={E_after:.2f})")
-                # Genuine failure to reduce entropy — record double entry
-                # so failed_to_reduce() fires and gravity shifts instruments
+                # Record a single no-op outcome. Repeated stagnation across
+                # cycles triggers failed_to_reduce(), not one flat attempt.
                 best_inst.entropy_history.setdefault(ip, []).append(E_after)
-                best_inst.entropy_history[ip].append(E_after)
 
         else:
             error = result.get("error", "unknown")

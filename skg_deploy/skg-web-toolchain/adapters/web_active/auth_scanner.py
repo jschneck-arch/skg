@@ -517,6 +517,17 @@ def auth_scan(target: str, out_path: str, attack_path_id: str,
     print(f"[SKG-AUTH] Run-ID:  {rid[:8]}")
     print()
 
+    # Fail fast if the target itself is unreachable. Without this,
+    # --try-defaults multiplies one dead host into many per-credential timeouts.
+    base_probe = transport.request("GET", target)
+    if base_probe.error:
+        print(f"[!] Target unreachable. Aborting auth scan: {base_probe.error}")
+        emit(out, "WB-08", "unknown", 1, "runtime",
+             target, 0.2,
+             attack_path_id, rid, wid,
+             {"detail": f"Authenticated scan aborted — target unreachable: {base_probe.error}"})
+        return
+
     # Find login path if not specified
     if not login_path:
         # Try common login paths

@@ -59,13 +59,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 log = logging.getLogger("skg.kernel.folds")
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def stable_fold_id(fold_type: str, location: str, constraint_source: str) -> str:
+    """Generate a stable ID for the same logical fold across cycles."""
+    key = f"{fold_type}|{location}|{constraint_source}"
+    return str(uuid5(NAMESPACE_URL, key))
 
 
 @dataclass(slots=True)
@@ -90,7 +96,15 @@ class Fold:
     discovery_probability: float = 0.5
     detail:                str   = ""
     created_time:          datetime = field(default_factory=utcnow)
-    id:                    str   = field(default_factory=lambda: str(uuid4()))
+    id:                    str   = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = stable_fold_id(
+                self.fold_type,
+                self.location,
+                self.constraint_source,
+            )
 
     def gravity_weight(self) -> float:
         """
@@ -200,10 +214,16 @@ class FoldManager:
     def resolve(self, fold_id: str) -> bool:
         """Remove a fold by ID. Returns True if found and removed."""
         before = len(self._folds)
-        self._folds = [f for f in self._folds if f.id != fold_id]
+        matches = [f.id for f in self._folds if f.id == fold_id or f.id.startswith(fold_id)]
+        if len(matches) > 1 and fold_id not in matches:
+            return False
+        target_id = fold_id if fold_id in matches else (matches[0] if matches else None)
+        if not target_id:
+            return False
+        self._folds = [f for f in self._folds if f.id != target_id]
         resolved = len(self._folds) < before
         if resolved:
-            log.debug(f"[fold] resolved {fold_id}")
+            log.debug(f"[fold] resolved {target_id}")
         return resolved
 
     def resolve_by_location(self, location: str) -> int:
@@ -256,7 +276,9 @@ class FoldManager:
                     constraint_source=d["constraint_source"],
                     discovery_probability=float(d.get("discovery_probability", 0.5)),
                     detail=d.get("detail", ""),
-                    id=d.get("id", str(uuid4())),
+                    id=d.get("id") or stable_fold_id(
+                        d["fold_type"], d["location"], d["constraint_source"]
+                    ),
                 ))
         except Exception as exc:
             log.warning(f"FoldManager.load failed: {exc}")

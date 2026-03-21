@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import uuid
+import base64
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -252,6 +253,22 @@ class Neo4jClient:
         self.user = user
         self.password = password
         self._driver = None
+        self._http_endpoint: str | None = None
+
+    def _http_url(self) -> str:
+        if self._http_endpoint:
+            return self._http_endpoint
+        url = self.url
+        if url.startswith("bolt://"):
+            url = "http://" + url[len("bolt://"):]
+        elif url.startswith("neo4j://"):
+            url = "http://" + url[len("neo4j://"):]
+        elif not url.startswith(("http://", "https://")):
+            url = f"http://{url}"
+        if url.startswith(("http://", "https://")) and ":7687" in url:
+            url = url.replace(":7687", ":7474", 1)
+        self._http_endpoint = url.rstrip("/") + "/db/neo4j/tx/commit"
+        return self._http_endpoint
 
     def _connect(self):
         if self._driver:
@@ -262,13 +279,44 @@ class Neo4jClient:
                 self.url, auth=(self.user, self.password)
             )
         except ImportError:
-            raise RuntimeError("neo4j driver not installed: pip install neo4j")
+            self._driver = None
 
     def query(self, cypher: str) -> list[dict]:
         self._connect()
-        with self._driver.session() as session:
-            result = session.run(cypher)
-            return [dict(record) for record in result]
+        if self._driver:
+            with self._driver.session() as session:
+                result = session.run(cypher)
+                return [dict(record) for record in result]
+        return self._query_http(cypher)
+
+    def _query_http(self, cypher: str) -> list[dict]:
+        import urllib.request
+
+        payload = json.dumps({
+            "statements": [{"statement": cypher, "resultDataContents": ["row"]}]
+        }).encode()
+        auth = base64.b64encode(f"{self.user}:{self.password}".encode()).decode()
+        req = urllib.request.Request(
+            self._http_url(),
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Basic {auth}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read())
+        errors = data.get("errors") or []
+        if errors:
+            raise RuntimeError(f"neo4j HTTP query failed: {errors[0].get('message', errors[0])}")
+        results = []
+        for stmt in data.get("results", []):
+            columns = stmt.get("columns", [])
+            for row in stmt.get("data", []):
+                values = row.get("row", [])
+                results.append(dict(zip(columns, values)))
+        return results
 
     def close(self):
         if self._driver:

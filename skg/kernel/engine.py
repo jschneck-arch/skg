@@ -139,6 +139,20 @@ class KernelStateEngine:
             )
             detail = best.payload.get("detail", "") if best else ""
             ts = best.event_time.isoformat() if best else now.isoformat()
+            unresolved_reason = "unmeasured"
+            if contrib.contradiction > 0.0:
+                unresolved_reason = "conflicted"
+            elif contrib.decoherence > 0.0 and contrib.unresolved > 0.0:
+                unresolved_reason = "decohered"
+            elif contrib.unresolved > 0.0 and contrib.realized == 0.0 and contrib.blocked == 0.0:
+                unresolved_reason = "inconclusive"
+            elif contrib.realized > 0.0 or contrib.blocked > 0.0:
+                unresolved_reason = "insufficient_support"
+            if contrib.compatibility_span <= 1 and contrib.unresolved > 0.0:
+                unresolved_reason = "single_basis"
+            if any(bool(o.payload.get("is_latent", False)) for o in wk_obs):
+                unresolved_reason = "latent"
+            local_energy = contrib.unresolved + contrib.contradiction + contrib.decoherence
 
             result[wicket_id] = {
                 "status": state.value,
@@ -147,6 +161,13 @@ class KernelStateEngine:
                 # Include support values for FeedbackIngester and paper metrics
                 "phi_r": contrib.realized,
                 "phi_b": contrib.blocked,
+                "phi_u": contrib.unresolved,
+                "contradiction": contrib.contradiction,
+                "decoherence": contrib.decoherence,
+                "compatibility_score": contrib.compatibility_score,
+                "compatibility_span": contrib.compatibility_span,
+                "local_energy": local_energy,
+                "unresolved_reason": unresolved_reason,
             }
 
         return result
@@ -165,13 +186,23 @@ class KernelStateEngine:
         if not applicable_wickets:
             return 0.0
 
-        states = self.states(target_ip)
+        states = self.states_with_detail(target_ip)
         node_states = []
         for wid in applicable_wickets:
-            state = states.get(wid, TriState.UNKNOWN)
+            state = states.get(
+                wid,
+                {
+                    "status": TriState.UNKNOWN.value,
+                    "phi_u": 1.0,
+                    "decoherence": 0.0,
+                    "compatibility_score": 0.0,
+                    "compatibility_span": 0,
+                    "unresolved_reason": "unmeasured",
+                },
+            )
             node_states.append(state)
 
-        return self._energy.compute(node_states, folds or [])
+        return self._energy.compute_weighted(node_states, folds or [])
 
     def instrument_potential(
         self,
@@ -195,21 +226,30 @@ class KernelStateEngine:
         if not applicable_wickets:
             return 0.0
 
-        states = self.states(target_ip)
+        states = self.states_with_detail(target_ip)
 
         # Unknowns in instrument wavelength that are also applicable
         wave_applicable = set(instrument_wavelength) & applicable_wickets
-        unknowns_in_reach = sum(
-            1 for wid in wave_applicable
-            if states.get(wid, TriState.UNKNOWN) == TriState.UNKNOWN
-        )
+        unresolved_in_reach = 0.0
+        for wid in wave_applicable:
+            item = states.get(
+                wid,
+                {"status": TriState.UNKNOWN.value, "phi_u": 1.0, "decoherence": 0.0, "compatibility_score": 0.0},
+            )
+            if item.get("status", TriState.UNKNOWN.value) != TriState.UNKNOWN.value:
+                continue
+            unresolved_in_reach += max(
+                float(item.get("phi_u", 0.0) or 0.0),
+                float(item.get("local_energy", 0.0) or 0.0),
+                1.0,
+            ) + float(item.get("contradiction", 0.0) or 0.0) + float(item.get("decoherence", 0.0) or 0.0)
 
-        if unknowns_in_reach == 0:
+        if unresolved_in_reach <= 0.0:
             return 0.0
 
         # Build proposal for GravityScheduler
         proposal = {
-            "expected_energy_reduction": float(unknowns_in_reach),
+            "expected_energy_reduction": float(unresolved_in_reach),
             "cost": max(instrument_cost, 1e-9),
             "failure_penalty": failure_penalty,
             "requires_operator_approval": False,
@@ -225,16 +265,25 @@ class KernelStateEngine:
                           "CE-01", "CE-02", "CE-03"}
             realized_preconditions = [
                 wid for wid in wave_applicable
-                if states.get(wid) == TriState.REALIZED
+                if states.get(wid, {}).get("status") == TriState.REALIZED.value
             ]
             high_value_confirmed = [w for w in realized_preconditions if w in HIGH_VALUE]
             if high_value_confirmed:
                 # Expected E reduction = all remaining unknowns in applicable set
                 # (exploit success collapses the entire target's information deficit)
-                all_unknowns = sum(
-                    1 for wid in applicable_wickets
-                    if states.get(wid, TriState.UNKNOWN) == TriState.UNKNOWN
-                )
+                all_unknowns = 0.0
+                for wid in applicable_wickets:
+                    item = states.get(
+                        wid,
+                        {"status": TriState.UNKNOWN.value, "phi_u": 1.0, "decoherence": 0.0, "compatibility_score": 0.0},
+                    )
+                    if item.get("status", TriState.UNKNOWN.value) != TriState.UNKNOWN.value:
+                        continue
+                    all_unknowns += max(
+                        float(item.get("phi_u", 0.0) or 0.0),
+                        float(item.get("local_energy", 0.0) or 0.0),
+                        1.0,
+                    ) + float(item.get("contradiction", 0.0) or 0.0) + float(item.get("decoherence", 0.0) or 0.0)
                 proposal["expected_energy_reduction"] = float(max(
                     all_unknowns, proposal["expected_energy_reduction"]
                 ))

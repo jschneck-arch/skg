@@ -69,7 +69,16 @@ def validate(tc_dir: Path) -> dict:
     cov = _check_coverage(tc_dir)
     result["checks"]["coverage"] = cov
 
-    result["passed"] = struct["passed"] and imp["passed"] and synth["passed"]
+    # --- Stub detection ---
+    stub = _check_stub_quality(tc_dir)
+    result["checks"]["stub_quality"] = stub
+
+    result["passed"] = (
+        struct["passed"]
+        and imp["passed"]
+        and synth["passed"]
+        and stub["passed"]
+    )
     return result
 
 
@@ -311,6 +320,53 @@ def _check_coverage(tc_dir: Path) -> dict:
         "passed": True,  # Coverage is a warning, not a blocker
         "warnings": warnings,
         "missing_checks": missing,
+    }
+
+
+def _check_stub_quality(tc_dir: Path) -> dict:
+    """
+    Reject staged toolchains that are obviously scaffold-only.
+
+    A generated toolchain should not pass as production-ready if the adapter
+    still contains TODO markers or hard-coded "unknown" placeholders where
+    real evaluation logic is expected.
+    """
+    errors = []
+    warnings = []
+
+    suspicious_markers = (
+        "TODO: parse collection data",
+        "TODO parse collection data",
+        "TODO",
+        "FIXME",
+        "pass  # TODO",
+        "status = \"unknown\"",
+        "status='unknown'",
+        "return \"unknown\"",
+        "return 'unknown'",
+    )
+
+    for path in list(tc_dir.glob("adapters/*/*.py")) + list(tc_dir.glob("projections/*/*.py")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            warnings.append(f"Could not inspect {path.relative_to(tc_dir)}: {exc}")
+            continue
+
+        hits = [marker for marker in suspicious_markers if marker in text]
+        if not hits:
+            continue
+
+        rel = path.relative_to(tc_dir)
+        if any(marker.startswith("TODO") or marker.startswith("FIXME") for marker in hits):
+            errors.append(f"{rel}: scaffold markers present ({', '.join(sorted(set(hits)))})")
+        else:
+            warnings.append(f"{rel}: placeholder unknown logic present ({', '.join(sorted(set(hits)))})")
+
+    return {
+        "passed": len(errors) == 0,
+        "errors": errors,
+        "warnings": warnings,
     }
 
 

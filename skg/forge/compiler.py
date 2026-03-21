@@ -215,16 +215,22 @@ def parse_cve(vuln: dict) -> dict | None:
     descs = cve.get("descriptions", [])
     desc  = next((d["value"] for d in descs if d.get("lang") == "en"), "")
 
-    # CVSS v3 metrics
+    # Match the live NVD feed path: prefer CVSS v3, then fall back to v2.
     metrics = cve.get("metrics", {})
-    cvss3   = (metrics.get("cvssMetricV31", [{}]) or
-               metrics.get("cvssMetricV30", [{}]))[0]
-    cvss_data = cvss3.get("cvssData", {})
-    av  = cvss_data.get("attackVector", "NETWORK")
+    metric = {}
+    cvss_data = {}
+    for version_key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        metric_list = metrics.get(version_key, [])
+        if metric_list:
+            metric = metric_list[0] or {}
+            cvss_data = metric.get("cvssData", {}) or {}
+            break
+
+    av  = cvss_data.get("attackVector", cvss_data.get("accessVector", "NETWORK"))
     pr  = cvss_data.get("privilegesRequired", "NONE")
     ui  = cvss_data.get("userInteraction", "NONE")
     sco = cvss_data.get("baseScore", 0.0)
-    sev = cvss_data.get("baseSeverity", "")
+    sev = metric.get("baseSeverity", cvss_data.get("baseSeverity", ""))
 
     # CWE
     cwes = []

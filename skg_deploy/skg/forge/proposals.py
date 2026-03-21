@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import sys
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -451,3 +453,46 @@ def trigger_action(proposal_id: str) -> dict:
 
     log.info(f"[proposals] triggered field_action: {proposal_id}")
     return proposal
+
+
+def interactive_review(proposal_id: str,
+                       defer_days: int = DEFAULT_DEFER_DAYS) -> dict:
+    """
+    Prompt the operator in real time when running on an interactive TTY.
+    Field-action proposals map "approve" -> trigger.
+    Toolchain-generation proposals map "approve" -> accept.
+    """
+    if os.environ.get("SKG_INTERACTIVE_PROPOSALS", "1").lower() in {"0", "false", "no"}:
+        return {"interactive": False, "decision": "disabled"}
+    if not sys.stdin.isatty():
+        return {"interactive": False, "decision": "non_interactive"}
+
+    proposal = get(proposal_id)
+    if not proposal:
+        return {"interactive": True, "decision": "missing", "error": f"Proposal not found: {proposal_id}"}
+
+    kind = proposal.get("proposal_kind", "field_action")
+    approve_action = "trigger" if kind == "field_action" else "accept"
+    print(f"    [REVIEW] {proposal['id']} [{kind}] {proposal.get('description', '')[:80]}")
+    print(f"    [REVIEW] [a]pprove/{approve_action}  [r]eject  [d]efer  [s]kip")
+
+    while True:
+        try:
+            choice = input("    [REVIEW] Decision: ").strip().lower()
+        except EOFError:
+            return {"interactive": True, "decision": "skipped"}
+        if choice in {"", "s", "skip"}:
+            return {"interactive": True, "decision": "skipped"}
+        if choice in {"a", "approve", "accept", "trigger"}:
+            if kind == "field_action":
+                triggered = trigger_action(proposal["id"])
+                return {"interactive": True, "decision": "approved", "proposal": triggered}
+            accepted = accept(proposal["id"])
+            return {"interactive": True, "decision": "approved", "result": accepted}
+        if choice in {"r", "reject"}:
+            rejected = reject(proposal["id"], reason="interactive_review")
+            return {"interactive": True, "decision": "rejected", "result": rejected}
+        if choice in {"d", "defer"}:
+            deferred = defer(proposal["id"], days=defer_days)
+            return {"interactive": True, "decision": "deferred", "result": deferred}
+        print("    [REVIEW] Enter a, r, d, or s.")
