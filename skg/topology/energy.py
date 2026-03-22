@@ -370,6 +370,16 @@ class FieldTopology:
 
 @dataclass
 class Fiber:
+    """
+    Paper 4 Section 2.4: Field Fiber F = (m, Λ, ρ, τ, coherence, tension)
+
+    m         → anchor       : anchor identity
+    Λ         → sphere       : domain participation (single domain; cluster aggregates multi-domain)
+    ρ         → rho          : structural role label (initial_access, lateral, privilege_esc, exfil, persistence)
+    τ         → tau_start/end: temporal extent
+    coherence               : stability = 1 − mean_decoherence
+    tension                 : unresolved pull = U_m averaged over locals
+    """
     fiber_id: str
     sphere: str
     kind: str
@@ -377,6 +387,10 @@ class Fiber:
     members: list[str]
     coherence: float
     tension: float
+    # Paper 4 canonical additions (backward-compatible defaults)
+    rho: str = ""                       # structural role label ρ
+    tau_start: Optional[datetime] = None  # temporal extent start τ
+    tau_end: Optional[datetime] = None    # temporal extent end τ
 
     def as_dict(self) -> dict:
         return {
@@ -387,11 +401,19 @@ class Fiber:
             "members": list(self.members),
             "coherence": round(self.coherence, 6),
             "tension": round(self.tension, 6),
+            "rho": self.rho,
+            "tau_start": self.tau_start.isoformat() if self.tau_start else None,
+            "tau_end": self.tau_end.isoformat() if self.tau_end else None,
         }
 
 
 @dataclass
 class FiberCluster:
+    """
+    Paper 4 Section 2.5: Field Cluster C — bundle of related fibers for one anchor identity.
+
+    G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + coupling terms
+    """
     cluster_id: str
     anchor: str
     spheres: list[str]
@@ -400,6 +422,46 @@ class FiberCluster:
     total_coherence: float
     total_tension: float
     fibers: list[Fiber]
+
+    # Paper 4 inter-local coupling constants K(L_i, L_j) — Section 3.2
+    _COUPLING_K: dict[tuple[str, str], float] = field(default_factory=lambda: {
+        ("host", "host"):           0.80,  # reachability → smb (L_reachable → L_smb)
+        ("host", "web"):            0.75,
+        ("web", "host"):            0.65,
+        ("credential", "host"):     0.95,  # cred → ssh (K_cred_ssh)
+        ("credential", "ssh"):      0.95,
+        ("web", "data"):            0.85,  # sqli → db (K_web_sqli_db)
+        ("host", "data"):           0.70,
+        ("container", "host"):      0.85,  # container-to-host escape
+        ("host", "container"):      0.60,
+        ("host", "lateral"):        0.80,  # domain-to-lateral
+        ("lateral", "host"):        0.70,
+        ("data", "lateral"):        0.65,
+    })
+
+    def G_cluster(self) -> float:
+        """
+        Paper 4 Eq: G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + coupling terms.
+
+        Primary term: weighted tension-coherence product per fiber.
+        Coupling term: cross-domain fiber pairs contribute K(sphere_i, sphere_j)
+                       × coherence(F_i) × coherence(F_j) bonus.
+        """
+        # Primary: Σ_i tension(F_i) × coherence(F_i)
+        g = sum(f.tension * f.coherence for f in self.fibers)
+
+        # Coupling: cross-domain fiber pairs
+        for i, fi in enumerate(self.fibers):
+            for fj in self.fibers[i + 1:]:
+                if fi.sphere == fj.sphere:
+                    continue
+                k = self._COUPLING_K.get(
+                    (fi.sphere, fj.sphere),
+                    self._COUPLING_K.get((fj.sphere, fi.sphere), 0.10),
+                )
+                g += k * fi.coherence * fj.coherence
+
+        return g
 
     def as_dict(self) -> dict:
         return {
@@ -410,6 +472,7 @@ class FiberCluster:
             "member_count": int(self.member_count),
             "total_coherence": round(self.total_coherence, 6),
             "total_tension": round(self.total_tension, 6),
+            "G_cluster": round(self.G_cluster(), 6),
             "fibers": [f.as_dict() for f in self.fibers],
         }
 

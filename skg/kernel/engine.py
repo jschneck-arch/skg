@@ -40,6 +40,33 @@ from ..substrate.node import TriState
 
 log = logging.getLogger("skg.kernel.engine")
 
+# Wicket-prefix to domain mapping for _infer_domain_wickets()
+_WICKET_PREFIX_DOMAIN: Dict[str, str] = {
+    "WB-": "web",
+    "HO-": "host",
+    "DA-": "data",
+    "CE-": "container",
+    "LA-": "lateral",
+    "BI-": "binary",
+    "AI-": "ai_target",
+    "SC-": "supply_chain",
+    "IO-": "iot_firmware",
+    "AP-": "aprs",
+}
+
+
+def _infer_domain_wickets(wicket_ids: Set[str]) -> Dict[str, Set[str]]:
+    """Infer {domain: {wicket_id}} from wicket ID prefixes when no catalog is available."""
+    result: Dict[str, Set[str]] = {}
+    for wid in wicket_ids:
+        domain = "unknown"
+        for prefix, d in _WICKET_PREFIX_DOMAIN.items():
+            if wid.startswith(prefix):
+                domain = d
+                break
+        result.setdefault(domain, set()).add(wid)
+    return result
+
 # Collapse thresholds — tuned for security telemetry.
 # A single high-confidence instrument observation (≥0.95) realizes immediately.
 # Two moderate observations (0.7 each = 1.4) also realize.
@@ -213,13 +240,18 @@ class KernelStateEngine:
         applicable_wickets: Set[str],
         folds: Optional[List[Fold]] = None,
         failure_penalty: float = 1.0,
+        domain_wickets: Optional[Dict] = None,
     ) -> float:
         """
         Compute expected energy reduction potential for an instrument on a target.
         Replaces entropy_reduction_potential().
 
-        potential = (unknowns_in_wavelength / cost) * failure_penalty
-                  + escalation_boost if high-value preconditions confirmed
+        Paper 4 Section 4: Φ_effective(I, t) combines:
+          1. Base potential (Work 3 flat-space limit): unknowns_in_wavelength / cost
+          2. Fiber-driven gravity Φ_fiber: three-term formula over FieldLocals
+          3. MSF escalation boost for high-value confirmed preconditions
+
+        Φ_effective = base + α × Φ_fiber   (α=0.35 balancing terms)
 
         Routes through GravityScheduler.rank() for formal correctness.
         """
@@ -247,9 +279,36 @@ class KernelStateEngine:
         if unresolved_in_reach <= 0.0:
             return 0.0
 
-        # Build proposal for GravityScheduler
+        # ── Paper 4 Section 4: Fiber-driven gravity Φ_fiber ─────────────────
+        # Build FieldLocals for this target and compute the three-term formula.
+        # Skip protected locals (Proposition 4: stable local minimum — no benefit
+        # from re-observing). This is the formal decoherence criterion in action.
+        phi_fiber_score = 0.0
+        try:
+            from .field_local import build_field_locals, phi_fiber as _phi_fiber
+            _domain_wickets = domain_wickets or {}
+            # Build applicable domain_wickets subset from applicable_wickets
+            if not _domain_wickets:
+                # Fallback: infer domain from wicket prefix
+                _domain_wickets = _infer_domain_wickets(applicable_wickets)
+            locals_ = build_field_locals(target_ip, states, _domain_wickets)
+            # Filter out fully protected locals — Proposition 4
+            active_locals = [loc for loc in locals_ if not loc.is_protected()]
+            if active_locals:
+                phi_fiber_score = _phi_fiber(
+                    instrument_wavelength=list(instrument_wavelength),
+                    instrument_cost=instrument_cost,
+                    locals_=active_locals,
+                )
+        except Exception:
+            phi_fiber_score = 0.0
+
+        # ── Build base proposal ──────────────────────────────────────────────
+        # α = 0.35: fiber-driven term supplements but does not dominate base potential
+        alpha = 0.35
+        combined_gain = unresolved_in_reach + alpha * phi_fiber_score
         proposal = {
-            "expected_energy_reduction": float(unresolved_in_reach),
+            "expected_energy_reduction": float(combined_gain),
             "cost": max(instrument_cost, 1e-9),
             "failure_penalty": failure_penalty,
             "requires_operator_approval": False,
@@ -296,3 +355,35 @@ class KernelStateEngine:
         cost = max(ranked[0].get("cost", instrument_cost), 1e-9)
         penalty = ranked[0].get("failure_penalty", 1.0)
         return (gain / cost) * penalty
+
+    def field_locals(
+        self,
+        target_ip: str,
+        domain_wickets: Optional[Dict] = None,
+    ):
+        """
+        Paper 4 Section 2.2: Build first-class FieldLocal objects for a target.
+
+        Returns List[FieldLocal] — one per domain with known wickets.
+        Exposed for UI, reporting, and field_functional() computation.
+        """
+        from .field_local import build_field_locals
+        states = self.states_with_detail(target_ip)
+        _domain_wickets = domain_wickets or _infer_domain_wickets(
+            set(states.keys())
+        )
+        return build_field_locals(target_ip, states, _domain_wickets)
+
+    def L_field_functional(
+        self,
+        target_ip: str,
+        domain_wickets: Optional[Dict] = None,
+    ) -> float:
+        """
+        Paper 4 Eq: L(F) = Σ_i E_self(L_i) + Σ_{i<j} E_couple(L_i, L_j) + D(F).
+
+        Returns the full unified field functional value for this target.
+        """
+        from .field_local import field_functional
+        locals_ = self.field_locals(target_ip, domain_wickets)
+        return field_functional(locals_)

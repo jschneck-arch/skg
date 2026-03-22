@@ -1,0 +1,66 @@
+SKG Work4 — Empirical Evidence Report
+Generated: 2026-03-22T16:34:57.558830+00:00
+============================================================
+
+A. Field Energy Landscape
+----------------------------------------
+Target: 172.17.0.2 (DVWA)
+Total wickets: 39
+
+Cycle  Instrument                   E     R     B     U
+    0  none                    41.495     0     0    39
+    1  http_collector          34.720     4     2    33
+    2  auth_scanner            31.720     7     2    30
+    3  ssh_sensor              20.000    16     3    20
+
+E reduction: 21.495 (51.8%) over 3 cycles
+Demonstrates: gravity directs collection toward high-entropy regions.
+
+B. Tri-state Projections
+----------------------------------------
+  Web initial access — DVWA (all confirmed)     realized          score=1.000  H¹=0
+  Host privesc — sudo BLOCKED (constraint satisfied)  not_realized      score=0.000  H¹=0
+  Container escape — partial observation        indeterminate     score=0.400  H¹=0
+  Web SQLi — circular dep (H¹ obstruction, β₁=1)  indeterminate_h1  score=0.000  H¹=1
+
+Demonstrates: all four classification states reachable.
+indeterminate_h1: mutual dependency cycle — structurally stuck.
+
+E. Data Domain — DP-* Detection
+----------------------------------------
+  clean                      Clean transaction data — all conditions realized
+    Expected blocked: []
+    Detected: [] (0/0)
+  null_injection             NULL in required field (amount) — DP-03 blocked
+    Expected blocked: ['DP-03']
+    Detected: ['DP-03'] (1/1)
+  bounds_violation           Out-of-bounds + invalid enum — DP-04 blocked
+    Expected blocked: ['DP-04']
+    Detected: ['DP-04'] (1/1)
+  stale                      Data 30h old, TTL=24h — DP-09 blocked
+    Expected blocked: ['DP-09']
+    Detected: ['DP-09'] (1/1)
+  integrity_failure          Orphaned FK + duplicate PK — DP-05 and DP-08 block
+    Expected blocked: ['DP-05', 'DP-08']
+    Detected: ['DP-05', 'DP-08'] (2/2)
+
+Overall detection rate: 100%
+Demonstrates: data pipeline domain applies same substrate.
+
+H. Mathematical Claims
+----------------------------------------
+  [VERIFIED] β₁ for 3-cycle (triangle): β₁=|E|−|V|+|C|=3−3+1
+  [VERIFIED] β₁ for 2-node mutual dep: β₁=|E|−|V|+|C|=1−2+1
+  [VERIFIED] Φ_structural(p=0.5): 1+p=1.5
+  [VERIFIED] Φ_projection(p=0.5): 0.5+0.5p=0.75
+  [VERIFIED] Φ_contextual(p=0.5): p=0.5
+  [VERIFIED] Φ_temporal(p=0.5): 0.7p=0.35
+  [VERIFIED] Φ_s≥Φ_p at p=0.5: 1.5≥0.75
+  [VERIFIED] Φ_p≥Φ_c at p=0.5: 0.75≥0.5
+  [VERIFIED] PRIOR_ALPHA: P_B=s×SW, α=1.0
+  [VERIFIED] same_host prior_influence at SW=1: s×α=1.0×1.0
+  [VERIFIED] same_subnet prior_influence: s×α=0.4×1.0
+  [VERIFIED] sin(φ_blocked−φ_realized)=0: sin(π−0)=0
+  [VERIFIED] sin(φ_unknown−φ_realized)=1: sin(π/2−0)=1
+
+All claims verified: True

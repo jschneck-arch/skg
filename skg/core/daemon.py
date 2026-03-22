@@ -737,6 +737,14 @@ def status():
     return base
 
 
+@app.post("/status/refresh")
+def status_refresh():
+    """Invalidate the field_state cache so the next /status call recomputes."""
+    _field_state_cache["ts"] = 0.0
+    _field_state_cache["data"] = {}
+    return {"ok": True, "message": "field_state cache cleared"}
+
+
 @app.get("/gravity/status")
 def gravity_status():
     """Current gravity field state — cycle count, entropy, last run timestamp."""
@@ -767,7 +775,38 @@ def gravity_run(target_ip: str, authorized: bool = False):
     return {"ok": True, "gravity_state": kernel.gravity_status(), "target_ip": target_ip}
 
 
+_field_state_cache: dict = {"ts": 0.0, "data": {}}
+_field_state_computing = threading.Event()
+_FIELD_STATE_TTL = 60.0  # seconds
+
+
+def _refresh_field_state_bg() -> None:
+    """Compute field state in a background thread and update the cache."""
+    if _field_state_computing.is_set():
+        return  # already running
+    _field_state_computing.set()
+    try:
+        result = _compute_field_state_inner()
+        import time as _t
+        _field_state_cache["ts"] = _t.monotonic()
+        _field_state_cache["data"] = result
+    except Exception:
+        pass
+    finally:
+        _field_state_computing.clear()
+
+
 def _compute_field_state() -> dict:
+    """Return cached field state, triggering a background refresh if stale."""
+    import time as _time
+    now = _time.monotonic()
+    if now - _field_state_cache["ts"] >= _FIELD_STATE_TTL:
+        t = threading.Thread(target=_refresh_field_state_bg, daemon=True)
+        t.start()
+    return _field_state_cache["data"]
+
+
+def _compute_field_state_inner() -> dict:
     """
     Compute field energy E per active attack path from latest interp files.
     Also loads persisted fold state from the gravity field engine and adds
@@ -1191,6 +1230,16 @@ def resonance_ollama_status():
         return backend.status()
     except Exception as e:
         return {"available": False, "error": str(e)}
+
+
+@app.get("/resonance/llm-pool/status")
+def resonance_llm_pool_status():
+    """Return LLM pool status: strategy, backends, availability."""
+    try:
+        from skg.resonance.llm_pool import get_pool
+        return get_pool().status()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/resonance/drafts")
@@ -2343,12 +2392,12 @@ def _assistant_cache_key(context: dict[str, Any]) -> str:
 
 
 def _assistant_ollama_background(context: dict[str, Any], model: str, num_predict: int) -> None:
-    """Run Ollama inference in a background thread and store result in cache."""
+    """Run LLM inference via pool in a background thread and store result in cache."""
     key = _assistant_cache_key(context)
     try:
-        from skg.resonance.ollama_backend import OllamaBackend
-        backend = OllamaBackend()
-        # Trim context to reduce prompt size for tinyllama
+        from skg.resonance.llm_pool import get_pool
+        pool = get_pool()
+        # Trim context to reduce prompt size for small models
         slim = {
             "kind": context.get("kind"),
             "identity_key": context.get("identity_key"),
@@ -2364,17 +2413,18 @@ def _assistant_ollama_background(context: dict[str, Any], model: str, num_predic
             },
         }
         prompt = _assistant_json_prompt(slim)
-        raw = backend.generate(prompt, model=model, num_predict=num_predict)
+        raw = pool.generate(prompt, num_predict=num_predict)
         payload = _assistant_parse_json(raw)
         if isinstance(payload, dict):
+            winner_model = pool.primary_model_name() or model
             with _OLLAMA_LOCK:
                 _OLLAMA_CACHE[key] = {
                     "result": payload,
-                    "model": model,
+                    "model": winner_model,
                     "computed_at": time.time(),
                 }
     except Exception as exc:
-        log.debug(f"[assistant] background Ollama error for {key}: {exc}")
+        log.debug(f"[assistant] background LLM pool error for {key}: {exc}")
     finally:
         with _OLLAMA_LOCK:
             _OLLAMA_INFLIGHT.discard(key)
@@ -2382,15 +2432,15 @@ def _assistant_ollama_background(context: dict[str, Any], model: str, num_predic
 
 def _assistant_try_ollama(context: dict[str, Any], timeout_s: float = 8.0) -> tuple[dict[str, Any] | None, str | None]:
     try:
-        from skg.resonance.ollama_backend import OllamaBackend
+        from skg.resonance.llm_pool import get_pool
     except Exception:
         return None, None
 
-    backend = OllamaBackend()
-    if not backend.available():
+    pool = get_pool()
+    if not pool.any_available():
         return None, None
 
-    model = backend.model()
+    model = pool.primary_model_name() or "llm"
     key = _assistant_cache_key(context)
     num_predict = int((context.get("assistant_config") or {}).get("num_predict") or 220)
 
@@ -2817,6 +2867,99 @@ def proposal_accept(proposal_id: str):
         raise HTTPException(500, f"Proposal accept error: {exc}")
 
 
+@app.post("/proposals/{proposal_id}/launch-terminal")
+def proposal_launch_terminal(proposal_id: str):
+    """
+    Spawn an xterm running msfconsole with the proposal's RC file.
+    Called by the UI after a field_action proposal is accepted.
+    Requires DISPLAY to be set (X11 session) or a compositor.
+    """
+    import subprocess, shutil, os
+    try:
+        from skg.forge.proposals import _proposal_path, ACCEPTED_DIR
+        p = _proposal_path(proposal_id)
+        if not p.exists():
+            # check accepted dir
+            p = ACCEPTED_DIR / f"{proposal_id}.json"
+        if not p.exists():
+            raise HTTPException(404, f"Proposal {proposal_id} not found")
+        import json as _json
+        proposal = _json.loads(p.read_text())
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(404, str(exc))
+
+    rc_file = (proposal.get("action") or {}).get("rc_file") or ""
+    if not rc_file or not Path(rc_file).exists():
+        raise HTTPException(400, f"No RC file for proposal {proposal_id}")
+
+    # Prefer konsole, then fallback to others
+    env = {**os.environ}
+    if "DISPLAY" not in env:
+        env["DISPLAY"] = ":0"
+    if "WAYLAND_DISPLAY" not in env:
+        env["WAYLAND_DISPLAY"] = "wayland-0"
+
+    for term, args in [
+        ("konsole",         ["konsole", "--new-tab", "-e", "msfconsole", "-q", "-r", rc_file]),
+        ("xterm",           ["xterm", "-title", f"SKG :: {proposal_id[:8]}", "-e",
+                             "msfconsole", "-q", "-r", rc_file]),
+        ("gnome-terminal",  ["gnome-terminal", "--", "msfconsole", "-q", "-r", rc_file]),
+        ("kitty",           ["kitty", "msfconsole", "-q", "-r", rc_file]),
+        ("alacritty",       ["alacritty", "-e", "msfconsole", "-q", "-r", rc_file]),
+    ]:
+        if shutil.which(term):
+            try:
+                subprocess.Popen(args, env=env, start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"ok": True, "terminal": term, "rc_file": rc_file}
+            except Exception:
+                continue
+
+    # Fallback: launch msfconsole in a detached background process (no GUI)
+    try:
+        subprocess.Popen(
+            ["msfconsole", "-q", "-r", rc_file],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return {"ok": True, "terminal": "background", "rc_file": rc_file,
+                "note": "No GUI terminal found — msfconsole launched in background"}
+    except Exception as e:
+        raise HTTPException(500, f"Could not launch terminal: {e}")
+
+
+@app.post("/proposals/{proposal_id}/reset")
+def proposal_reset(proposal_id: str):
+    """Reset an error/expired/executed proposal back to pending so it can be re-triggered."""
+    import json as _json
+    from skg.forge.proposals import _proposal_path, ACCEPTED_DIR
+    for search_dir in [Path("/var/lib/skg/proposals"), ACCEPTED_DIR]:
+        p = search_dir / f"{proposal_id}.json"
+        if not p.exists():
+            # prefix match
+            matches = list(search_dir.glob(f"{proposal_id}*.json")) if search_dir.exists() else []
+            p = matches[0] if matches else p
+        if p.exists():
+            try:
+                data = _json.loads(p.read_text())
+                old_status = data.get("status")
+                data["status"] = "pending"
+                data["generated_at"] = datetime.now(timezone.utc).isoformat()
+                data.pop("reviewed_at", None)
+                data.pop("triggered_at", None)
+                # Move back to proposals dir if in accepted
+                dest = Path("/var/lib/skg/proposals") / p.name
+                dest.write_text(_json.dumps(data, indent=2))
+                if str(p) != str(dest):
+                    p.unlink(missing_ok=True)
+                return {"ok": True, "reset": proposal_id, "from_status": old_status}
+            except Exception as exc:
+                raise HTTPException(500, str(exc))
+    raise HTTPException(404, f"Proposal {proposal_id} not found")
+
+
 @app.post("/proposals/{proposal_id}/defer")
 def proposal_defer(proposal_id: str, req: ProposalDeferRequest):
     try:
@@ -3196,6 +3339,8 @@ def run():
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
     kernel.boot()
+    # Pre-warm the field_state cache in background so /status is fast on first call
+    threading.Thread(target=_refresh_field_state_bg, daemon=True).start()
     log.info("API: 127.0.0.1:5055")
     uvicorn.run(app, host="127.0.0.1", port=5055, log_level="warning")
 

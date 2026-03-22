@@ -1,0 +1,48 @@
+{
+  "target": "172.17.0.2 (DVWA)",
+  "total_wickets": 39,
+  "energy_series": [
+    {
+      "cycle": 0,
+      "instrument": "none",
+      "E": 41.495,
+      "realized": 0,
+      "blocked": 0,
+      "unknown": 39,
+      "folds": 2,
+      "fold_weight": 2.495
+    },
+    {
+      "cycle": 1,
+      "instrument": "http_collector",
+      "E": 34.72,
+      "realized": 4,
+      "blocked": 2,
+      "unknown": 33,
+      "folds": 1,
+      "fold_weight": 1.72
+    },
+    {
+      "cycle": 2,
+      "instrument": "auth_scanner",
+      "E": 31.72,
+      "realized": 7,
+      "blocked": 2,
+      "unknown": 30,
+      "folds": 1,
+      "fold_weight": 1.72
+    },
+    {
+      "cycle": 3,
+      "instrument": "ssh_sensor",
+      "E": 20,
+      "realized": 16,
+      "blocked": 3,
+      "unknown": 20,
+      "folds": 0,
+      "fold_weight": 0.0
+    }
+  ],
+  "reduction_pct": 51.8,
+  "delta_E": 21.495
+}

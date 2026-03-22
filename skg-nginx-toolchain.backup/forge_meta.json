@@ -1,0 +1,14 @@
+{
+  "domain": "nginx",
+  "description": "Path traversal, SSRF via proxy_pass, header injection",
+  "attack_surface": "Path traversal, SSRF via proxy_pass, header injection",
+  "hosts": [
+    "web::192.168.254.254"
+  ],
+  "generated_at": "2026-03-14T23:24:22.405762+00:00",
+  "generation_backend": "template",
+  "errors": [
+    "Used template catalog \u2014 no generation backend available",
+    "Used template adapter \u2014 check collection commands"
+  ]
+}

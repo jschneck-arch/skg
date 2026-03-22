@@ -446,7 +446,7 @@ def accept(proposal_id: str) -> dict:
     proposal = get(proposal_id)
     if not proposal:
         raise ValueError(f"Proposal not found: {proposal_id}")
-    if proposal["status"] != "pending":
+    if proposal["status"] not in ("pending", "error_missing_rc"):
         raise ValueError(f"Proposal {proposal_id} is {proposal['status']}, not pending")
 
     if proposal.get("proposal_kind") == "catalog_growth":
@@ -498,6 +498,24 @@ def accept(proposal_id: str) -> dict:
             "proposal_kind": "field_action",
             "command_hint": dispatch.get("command_hint", ""),
             "rc_file": (proposal.get("action") or {}).get("rc_file", ""),
+        }
+
+    # Proposals created before proposal_kind was added may lack the field
+    # but still be field_action proposals (identified by having action.rc_file).
+    if (proposal.get("action") or {}).get("rc_file"):
+        proposal_key = proposal["id"]
+        proposal["status"] = "accepted"
+        proposal["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        ACCEPTED_DIR.mkdir(parents=True, exist_ok=True)
+        archive = ACCEPTED_DIR / f"{proposal_key}.json"
+        archive.write_text(json.dumps(proposal, indent=2))
+        _proposal_path(proposal_key).unlink(missing_ok=True)
+        log.info(f"[proposals] accepted legacy field_action: {proposal_key}")
+        return {
+            "accepted": True,
+            "domain": proposal.get("domain", ""),
+            "proposal_kind": "field_action",
+            "rc_file": proposal["action"]["rc_file"],
         }
 
     staged_path_val = proposal.get("staged_path", "")

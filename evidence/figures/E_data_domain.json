@@ -1,0 +1,113 @@
+{
+  "scenarios": [
+    {
+      "name": "clean",
+      "description": "Clean transaction data \u2014 all conditions realized",
+      "events": 17,
+      "expected_blocked": [],
+      "detected_blocked": [],
+      "expected_realized": [
+        "DP-10",
+        "DP-03",
+        "DP-04",
+        "DP-08",
+        "DP-09",
+        "DP-11"
+      ],
+      "detected_realized": [
+        "DP-10",
+        "DP-03",
+        "DP-04",
+        "DP-08",
+        "DP-09",
+        "DP-11"
+      ],
+      "missed_blocked": [],
+      "detection_rate": 0.0,
+      "all_blocked_detected": true
+    },
+    {
+      "name": "null_injection",
+      "description": "NULL in required field (amount) \u2014 DP-03 blocked",
+      "events": 17,
+      "expected_blocked": [
+        "DP-03"
+      ],
+      "detected_blocked": [
+        "DP-03"
+      ],
+      "expected_realized": [
+        "DP-10"
+      ],
+      "detected_realized": [
+        "DP-10"
+      ],
+      "missed_blocked": [],
+      "detection_rate": 1.0,
+      "all_blocked_detected": true
+    },
+    {
+      "name": "bounds_violation",
+      "description": "Out-of-bounds + invalid enum \u2014 DP-04 blocked",
+      "events": 17,
+      "expected_blocked": [
+        "DP-04"
+      ],
+      "detected_blocked": [
+        "DP-04"
+      ],
+      "expected_realized": [
+        "DP-10"
+      ],
+      "detected_realized": [
+        "DP-10"
+      ],
+      "missed_blocked": [],
+      "detection_rate": 1.0,
+      "all_blocked_detected": true
+    },
+    {
+      "name": "stale",
+      "description": "Data 30h old, TTL=24h \u2014 DP-09 blocked",
+      "events": 17,
+      "expected_blocked": [
+        "DP-09"
+      ],
+      "detected_blocked": [
+        "DP-09"
+      ],
+      "expected_realized": [
+        "DP-10"
+      ],
+      "detected_realized": [
+        "DP-10"
+      ],
+      "missed_blocked": [],
+      "detection_rate": 1.0,
+      "all_blocked_detected": true
+    },
+    {
+      "name": "integrity_failure",
+      "description": "Orphaned FK + duplicate PK \u2014 DP-05 and DP-08 blocked",
+      "events": 17,
+      "expected_blocked": [
+        "DP-05",
+        "DP-08"
+      ],
+      "detected_blocked": [
+        "DP-05",
+        "DP-08"
+      ],
+      "expected_realized": [
+        "DP-10"
+      ],
+      "detected_realized": [
+        "DP-10"
+      ],
+      "missed_blocked": [],
+      "detection_rate": 1.0,
+      "all_blocked_detected": true
+    }
+  ],
+  "overall_detection_rate": 1.0
+}

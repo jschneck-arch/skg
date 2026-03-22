@@ -642,9 +642,24 @@ async function handleAction(kind, payload) {
     if (kind === "proposal-accept") {
       const acceptResult = await postJson(`/proposals/${encodeURIComponent(payload.id)}/accept`, {});
       const hint = acceptResult.command_hint || acceptResult.command || "";
-      state.actionStatus = hint
-        ? `Accepted ${payload.id}. Run: ${hint}`
-        : `Accepted proposal ${payload.id}.`;
+      // For field_action proposals: pop terminal + show overlay
+      if (acceptResult.proposal_kind === "field_action" && acceptResult.rc_file) {
+        showTerminalOverlay(payload.id, acceptResult.rc_file, hint);
+        // Ask daemon to launch xterm/gnome-terminal with msfconsole
+        postJson(`/proposals/${encodeURIComponent(payload.id)}/launch-terminal`, {})
+          .then(r => {
+            const el = document.getElementById("skg-terminal-status");
+            if (el) el.textContent = r.terminal
+              ? `Terminal launched (${r.terminal})`
+              : r.note || "Launched in background";
+          })
+          .catch(() => {});
+        state.actionStatus = `Accepted field_action ${payload.id} — terminal launching…`;
+      } else {
+        state.actionStatus = hint
+          ? `Accepted ${payload.id}. Run: ${hint}`
+          : `Accepted proposal ${payload.id}.`;
+      }
     } else if (kind === "proposal-defer") {
       const result = await postJson(`/proposals/${encodeURIComponent(payload.id)}/defer`, { days: 7 });
       state.actionStatus = `Deferred proposal ${payload.id} until ${result.until || "later"}.`;
@@ -654,6 +669,11 @@ async function handleAction(kind, payload) {
         cooldown_days: 30,
       });
       state.actionStatus = `Rejected proposal ${payload.id} until ${result.cooldown_until || "cooldown"}.`;
+    } else if (kind === "proposal-reset") {
+      const result = await postJson(`/proposals/${encodeURIComponent(payload.id)}/reset`, {});
+      state.actionStatus = result.ok
+        ? `Reset ${payload.id} to pending (was: ${result.from_status}).`
+        : `Reset failed: ${result.error || "unknown error"}`;
     } else if (kind === "fold-resolve") {
       const result = await postJson(
         `/folds/resolve/${encodeURIComponent(payload.foldId)}?target_ip=${encodeURIComponent(payload.targetIp)}`,
@@ -669,6 +689,7 @@ async function handleAction(kind, payload) {
     await reloadAll();
     ensureActionHistory();
     render();
+    renderActionStatus();
   } catch (err) {
     if (String(err.message || "").includes("Proposal not found")) {
       state.selected = null;
@@ -962,7 +983,11 @@ function renderProposalDetail(selection) {
                  <button class="action-button" data-action-kind="proposal-defer" data-id="${esc(proposal.id)}">Defer 7d</button>
                  <button class="action-button" data-action-kind="proposal-reject" data-id="${esc(proposal.id)}">Reject 30d</button>
                </div>`
-            : ""
+            : (["error_missing_rc", "expired", "executed"].includes(proposal.status)
+                ? `<div class="button-row">
+                     <button class="action-button" data-action-kind="proposal-reset" data-id="${esc(proposal.id)}">↺ Reset to Pending</button>
+                   </div>`
+                : "")
         }
       </div>
       ${detailRows([
@@ -1380,6 +1405,67 @@ function renderRunMonitor() {
       ${g.current_surface ? `<div class="meta">surface: ${esc(String(g.current_surface).split("/").pop())}</div>` : ""}
       ${lines.length ? `<pre class="run-log">${esc(lines.join("\n"))}</pre>` : `<div class="meta">No live run output yet.</div>`}
     </div>`;
+}
+
+function showTerminalOverlay(proposalId, rcFile, commandHint) {
+  // Remove any existing overlay
+  const existing = document.getElementById("skg-terminal-overlay");
+  if (existing) existing.remove();
+
+  const overlay = document.createElement("div");
+  overlay.id = "skg-terminal-overlay";
+  overlay.style.cssText = [
+    "position:fixed", "top:0", "left:0", "width:100vw", "height:100vh",
+    "background:rgba(0,0,0,0.82)", "display:flex", "align-items:center",
+    "justify-content:center", "z-index:9999", "font-family:monospace",
+  ].join(";");
+
+  const short = proposalId.slice(0, 8);
+  const cmd = commandHint || `msfconsole -q -r ${rcFile}`;
+  overlay.innerHTML = `
+    <div style="background:#0d1117;border:1px solid #30363d;border-radius:8px;
+                padding:32px 40px;max-width:680px;width:90%;color:#e6edf3;">
+      <div style="font-size:18px;font-weight:700;color:#58a6ff;margin-bottom:16px;">
+        ▶ Field Action Accepted — ${short}
+      </div>
+      <div style="font-size:13px;color:#8b949e;margin-bottom:8px;">RC file:</div>
+      <div style="background:#161b22;border-radius:4px;padding:10px 14px;
+                  font-size:12px;color:#79c0ff;word-break:break-all;margin-bottom:16px;">
+        ${rcFile}
+      </div>
+      <div style="font-size:13px;color:#8b949e;margin-bottom:8px;">Run manually:</div>
+      <div style="background:#161b22;border-radius:4px;padding:10px 14px;
+                  font-size:12px;color:#3fb950;word-break:break-all;margin-bottom:20px;
+                  cursor:pointer;" title="Click to copy"
+           onclick="navigator.clipboard.writeText('${cmd.replace(/'/g,"\\'")}').then(()=>this.style.color='#58a6ff')">
+        ${cmd}
+      </div>
+      <div id="skg-terminal-status" style="font-size:12px;color:#f0883e;
+                                           min-height:18px;margin-bottom:20px;">
+        Requesting terminal launch…
+      </div>
+      <div style="display:flex;gap:12px;justify-content:flex-end;">
+        <button onclick="document.getElementById('skg-terminal-overlay').remove()"
+                style="background:#21262d;border:1px solid #30363d;color:#e6edf3;
+                       padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px;">
+          Dismiss
+        </button>
+        <button onclick="
+            fetch('/proposals/${proposalId}/launch-terminal',{method:'POST'})
+              .then(r=>r.json())
+              .then(r=>{
+                document.getElementById('skg-terminal-status').textContent =
+                  r.terminal ? 'Terminal launched (' + r.terminal + ')' : (r.note || 'Launched');
+              });"
+                style="background:#238636;border:1px solid #2ea043;color:#fff;
+                       padding:8px 20px;border-radius:6px;cursor:pointer;font-size:13px;">
+          Re-launch Terminal
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  // Close on backdrop click
+  overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
 }
 
 function renderActionStatus() {

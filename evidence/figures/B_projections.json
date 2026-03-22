@@ -1,0 +1,74 @@
+{
+  "projections": [
+    {
+      "label": "Web initial access \u2014 DVWA (all confirmed)",
+      "domain": "web",
+      "path_id": "web_network_exploit_v1",
+      "classification": "realized",
+      "score": 1.0,
+      "realized": [
+        "W-01",
+        "W-03",
+        "W-04",
+        "W-05"
+      ],
+      "blocked": [],
+      "unknown": [],
+      "h1": 0,
+      "has_obstruction": false
+    },
+    {
+      "label": "Host privesc \u2014 sudo BLOCKED (constraint satisfied)",
+      "domain": "host",
+      "path_id": "filesystem_compromise_v1",
+      "classification": "not_realized",
+      "score": 0.0,
+      "realized": [],
+      "blocked": [
+        "FI-01"
+      ],
+      "unknown": [
+        "FI-02",
+        "FI-04",
+        "FI-07"
+      ],
+      "h1": 0,
+      "has_obstruction": false
+    },
+    {
+      "label": "Container escape \u2014 partial observation",
+      "domain": "container_escape",
+      "path_id": "container_escape_privileged_v1",
+      "classification": "indeterminate",
+      "score": 0.4,
+      "realized": [
+        "CE-01",
+        "CE-02"
+      ],
+      "blocked": [],
+      "unknown": [
+        "CE-09",
+        "CE-10",
+        "CE-14"
+      ],
+      "h1": 0,
+      "has_obstruction": false
+    },
+    {
+      "label": "Web SQLi \u2014 circular dep (H\u00b9 obstruction, \u03b2\u2081=1)",
+      "domain": "web",
+      "path_id": "web_sqli_circular",
+      "classification": "indeterminate_h1",
+      "score": 0.0,
+      "realized": [],
+      "blocked": [],
+      "unknown": [
+        "WB-09",
+        "WB-10",
+        "WB-20"
+      ],
+      "h1": 1,
+      "has_obstruction": true
+    }
+  ]
+}

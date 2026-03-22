@@ -339,23 +339,52 @@ def draft_catalog(engine: ResonanceEngine,
             },
         }
     else:
-        # Try local ollama backend
+        # Try LLM pool (multi-backend race: first valid catalog wins)
         try:
-            from skg.resonance.ollama_backend import OllamaBackend
-            backend = OllamaBackend()
-            if backend.available():
-                log.info(f"No API key — using local ollama backend")
+            from skg.resonance.llm_pool import get_pool, OllamaLLMBackend
+            pool = get_pool()
+            if pool.any_available():
+                log.info(f"No API key — using LLM pool (strategy={pool._strategy})")
                 query   = f"{domain_name}: {description}"
                 context = engine.surface(query, k_each=4)
-                catalog, errors = backend.draft_catalog(domain_name, description, context)
+
+                # Build the ollama-style prompt and dispatch to the pool
+                from skg.resonance.ollama_backend import _build_prompt
+                prompt = _build_prompt(domain_name, description, {
+                    "wickets":  [r.to_dict() for r, _ in context.get("wickets", [])],
+                    "adapters": [r.to_dict() for r, _ in context.get("adapters", [])],
+                    "domains":  [r.to_dict() for r, _ in context.get("domains", [])],
+                })
+
+                import json, re as _re
+                raw = pool.generate(prompt, num_predict=512)
+
+                # Strip markdown fences if present
+                raw = _re.sub(r"^```json\s*", "", raw)
+                raw = _re.sub(r"^```\s*",     "", raw)
+                raw = _re.sub(r"\s*```$",     "", raw).strip()
+                brace = raw.find("{")
+                if brace > 0:
+                    raw = raw[brace:]
+                last = raw.rfind("}")
+                if last >= 0:
+                    raw = raw[:last + 1]
+
+                try:
+                    catalog = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    log.warning(f"[drafter] pool output not valid JSON ({exc}), retrying")
+                    raise
+
+                errors = _validate_draft(catalog)
                 draft_path = engine.save_draft(domain_name, catalog)
                 return {
                     "domain":            domain_name,
                     "catalog":           catalog,
                     "validation_errors": errors,
                     "draft_path":        str(draft_path),
-                    "backend":           "ollama",
-                    "model":             backend.model(),
+                    "backend":           f"llm_pool:{pool._strategy}",
+                    "model":             pool.primary_model_name() or "pool",
                     "context_used": {
                         "wickets_surfaced":  len(context["wickets"]),
                         "adapters_surfaced": len(context["adapters"]),
@@ -363,7 +392,7 @@ def draft_catalog(engine: ResonanceEngine,
                     },
                 }
         except Exception as exc:
-            log.warning(f"Ollama backend failed: {exc}")
+            log.warning(f"LLM pool catalog draft failed: {exc}")
 
         # Final fallback: prompt mode — build context, write prompt file
         raise ValueError(

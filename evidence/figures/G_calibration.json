@@ -1,0 +1,34 @@
+{
+  "sensors": [
+    {
+      "source_id": "adapter.ssh_collect",
+      "n_observations": 10,
+      "n_reversals": 2,
+      "precision": 0.8,
+      "hand_tuned_conf": 0.9,
+      "calibration_factor": 0.889,
+      "calibrated_conf": 0.8,
+      "conf_reduction_pct": 11.1
+    },
+    {
+      "source_id": "sensor.web_collector",
+      "n_observations": 15,
+      "n_reversals": 7,
+      "precision": 0.533,
+      "hand_tuned_conf": 0.75,
+      "calibration_factor": 0.711,
+      "calibrated_conf": 0.533,
+      "conf_reduction_pct": 28.9
+    },
+    {
+      "source_id": "feeds.nvd_ingester",
+      "n_observations": 8,
+      "n_reversals": 0,
+      "precision": 1.0,
+      "hand_tuned_conf": 0.85,
+      "calibration_factor": 1.177,
+      "calibrated_conf": 0.99,
+      "conf_reduction_pct": 0.0
+    }
+  ]
+}

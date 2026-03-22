@@ -1,15 +1,81 @@
-- host: 192.168.254.7
+# SKG Lab Targets — full network lab engagement
+# Generated: 2026-03-21
+# Covers: Docker containers, libvirt VMs, LAN hosts
+
+targets:
+
+  # ── Docker containers (172.17.0.0/16) ─────────────────────────────────────
+
+  - host: 172.17.0.2
+    method: ssh
+    user: msfadmin
+    password: msfadmin
+    workload_id: metasploitable2
+    enabled: true
+    tags: [linux, vulnerable, docker]
+    notes: "Metasploitable 2 — broad vulnerable Linux surface"
+
+  - host: 172.17.0.3
+    method: http
+    url: http://172.17.0.3
+    workload_id: dvwa
+    enabled: true
+    tags: [linux, web, docker, dvwa]
+    notes: "DVWA — web injection, auth scanner, SQLi/CMDI/XSS targets"
+
+  # ── libvirt VMs (192.168.122.0/24) ────────────────────────────────────────
+
+  - host: 192.168.122.153
+    method: smb
+    workload_id: metasploitable3-win2k8
+    enabled: true
+    tags: [windows, win2k8, libvirt, smb, eternalblue]
+    notes: "Metasploitable 3 Win2k8 — MS17-010 EternalBlue primary target"
+
+  # dc01-win2022 — Windows Server 2022 install still pending.
+  # Disk is empty (60GB qcow2). Complete OS install via VNC at 127.0.0.1:5910:
+  #   virsh start dc01-win2022
+  #   virt-viewer --connect qemu:///system dc01-win2022
+  # After install + boot: run virsh domifaddr dc01-win2022, then uncomment below.
+  # After provisioning: cd skg-ad-lateral-toolchain/lab_setup && bash provision_ad_lab.sh
+  #
+  # - host: 192.168.122.xxx   # fill in after DHCP
+  #   method: smb
+  #   workload_id: dc01-win2022
+  #   enabled: true
+  #   tags: [windows, win2022, dc, ad, libvirt]
+  #   notes: "Domain Controller — AD lateral movement, BloodHound coupling, Kerberoast"
+
+  # ── LAN hosts (192.168.254.0/24) ──────────────────────────────────────────
+
+  - host: 192.168.254.7
     method: ssh
     user: root
     key: ~/.ssh/id_rsa
     workload_id: samsung-tv
     enabled: true
-    tags: [iot, samsung]
+    tags: [iot, samsung, lan]
+    notes: "Samsung TV — IoT/firmware surface"
+
+  # ── BloodHound CE (172.18.0.4 / localhost:8080) ───────────────────────────
 
   - host: 172.18.0.4
     method: http
+    url: http://172.18.0.4:8080
     workload_id: bloodhound-ui
     enabled: true
+    tags: [bloodhound, ad, graph]
     auth:
       user: admin
       password: 4RsTqDmIrkyOCCShh8vSKO9uCdDVA23q
+    notes: "BloodHound CE — AD graph, lateral movement paths"
+
+  # ── Metasploitable 2 web surface ──────────────────────────────────────────
+
+  - host: 172.17.0.2
+    method: http
+    url: http://172.17.0.2:8081
+    workload_id: metasploitable2-web
+    enabled: true
+    tags: [linux, web, docker, vulnerable]
+    notes: "Metasploitable 2 web interface (port 8081)"

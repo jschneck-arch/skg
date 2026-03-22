@@ -1,0 +1,566 @@
+{
+  "generated_at": "2026-03-22T16:34:57.558830+00:00",
+  "sections": {
+    "A_energy": {
+      "target": "172.17.0.2 (DVWA)",
+      "total_wickets": 39,
+      "energy_series": [
+        {
+          "cycle": 0,
+          "instrument": "none",
+          "E": 41.495,
+          "realized": 0,
+          "blocked": 0,
+          "unknown": 39,
+          "folds": 2,
+          "fold_weight": 2.495
+        },
+        {
+          "cycle": 1,
+          "instrument": "http_collector",
+          "E": 34.72,
+          "realized": 4,
+          "blocked": 2,
+          "unknown": 33,
+          "folds": 1,
+          "fold_weight": 1.72
+        },
+        {
+          "cycle": 2,
+          "instrument": "auth_scanner",
+          "E": 31.72,
+          "realized": 7,
+          "blocked": 2,
+          "unknown": 30,
+          "folds": 1,
+          "fold_weight": 1.72
+        },
+        {
+          "cycle": 3,
+          "instrument": "ssh_sensor",
+          "E": 20,
+          "realized": 16,
+          "blocked": 3,
+          "unknown": 20,
+          "folds": 0,
+          "fold_weight": 0.0
+        }
+      ],
+      "reduction_pct": 51.8,
+      "delta_E": 21.495
+    },
+    "B_projections": {
+      "projections": [
+        {
+          "label": "Web initial access \u2014 DVWA (all confirmed)",
+          "domain": "web",
+          "path_id": "web_network_exploit_v1",
+          "classification": "realized",
+          "score": 1.0,
+          "realized": [
+            "W-01",
+            "W-03",
+            "W-04",
+            "W-05"
+          ],
+          "blocked": [],
+          "unknown": [],
+          "h1": 0,
+          "has_obstruction": false
+        },
+        {
+          "label": "Host privesc \u2014 sudo BLOCKED (constraint satisfied)",
+          "domain": "host",
+          "path_id": "filesystem_compromise_v1",
+          "classification": "not_realized",
+          "score": 0.0,
+          "realized": [],
+          "blocked": [
+            "FI-01"
+          ],
+          "unknown": [
+            "FI-02",
+            "FI-04",
+            "FI-07"
+          ],
+          "h1": 0,
+          "has_obstruction": false
+        },
+        {
+          "label": "Container escape \u2014 partial observation",
+          "domain": "container_escape",
+          "path_id": "container_escape_privileged_v1",
+          "classification": "indeterminate",
+          "score": 0.4,
+          "realized": [
+            "CE-01",
+            "CE-02"
+          ],
+          "blocked": [],
+          "unknown": [
+            "CE-09",
+            "CE-10",
+            "CE-14"
+          ],
+          "h1": 0,
+          "has_obstruction": false
+        },
+        {
+          "label": "Web SQLi \u2014 circular dep (H\u00b9 obstruction, \u03b2\u2081=1)",
+          "domain": "web",
+          "path_id": "web_sqli_circular",
+          "classification": "indeterminate_h1",
+          "score": 0.0,
+          "realized": [],
+          "blocked": [],
+          "unknown": [
+            "WB-09",
+            "WB-10",
+            "WB-20"
+          ],
+          "h1": 1,
+          "has_obstruction": true
+        }
+      ]
+    },
+    "C_propagation": {
+      "propagation_events": [
+        {
+          "trigger": "web::172.17.0.2 :: WB-09",
+          "signal_weight": 0.95,
+          "source_domain": "web",
+          "target_domain": "host",
+          "target_workload": "host::172.17.0.2",
+          "prior_before": 0.0,
+          "prior_after": 0.8313,
+          "coupling_weight": 0.6,
+          "expected_delta": 0.285,
+          "actual_delta": 0.8313
+        },
+        {
+          "trigger": "web::172.17.0.2 :: WB-09",
+          "signal_weight": 0.95,
+          "source_domain": "web",
+          "target_domain": "container_escape",
+          "target_workload": "container_escape::172.17.0.2",
+          "prior_before": 0.0,
+          "prior_after": 0.8313,
+          "coupling_weight": 0.5,
+          "expected_delta": 0.2375,
+          "actual_delta": 0.8313
+        }
+      ],
+      "coupling_table": {
+        "web\u2192data_pipeline": 0.65,
+        "web\u2192host": 0.6,
+        "web\u2192container_escape": 0.5,
+        "host\u2192web": 0.45,
+        "host\u2192container_escape": 0.7,
+        "host\u2192ad_lateral": 0.55,
+        "host\u2192data_pipeline": 0.4,
+        "container_escape\u2192host": 0.75,
+        "container_escape\u2192web": 0.45,
+        "container_escape\u2192ad_lateral": 0.65,
+        "ad_lateral\u2192host": 0.6,
+        "aprs\u2192host": 0.7,
+        "aprs\u2192container_escape": 0.5,
+        "binary_analysis\u2192host": 0.55,
+        "sysaudit\u2192host": 0.5,
+        "data_pipeline\u2192host": 0.3,
+        "data_pipeline\u2192web": 0.55
+      }
+    },
+    "D_folds": {
+      "unknown_nodes": 28,
+      "E_naive": 28,
+      "E_with_folds": 31.595,
+      "total_fold_weight": 3.595,
+      "fold_contribution_pct": 11.4,
+      "folds": [
+        {
+          "type": "structural",
+          "p": 0.72,
+          "Phi": 1.72,
+          "detail": "redis on 6379 \u2014 no redis wickets in any catalog"
+        },
+        {
+          "type": "projection",
+          "p": 0.55,
+          "Phi": 0.775,
+          "detail": "phpMyAdmin interface \u2014 no phpmyadmin_rce_v1 path"
+        },
+        {
+          "type": "contextual",
+          "p": 0.68,
+          "Phi": 0.68,
+          "detail": "CVE-2021-41773 Apache path traversal \u2014 no AP-* wicket"
+        },
+        {
+          "type": "temporal",
+          "p": 0.6,
+          "Phi": 0.42,
+          "detail": "WB-08 (default_creds) realized 36h ago \u2014 may have changed"
+        }
+      ],
+      "formula_verification": {
+        "E_naive": "|U| = 28",
+        "E_with_folds": "|U| + \u03a3 \u03a6 = 28 + 3.5950 = 31.5950"
+      }
+    },
+    "E_data_domain": {
+      "scenarios": [
+        {
+          "name": "clean",
+          "description": "Clean transaction data \u2014 all conditions realized",
+          "events": 17,
+          "expected_blocked": [],
+          "detected_blocked": [],
+          "expected_realized": [
+            "DP-10",
+            "DP-03",
+            "DP-04",
+            "DP-08",
+            "DP-09",
+            "DP-11"
+          ],
+          "detected_realized": [
+            "DP-10",
+            "DP-03",
+            "DP-04",
+            "DP-08",
+            "DP-09",
+            "DP-11"
+          ],
+          "missed_blocked": [],
+          "detection_rate": 0.0,
+          "all_blocked_detected": true
+        },
+        {
+          "name": "null_injection",
+          "description": "NULL in required field (amount) \u2014 DP-03 blocked",
+          "events": 17,
+          "expected_blocked": [
+            "DP-03"
+          ],
+          "detected_blocked": [
+            "DP-03"
+          ],
+          "expected_realized": [
+            "DP-10"
+          ],
+          "detected_realized": [
+            "DP-10"
+          ],
+          "missed_blocked": [],
+          "detection_rate": 1.0,
+          "all_blocked_detected": true
+        },
+        {
+          "name": "bounds_violation",
+          "description": "Out-of-bounds + invalid enum \u2014 DP-04 blocked",
+          "events": 17,
+          "expected_blocked": [
+            "DP-04"
+          ],
+          "detected_blocked": [
+            "DP-04"
+          ],
+          "expected_realized": [
+            "DP-10"
+          ],
+          "detected_realized": [
+            "DP-10"
+          ],
+          "missed_blocked": [],
+          "detection_rate": 1.0,
+          "all_blocked_detected": true
+        },
+        {
+          "name": "stale",
+          "description": "Data 30h old, TTL=24h \u2014 DP-09 blocked",
+          "events": 17,
+          "expected_blocked": [
+            "DP-09"
+          ],
+          "detected_blocked": [
+            "DP-09"
+          ],
+          "expected_realized": [
+            "DP-10"
+          ],
+          "detected_realized": [
+            "DP-10"
+          ],
+          "missed_blocked": [],
+          "detection_rate": 1.0,
+          "all_blocked_detected": true
+        },
+        {
+          "name": "integrity_failure",
+          "description": "Orphaned FK + duplicate PK \u2014 DP-05 and DP-08 blocked",
+          "events": 17,
+          "expected_blocked": [
+            "DP-05",
+            "DP-08"
+          ],
+          "detected_blocked": [
+            "DP-05",
+            "DP-08"
+          ],
+          "expected_realized": [
+            "DP-10"
+          ],
+          "detected_realized": [
+            "DP-10"
+          ],
+          "missed_blocked": [],
+          "detection_rate": 1.0,
+          "all_blocked_detected": true
+        }
+      ],
+      "overall_detection_rate": 1.0
+    },
+    "F_engagement": {
+      "db_summary": {
+        "db_path": "/tmp/tmpa7o6lhgj/engagement.db",
+        "observations": 22,
+        "workloads": 4,
+        "targets": 1,
+        "unique_wickets": 22,
+        "realized": 18,
+        "blocked": 2,
+        "unknown": 2,
+        "projections": 2,
+        "paths_realized": 1,
+        "paths_indet": 1,
+        "open_folds": 0,
+        "transitions": 0
+      },
+      "integrity": {
+        "db_path": "/tmp/tmpa7o6lhgj/engagement.db",
+        "classification": "realized",
+        "realized": [
+          "DP-01",
+          "DP-03",
+          "DP-04",
+          "DP-05",
+          "DP-08",
+          "DP-09",
+          "DP-11",
+          "DP-12"
+        ],
+        "blocked": [],
+        "unknown": [],
+        "checks": {
+          "DP-01": {
+            "status": "realized",
+            "detail": "All 5 tables present"
+          },
+          "DP-03": {
+            "status": "realized",
+            "detail": "All required fields populated across 22 observations"
+          },
+          "DP-04": {
+            "status": "realized",
+            "detail": "All field values within declared bounds"
+          },
+          "DP-05": {
+            "status": "realized",
+            "detail": "All 2 projections reference known workloads"
+          },
+          "DP-08": {
+            "status": "realized",
+            "detail": "No duplicate event IDs"
+          },
+          "DP-09": {
+            "status": "realized",
+            "detail": "Most recent observation 2.0h ago (TTL=72h)"
+          },
+          "DP-11": {
+            "status": "realized",
+            "detail": "All expected domains present: ['container_escape', 'host', 'sysaudit', 'web']"
+          },
+          "DP-12": {
+            "status": "realized",
+            "detail": "Status distribution normal: 82%R 9%B 9%U"
+          }
+        },
+        "domain": "engagement_integrity",
+        "computed_at": "2026-03-22T16:34:57.765813+00:00"
+      },
+      "realized_paths": [
+        {
+          "attack_path_id": "web_sqli_to_shell_v1",
+          "workload_id": "web::172.17.0.2",
+          "score": 0.875,
+          "domain": "web"
+        }
+      ],
+      "domain_summary": [
+        {
+          "domain": "web",
+          "obs": 8,
+          "r": 8,
+          "b": 0,
+          "u": 0
+        },
+        {
+          "domain": "host",
+          "obs": 7,
+          "r": 5,
+          "b": 1,
+          "u": 1
+        },
+        {
+          "domain": "sysaudit",
+          "obs": 6,
+          "r": 5,
+          "b": 1,
+          "u": 0
+        },
+        {
+          "domain": "container_escape",
+          "obs": 1,
+          "r": 0,
+          "b": 0,
+          "u": 1
+        }
+      ],
+      "checks_passed": 8,
+      "checks_blocked": 0,
+      "checks_unknown": 0
+    },
+    "G_calibration": {
+      "sensors": [
+        {
+          "source_id": "adapter.ssh_collect",
+          "n_observations": 10,
+          "n_reversals": 2,
+          "precision": 0.8,
+          "hand_tuned_conf": 0.9,
+          "calibration_factor": 0.889,
+          "calibrated_conf": 0.8,
+          "conf_reduction_pct": 11.1
+        },
+        {
+          "source_id": "sensor.web_collector",
+          "n_observations": 15,
+          "n_reversals": 7,
+          "precision": 0.533,
+          "hand_tuned_conf": 0.75,
+          "calibration_factor": 0.711,
+          "calibrated_conf": 0.533,
+          "conf_reduction_pct": 28.9
+        },
+        {
+          "source_id": "feeds.nvd_ingester",
+          "n_observations": 8,
+          "n_reversals": 0,
+          "precision": 1.0,
+          "hand_tuned_conf": 0.85,
+          "calibration_factor": 1.177,
+          "calibrated_conf": 0.99,
+          "conf_reduction_pct": 0.0
+        }
+      ]
+    },
+    "H_math": {
+      "claims": [
+        {
+          "description": "\u03b2\u2081 for 3-cycle (triangle)",
+          "formula": "\u03b2\u2081=|E|\u2212|V|+|C|=3\u22123+1",
+          "computed": 1,
+          "expected": 1,
+          "verified": true
+        },
+        {
+          "description": "\u03b2\u2081 for 2-node mutual dep",
+          "formula": "\u03b2\u2081=|E|\u2212|V|+|C|=1\u22122+1",
+          "computed": 0,
+          "expected": 0,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_structural(p=0.5)",
+          "formula": "1+p=1.5",
+          "computed": 1.5,
+          "expected": 1.5,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_projection(p=0.5)",
+          "formula": "0.5+0.5p=0.75",
+          "computed": 0.75,
+          "expected": 0.75,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_contextual(p=0.5)",
+          "formula": "p=0.5",
+          "computed": 0.5,
+          "expected": 0.5,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_temporal(p=0.5)",
+          "formula": "0.7p=0.35",
+          "computed": 0.35,
+          "expected": 0.35,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_s\u2265\u03a6_p at p=0.5",
+          "formula": "1.5\u22650.75",
+          "computed": 1.0,
+          "expected": 1.0,
+          "verified": true
+        },
+        {
+          "description": "\u03a6_p\u2265\u03a6_c at p=0.5",
+          "formula": "0.75\u22650.5",
+          "computed": 1.0,
+          "expected": 1.0,
+          "verified": true
+        },
+        {
+          "description": "PRIOR_ALPHA",
+          "formula": "P_B=s\u00d7SW, \u03b1=1.0",
+          "computed": 1.0,
+          "expected": 1.0,
+          "verified": true
+        },
+        {
+          "description": "same_host prior_influence at SW=1",
+          "formula": "s\u00d7\u03b1=1.0\u00d71.0",
+          "computed": 1.0,
+          "expected": 1.0,
+          "verified": true
+        },
+        {
+          "description": "same_subnet prior_influence",
+          "formula": "s\u00d7\u03b1=0.4\u00d71.0",
+          "computed": 0.4,
+          "expected": 0.4,
+          "verified": true
+        },
+        {
+          "description": "sin(\u03c6_blocked\u2212\u03c6_realized)=0",
+          "formula": "sin(\u03c0\u22120)=0",
+          "computed": 0.0,
+          "expected": 0.0,
+          "verified": true
+        },
+        {
+          "description": "sin(\u03c6_unknown\u2212\u03c6_realized)=1",
+          "formula": "sin(\u03c0/2\u22120)=1",
+          "computed": 1.0,
+          "expected": 1.0,
+          "verified": true
+        }
+      ],
+      "all_verified": true
+    }
+  },
+  "issues": [],
+  "issue_count": 0
+}

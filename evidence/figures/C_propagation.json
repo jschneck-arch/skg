@@ -1,0 +1,47 @@
+{
+  "propagation_events": [
+    {
+      "trigger": "web::172.17.0.2 :: WB-09",
+      "signal_weight": 0.95,
+      "source_domain": "web",
+      "target_domain": "host",
+      "target_workload": "host::172.17.0.2",
+      "prior_before": 0.0,
+      "prior_after": 0.8313,
+      "coupling_weight": 0.6,
+      "expected_delta": 0.285,
+      "actual_delta": 0.8313
+    },
+    {
+      "trigger": "web::172.17.0.2 :: WB-09",
+      "signal_weight": 0.95,
+      "source_domain": "web",
+      "target_domain": "container_escape",
+      "target_workload": "container_escape::172.17.0.2",
+      "prior_before": 0.0,
+      "prior_after": 0.8313,
+      "coupling_weight": 0.5,
+      "expected_delta": 0.2375,
+      "actual_delta": 0.8313
+    }
+  ],
+  "coupling_table": {
+    "web\u2192data_pipeline": 0.65,
+    "web\u2192host": 0.6,
+    "web\u2192container_escape": 0.5,
+    "host\u2192web": 0.45,
+    "host\u2192container_escape": 0.7,
+    "host\u2192ad_lateral": 0.55,
+    "host\u2192data_pipeline": 0.4,
+    "container_escape\u2192host": 0.75,
+    "container_escape\u2192web": 0.45,
+    "container_escape\u2192ad_lateral": 0.65,
+    "ad_lateral\u2192host": 0.6,
+    "aprs\u2192host": 0.7,
+    "aprs\u2192container_escape": 0.5,
+    "binary_analysis\u2192host": 0.55,
+    "sysaudit\u2192host": 0.5,
+    "data_pipeline\u2192host": 0.3,
+    "data_pipeline\u2192web": 0.55
+  }
+}

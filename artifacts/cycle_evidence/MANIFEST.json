@@ -1,0 +1,63 @@
+{
+  "generated_at": "2026-03-22T16:34:34.303325+00:00",
+  "target": "192.168.122.153",
+  "target_desc": "Metasploitable 3 Win2k8 (KVM/libvirt) \u2014 MS17-010 EternalBlue",
+  "purpose": "Paper 4 \u00a77 empirical validation: n=2 decoherence criterion and coupling-arc chain",
+  "files": {
+    "nmap_ms17010_verify_20260322T111436.xml": {
+      "type": "nmap_xml",
+      "desc": "Raw nmap -sV --script=smb-vuln-ms17-010 output confirming State: VULNERABLE",
+      "key_finding": "smb-vuln-ms17-010 State: VULNERABLE, CVE-2017-0143"
+    },
+    "gravity_nmap_192_168_122_153_20260322T111436.ndjson": {
+      "type": "gravity_events",
+      "cycle_id": "nmap_ms17010_verify_20260322T111436",
+      "desc": "NDJSON events derived from MS17-010 verification nmap (HO-01, HO-19, HO-25)",
+      "wickets_realized": [
+        "HO-01",
+        "HO-19",
+        "HO-25"
+      ]
+    },
+    "gravity_nmap_192.168.122.153_188c1098.ndjson": {
+      "type": "gravity_events",
+      "cycle_id": "gravity_nmap_192.168.122.153_188c1098",
+      "cycle_number": 1,
+      "timestamp": "2026-03-22T16:22:31+00:00",
+      "desc": "Gravity cycle 1 nmap run \u2014 full instrument scan",
+      "wickets_realized": [
+        "HO-01",
+        "HO-19",
+        "HO-25"
+      ],
+      "total_events": 103
+    },
+    "gravity_nmap_192.168.122.153_1cabdf77.ndjson": {
+      "type": "gravity_events",
+      "cycle_id": "gravity_nmap_192.168.122.153_1cabdf77",
+      "cycle_number": 2,
+      "timestamp": "2026-03-22T16:28:09+00:00",
+      "desc": "Gravity cycle 2 nmap run \u2014 second independent execution",
+      "wickets_realized": [
+        "HO-01",
+        "HO-19",
+        "HO-25"
+      ],
+      "total_events": 101
+    }
+  },
+  "n_criterion": {
+    "n_value": 2,
+    "cycle_ids": [
+      "gravity_nmap_192.168.122.153_188c1098",
+      "gravity_nmap_192.168.122.153_1cabdf77"
+    ],
+    "claim": "HO-25 (NSE VULNERABLE) realized in n=2 distinct gravity cycle executions, satisfying Paper 4 \u00a75 decoherence criterion n\u22652",
+    "wickets_confirmed": [
+      "HO-01",
+      "HO-19",
+      "HO-25"
+    ],
+    "coupling_chain": "HO-01 \u2192 HO-19 (port 445) \u2192 HO-25 (NSE VULNERABLE) \u2192 host_network_exploit_v1 (EternalBlue)"
+  }
+}

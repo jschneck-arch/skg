@@ -84,10 +84,15 @@ def _phi_from_event(status: str, confidence: float) -> Tuple[float, float, float
     return (0.0, 0.0, confidence)
 
 
-def event_to_observation(event: dict) -> Optional[Observation]:
+def event_to_observation(event: dict, cycle_id: str = "") -> Optional[Observation]:
     """
     Convert a single NDJSON event dict to a kernel Observation.
     Returns None if the event lacks required fields.
+
+    cycle_id: the gravity cycle execution identifier — typically the NDJSON
+    file stem that contained this event (e.g. "gravity_nmap_192_168_1_1_20260322T143022").
+    Used by SupportEngine to count distinct cycle runs (n) for the decoherence criterion.
+    Falls back to payload.gravity_cycle_id if set, then to the caller-supplied value.
     """
     payload = event.get("payload", {})
     provenance = event.get("provenance", {})
@@ -134,6 +139,12 @@ def event_to_observation(event: dict) -> Optional[Observation]:
     if event_time.tzinfo is None:
         event_time = event_time.replace(tzinfo=timezone.utc)
 
+    # Resolve cycle_id: prefer payload field, then caller-supplied value
+    resolved_cycle_id = (
+        str(payload.get("gravity_cycle_id") or "").strip()
+        or cycle_id
+    )
+
     return Observation(
         instrument=instrument,
         targets=[target_ip],
@@ -142,6 +153,7 @@ def event_to_observation(event: dict) -> Optional[Observation]:
         event_time=event_time,
         decay_class=decay,
         support_mapping={target_ip: {"R": phi_r, "B": phi_b, "U": phi_u}},
+        cycle_id=resolved_cycle_id,
     )
 
 
@@ -231,6 +243,10 @@ def load_observations_for_target(
             candidate_files.append(filepath)
 
     for filepath in candidate_files:
+        # The file stem is the natural gravity cycle ID: each instrument run
+        # writes its own NDJSON file with a unique timestamp-stamped name.
+        # This gives SupportEngine the "distinct cycle executions" count (n).
+        file_cycle_id = Path(filepath).stem
         try:
             with open(filepath) as f:
                 for line in f:
@@ -257,7 +273,7 @@ def load_observations_for_target(
                     if ev_target and ev_target != target_ip:
                         continue
 
-                    obs = event_to_observation(event)
+                    obs = event_to_observation(event, cycle_id=file_cycle_id)
                     if obs is not None:
                         observations.append(obs)
         except Exception as e:

@@ -1,0 +1,37 @@
+{
+  "unknown_nodes": 28,
+  "E_naive": 28,
+  "E_with_folds": 31.595,
+  "total_fold_weight": 3.595,
+  "fold_contribution_pct": 11.4,
+  "folds": [
+    {
+      "type": "structural",
+      "p": 0.72,
+      "Phi": 1.72,
+      "detail": "redis on 6379 \u2014 no redis wickets in any catalog"
+    },
+    {
+      "type": "projection",
+      "p": 0.55,
+      "Phi": 0.775,
+      "detail": "phpMyAdmin interface \u2014 no phpmyadmin_rce_v1 path"
+    },
+    {
+      "type": "contextual",
+      "p": 0.68,
+      "Phi": 0.68,
+      "detail": "CVE-2021-41773 Apache path traversal \u2014 no AP-* wicket"
+    },
+    {
+      "type": "temporal",
+      "p": 0.6,
+      "Phi": 0.42,
+      "detail": "WB-08 (default_creds) realized 36h ago \u2014 may have changed"
+    }
+  ],
+  "formula_verification": {
+    "E_naive": "|U| = 28",
+    "E_with_folds": "|U| + \u03a3 \u03a6 = 28 + 3.5950 = 31.5950"
+  }
+}

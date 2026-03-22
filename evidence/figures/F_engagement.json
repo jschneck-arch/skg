@@ -1,0 +1,110 @@
+{
+  "db_summary": {
+    "db_path": "/tmp/tmpa7o6lhgj/engagement.db",
+    "observations": 22,
+    "workloads": 4,
+    "targets": 1,
+    "unique_wickets": 22,
+    "realized": 18,
+    "blocked": 2,
+    "unknown": 2,
+    "projections": 2,
+    "paths_realized": 1,
+    "paths_indet": 1,
+    "open_folds": 0,
+    "transitions": 0
+  },
+  "integrity": {
+    "db_path": "/tmp/tmpa7o6lhgj/engagement.db",
+    "classification": "realized",
+    "realized": [
+      "DP-01",
+      "DP-03",
+      "DP-04",
+      "DP-05",
+      "DP-08",
+      "DP-09",
+      "DP-11",
+      "DP-12"
+    ],
+    "blocked": [],
+    "unknown": [],
+    "checks": {
+      "DP-01": {
+        "status": "realized",
+        "detail": "All 5 tables present"
+      },
+      "DP-03": {
+        "status": "realized",
+        "detail": "All required fields populated across 22 observations"
+      },
+      "DP-04": {
+        "status": "realized",
+        "detail": "All field values within declared bounds"
+      },
+      "DP-05": {
+        "status": "realized",
+        "detail": "All 2 projections reference known workloads"
+      },
+      "DP-08": {
+        "status": "realized",
+        "detail": "No duplicate event IDs"
+      },
+      "DP-09": {
+        "status": "realized",
+        "detail": "Most recent observation 2.0h ago (TTL=72h)"
+      },
+      "DP-11": {
+        "status": "realized",
+        "detail": "All expected domains present: ['container_escape', 'host', 'sysaudit', 'web']"
+      },
+      "DP-12": {
+        "status": "realized",
+        "detail": "Status distribution normal: 82%R 9%B 9%U"
+      }
+    },
+    "domain": "engagement_integrity",
+    "computed_at": "2026-03-22T16:34:57.765813+00:00"
+  },
+  "realized_paths": [
+    {
+      "attack_path_id": "web_sqli_to_shell_v1",
+      "workload_id": "web::172.17.0.2",
+      "score": 0.875,
+      "domain": "web"
+    }
+  ],
+  "domain_summary": [
+    {
+      "domain": "web",
+      "obs": 8,
+      "r": 8,
+      "b": 0,
+      "u": 0
+    },
+    {
+      "domain": "host",
+      "obs": 7,
+      "r": 5,
+      "b": 1,
+      "u": 1
+    },
+    {
+      "domain": "sysaudit",
+      "obs": 6,
+      "r": 5,
+      "b": 1,
+      "u": 0
+    },
+    {
+      "domain": "container_escape",
+      "obs": 1,
+      "r": 0,
+      "b": 0,
+      "u": 1
+    }
+  ],
+  "checks_passed": 8,
+  "checks_blocked": 0,
+  "checks_unknown": 0
+}

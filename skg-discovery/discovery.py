@@ -480,6 +480,144 @@ def _load_latest_wicket_states_for_ip(ip: str, out_dir: Path) -> dict[str, str]:
     return latest_state
 
 
+# ── HTTPS / TLS certificate scanning ─────────────────────────────────────
+
+def scan_tls_cert(ip: str, port: int = 443, timeout: float = 5.0) -> dict:
+    """
+    Connect via TLS and extract certificate metadata.
+
+    Returns dict with: subject, issuer, sans (Subject Alternative Names),
+    not_before, not_after, serial. SANs are used to discover additional
+    hostnames and services on the same host.
+
+    Domain agnostic: any TLS-enabled service can be probed.
+    """
+    import ssl
+    import datetime as _dt
+    result = {"ip": ip, "port": port, "error": None, "sans": [], "subject": {}, "issuer": {}}
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((ip, port), timeout=timeout) as raw_sock:
+            with ctx.wrap_socket(raw_sock, server_hostname=ip) as tls_sock:
+                cert = tls_sock.getpeercert()
+                if not cert:
+                    # Try to get the DER certificate directly
+                    der = tls_sock.getpeercert(binary_form=True)
+                    result["has_cert"] = der is not None
+                    return result
+
+                # Subject
+                subj = dict(x[0] for x in cert.get("subject", []) if x)
+                result["subject"] = subj
+                result["issuer"] = dict(x[0] for x in cert.get("issuer", []) if x)
+
+                # SANs — Subject Alternative Names contain all hostnames
+                sans = []
+                for ext_type, ext_val in cert.get("subjectAltName", []):
+                    if ext_type in ("DNS", "IP Address"):
+                        sans.append(ext_val)
+                result["sans"] = sans
+
+                # Validity
+                result["not_before"] = cert.get("notBefore", "")
+                result["not_after"] = cert.get("notAfter", "")
+                result["serial"] = cert.get("serialNumber", "")
+                result["cn"] = subj.get("commonName", "")
+    except ssl.SSLError as e:
+        result["error"] = f"SSL error: {e}"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def discover_https_endpoints(ip: str, ports: list) -> list[dict]:
+    """
+    For any HTTPS-capable port found on a target, extract TLS cert metadata.
+    Returns list of cert info dicts (one per TLS port). SANs can reveal
+    additional service names and internal hostnames.
+    """
+    https_ports = [p for p, svc, _ in ports if svc in ("https", "https-alt") or p in (443, 8443, 9443)]
+    results = []
+    for port in https_ports:
+        cert_info = scan_tls_cert(ip, port)
+        if not cert_info.get("error"):
+            results.append(cert_info)
+            sans = cert_info.get("sans", [])
+            cn = cert_info.get("cn", "")
+            if sans or cn:
+                print(f"    [TLS] {ip}:{port} — CN={cn}, SANs={sans[:5]}")
+    return results
+
+
+# ── Tor / Onion endpoint discovery ───────────────────────────────────────
+
+def probe_tor_endpoint(onion_url: str, timeout: float = 15.0) -> dict:
+    """
+    Probe a .onion URL via local Tor SOCKS5 proxy (127.0.0.1:9050).
+
+    Returns dict with: accessible, status_code, content_type, title, headers_sample.
+    If Tor is not running, returns {"accessible": False, "error": "tor not available"}.
+
+    Domain agnostic: any onion endpoint can be probed and its structured
+    data ingested via struct_fetch.ingest_url().
+    """
+    result = {"url": onion_url, "accessible": False, "error": None}
+    try:
+        import socks  # PySocks — optional dep
+        s = socks.socksocket()
+        s.set_proxy(socks.SOCKS5, "127.0.0.1", 9050)
+        s.settimeout(timeout)
+        parsed = __import__("urllib.parse", fromlist=["urlparse"]).urlparse(onion_url)
+        host = parsed.hostname
+        port = parsed.port or 80
+        s.connect((host, port))
+        req = f"GET {parsed.path or '/'} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: SKG/1.0\r\n\r\n"
+        s.sendall(req.encode())
+        resp = s.recv(4096).decode(errors="replace")
+        s.close()
+        if resp.startswith("HTTP/"):
+            status_line = resp.splitlines()[0]
+            result["accessible"] = True
+            result["status_code"] = int(status_line.split()[1])
+            result["response_snippet"] = resp[:500]
+    except ImportError:
+        result["error"] = "PySocks not installed: pip install PySocks"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def discover_tor_targets(targets_yaml_path: str = "/etc/skg/targets.yaml") -> list[dict]:
+    """
+    Read operator-declared onion targets from targets.yaml and probe them.
+    Onion targets have method: onion and a url: http://xxx.onion path.
+    Returns list of accessible onion targets with probe results.
+    """
+    try:
+        import yaml
+        with open(targets_yaml_path) as fh:
+            data = yaml.safe_load(fh)
+        onion_targets = [
+            t for t in (data.get("targets", []) if isinstance(data, dict) else data or [])
+            if t.get("method") == "onion" or ".onion" in str(t.get("url", ""))
+        ]
+    except Exception:
+        return []
+
+    results = []
+    for t in onion_targets:
+        url = t.get("url", "")
+        if not url:
+            continue
+        print(f"  [TOR] Probing {url} ...")
+        probe = probe_tor_endpoint(url)
+        probe["target"] = t
+        results.append(probe)
+    return results
+
+
 # ── Discovery main ───────────────────────────────────────────────────────
 
 def main():
@@ -524,20 +662,48 @@ def main():
         if c["ip"] and c["ip"] not in live_hosts:
             live_hosts.append(c["ip"])
 
+    # Probe any operator-declared Tor/onion targets from targets.yaml
+    tor_results = discover_tor_targets()
+    if tor_results:
+        print(f"\n[TOR] Probed {len(tor_results)} onion target(s)")
+        for tr in tor_results:
+            status = "UP" if tr.get("accessible") else "DOWN"
+            print(f"  {tr.get('url', '?')}  [{status}]  {tr.get('error', '')}")
+
     targets = []
+    san_hosts: set[str] = set()  # extra hostnames found via TLS SANs
+
     for ip in live_hosts:
         ports = scan_ports(ip)
         if not ports:
             continue
 
+        # TLS cert scanning — extract SANs and feed back as candidate hostnames
+        tls_meta = discover_https_endpoints(ip, ports)
+        for cert_info in tls_meta:
+            for san in cert_info.get("sans", []):
+                # collect bare hostnames discovered via SANs (not IPs)
+                san_stripped = san.lstrip("*.")
+                if san_stripped and not san_stripped[0].isdigit():
+                    san_hosts.add(san_stripped)
+
         is_container = any(c["ip"] == ip for c in containers)
         os_guess = _fingerprint_device(ip, ports)
         target = classify_target(ip, ports, os_guess=os_guess, is_container=is_container)
+
+        # attach TLS cert metadata to target record
+        if tls_meta:
+            target["tls_certs"] = tls_meta
+
         targets.append(target)
 
         print(f"  {ip}")
         print(f"    OS: {os_guess}  Domains: {', '.join(target['domains'])}")
         print(f"    Services: {', '.join(str(p[0]) + '/' + p[1] for p in ports)}")
+        if tls_meta:
+            all_sans = [s for c in tls_meta for s in c.get("sans", [])]
+            if all_sans:
+                print(f"    TLS SANs: {', '.join(all_sans[:8])}")
 
     total_paths = 0
     total_realized = 0
@@ -552,6 +718,8 @@ def main():
             "targets_classified": len(targets),
             "docker_containers": len(containers),
             "mode": "deep" if deep else "quick",
+            "tls_san_hosts": sorted(san_hosts),
+            "tor_results": tor_results,
         },
         "targets": [],
         "attack_surface_summary": {},
@@ -566,6 +734,7 @@ def main():
             "domains": target["domains"],
             "attack_paths": [],
             "wicket_states": {},
+            "tls_certs": target.get("tls_certs", []),
         }
 
         for domain in target["domains"]:
@@ -607,6 +776,11 @@ def main():
     print(f"  Targets: {len(surface['targets'])}")
     print(f"  Paths:   {total_paths}")
     print(f"  Wickets: realized={total_realized} blocked={total_blocked} unknown={total_unknown}")
+    if san_hosts:
+        print(f"  TLS SANs discovered: {', '.join(sorted(san_hosts)[:12])}")
+    if tor_results:
+        up = sum(1 for r in tor_results if r.get("accessible"))
+        print(f"  Tor targets: {up}/{len(tor_results)} accessible")
 
     print()
     for t in surface["targets"]:

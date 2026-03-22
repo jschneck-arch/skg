@@ -34,7 +34,25 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import re as _re
+
 log = logging.getLogger("skg.sensors.projector")
+_INTERP_KEEP = 3  # keep only this many files per (domain, workload) prefix
+
+
+def _prune_interp_siblings(written: Path, keep: int = _INTERP_KEEP) -> None:
+    """Delete oldest sibling interp files so at most `keep` files exist per prefix."""
+    prefix = _re.sub(r'_[0-9a-f]{8}\.json$', '', written.name)
+    siblings = sorted(
+        written.parent.glob(f"{prefix}_*.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in siblings[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 SKG_HOME = Path(os.environ.get("SKG_HOME", Path(__file__).resolve().parents[2]))
 TOOLCHAIN_ALIASES = {
@@ -263,6 +281,7 @@ def project_events(
                 out_path = interp_dir / f"{domain}_{wid_safe}_{run_id}.json"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, indent=2))
+                _prune_interp_siblings(out_path)
                 log.info(f"[projector] {workload_id}/{attack_path_id} → {out_path.name} "
                          f"(score={payload.get('aprs', payload.get('lateral_score', payload.get('escape_score', payload.get('host_score', payload.get('web_score', payload.get('ai_score', '?'))))))})")
                 return out_path
@@ -302,6 +321,7 @@ def project_events(
                 out_path = interp_dir / f"{domain}_{wid_safe}_{run_id}.json"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, indent=2))
+                _prune_interp_siblings(out_path)
                 log.info(f"[projector] {workload_id}/{attack_path_id} → {out_path.name}")
                 return out_path
         except Exception as exc:

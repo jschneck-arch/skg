@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.98 scan initiated Sun Mar 22 11:14:36 2026 as: nmap -sV -p 445 -&#45;script=smb-vuln-ms17-010 -&#45;open -oX /var/lib/skg/discovery/nmap_ms17010_verify_20260322T111436.xml 192.168.122.153 -->
+<nmaprun scanner="nmap" args="nmap -sV -p 445 -&#45;script=smb-vuln-ms17-010 -&#45;open -oX /var/lib/skg/discovery/nmap_ms17010_verify_20260322T111436.xml 192.168.122.153" start="1774196076" startstr="Sun Mar 22 11:14:36 2026" version="7.98" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="1" services="445"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<hosthint><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="192.168.122.153" addrtype="ipv4"/>
+<address addr="52:54:00:CE:7A:C3" addrtype="mac" vendor="QEMU virtual NIC"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<host starttime="1774196077" endtime="1774196083"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="192.168.122.153" addrtype="ipv4"/>
+<address addr="52:54:00:CE:7A:C3" addrtype="mac" vendor="QEMU virtual NIC"/>
+<hostnames>
+</hostnames>
+<ports><port protocol="tcp" portid="445"><state state="open" reason="syn-ack" reason_ttl="128"/><service name="microsoft-ds" product="Microsoft Windows Server 2008 R2 - 2012 microsoft-ds" ostype="Windows Server 2008 R2 - 2012" method="probed" conf="10"><cpe>cpe:/o:microsoft:windows</cpe></service></port>
+</ports>
+<hostscript><script id="smb-vuln-ms17-010" output="&#xa;  VULNERABLE:&#xa;  Remote Code Execution vulnerability in Microsoft SMBv1 servers (ms17-010)&#xa;    State: VULNERABLE&#xa;    IDs:  CVE:CVE-2017-0143&#xa;    Risk factor: HIGH&#xa;      A critical remote code execution vulnerability exists in Microsoft SMBv1&#xa;       servers (ms17-010).&#xa;          &#xa;    Disclosure date: 2017-03-14&#xa;    References:&#xa;      https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143&#xa;      https://technet.microsoft.com/en-us/library/security/ms17-010.aspx&#xa;      https://blogs.technet.microsoft.com/msrc/2017/05/12/customer-guidance-for-wannacrypt-attacks/&#xa;"><table key="CVE-2017-0143">
+<elem key="title">Remote Code Execution vulnerability in Microsoft SMBv1 servers (ms17-010)</elem>
+<elem key="state">VULNERABLE</elem>
+<table key="ids">
+<elem>CVE:CVE-2017-0143</elem>
+</table>
+<table key="description">
+<elem>A critical remote code execution vulnerability exists in Microsoft SMBv1&#xa; servers (ms17-010).&#xa;    </elem>
+</table>
+<table key="dates">
+<table key="disclosure">
+<elem key="year">2017</elem>
+<elem key="month">03</elem>
+<elem key="day">14</elem>
+</table>
+</table>
+<elem key="disclosure">2017-03-14</elem>
+<table key="refs">
+<elem>https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143</elem>
+<elem>https://technet.microsoft.com/en-us/library/security/ms17-010.aspx</elem>
+<elem>https://blogs.technet.microsoft.com/msrc/2017/05/12/customer-guidance-for-wannacrypt-attacks/</elem>
+</table>
+</table>
+</script></hostscript><times srtt="356" rttvar="3755" to="100000"/>
+</host>
+<runstats><finished time="1774196083" timestr="Sun Mar 22 11:14:43 2026" summary="Nmap done at Sun Mar 22 11:14:43 2026; 1 IP address (1 host up) scanned in 7.24 seconds" elapsed="7.24" exit="success"/><hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>

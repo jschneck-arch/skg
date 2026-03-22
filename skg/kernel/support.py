@@ -71,6 +71,10 @@ class SupportEngine:
         raw_unresolved = 0.0
         family_weights: Dict[str, float] = {}
         observed_families: set[str] = set()
+        # Tracks distinct gravity cycle run IDs (non-empty cycle_id).
+        # n = len(observed_cycle_ids) when any are present; else len(observed_families).
+        # This matches Paper 4 §5: "n ≥ 2 distinct observation runs across gravity cycles."
+        observed_cycle_ids: set[str] = set()
         for obs in observations:
             if obs.context != context or target not in obs.targets:
                 continue
@@ -82,6 +86,8 @@ class SupportEngine:
             unresolved_part = float(mapping.get("U", 0.0))
             if max(realized_part, blocked_part, unresolved_part) > 0.0:
                 observed_families.add(family)
+                if obs.cycle_id:
+                    observed_cycle_ids.add(obs.cycle_id)
             realized += w * realized_part
             blocked += w * blocked_part
             unresolved += w * unresolved_part
@@ -96,7 +102,9 @@ class SupportEngine:
         contradiction = min(realized, blocked)
         total_weight = sum(family_weights.values())
         active_families = {fam: mass for fam, mass in family_weights.items() if mass > 0.05}
-        compatibility_span = len(observed_families)
+        # n = distinct gravity cycle run IDs when available (cycle-stamped observations);
+        # fallback to distinct instrument families for synthetic/baseline observations.
+        compatibility_span = len(observed_cycle_ids) if observed_cycle_ids else len(observed_families)
         if total_weight > 0.0 and compatibility_span > 0 and active_families:
             concentration = max(active_families.values()) / total_weight
             compatibility_score = max(0.0, min(1.0, 1.0 - concentration + (0.1 * (compatibility_span - 1))))

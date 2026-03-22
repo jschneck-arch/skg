@@ -1,0 +1,96 @@
+{
+  "claims": [
+    {
+      "description": "\u03b2\u2081 for 3-cycle (triangle)",
+      "formula": "\u03b2\u2081=|E|\u2212|V|+|C|=3\u22123+1",
+      "computed": 1,
+      "expected": 1,
+      "verified": true
+    },
+    {
+      "description": "\u03b2\u2081 for 2-node mutual dep",
+      "formula": "\u03b2\u2081=|E|\u2212|V|+|C|=1\u22122+1",
+      "computed": 0,
+      "expected": 0,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_structural(p=0.5)",
+      "formula": "1+p=1.5",
+      "computed": 1.5,
+      "expected": 1.5,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_projection(p=0.5)",
+      "formula": "0.5+0.5p=0.75",
+      "computed": 0.75,
+      "expected": 0.75,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_contextual(p=0.5)",
+      "formula": "p=0.5",
+      "computed": 0.5,
+      "expected": 0.5,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_temporal(p=0.5)",
+      "formula": "0.7p=0.35",
+      "computed": 0.35,
+      "expected": 0.35,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_s\u2265\u03a6_p at p=0.5",
+      "formula": "1.5\u22650.75",
+      "computed": 1.0,
+      "expected": 1.0,
+      "verified": true
+    },
+    {
+      "description": "\u03a6_p\u2265\u03a6_c at p=0.5",
+      "formula": "0.75\u22650.5",
+      "computed": 1.0,
+      "expected": 1.0,
+      "verified": true
+    },
+    {
+      "description": "PRIOR_ALPHA",
+      "formula": "P_B=s\u00d7SW, \u03b1=1.0",
+      "computed": 1.0,
+      "expected": 1.0,
+      "verified": true
+    },
+    {
+      "description": "same_host prior_influence at SW=1",
+      "formula": "s\u00d7\u03b1=1.0\u00d71.0",
+      "computed": 1.0,
+      "expected": 1.0,
+      "verified": true
+    },
+    {
+      "description": "same_subnet prior_influence",
+      "formula": "s\u00d7\u03b1=0.4\u00d71.0",
+      "computed": 0.4,
+      "expected": 0.4,
+      "verified": true
+    },
+    {
+      "description": "sin(\u03c6_blocked\u2212\u03c6_realized)=0",
+      "formula": "sin(\u03c0\u22120)=0",
+      "computed": 0.0,
+      "expected": 0.0,
+      "verified": true
+    },
+    {
+      "description": "sin(\u03c6_unknown\u2212\u03c6_realized)=1",
+      "formula": "sin(\u03c0/2\u22120)=1",
+      "computed": 1.0,
+      "expected": 1.0,
+      "verified": true
+    }
+  ],
+  "all_verified": true
+}

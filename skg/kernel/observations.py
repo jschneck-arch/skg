@@ -21,6 +21,11 @@ class Observation:
     artifact_refs: List[str] = field(default_factory=list)
     support_mapping: Dict[str, Dict[str, float]] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
+    # cycle_id: identifies the gravity cycle execution that produced this observation.
+    # Set to the NDJSON file stem (e.g. "gravity_nmap_192_168_1_1_20260322T143022")
+    # so that SupportEngine can count distinct runs, not just distinct instrument types.
+    # Empty string for synthetic/baseline observations not from a gravity cycle.
+    cycle_id: str = ""
 
 
 class ObservationStore:

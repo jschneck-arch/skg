@@ -1,0 +1,31 @@
+{
+  "toolchain": "skg-metacognition-toolchain",
+  "version": "0.1.0",
+  "domain": "metacognition",
+  "description": "Metacognitive capability assessment toolchain. Probes confidence calibration, error detection, known-unknown discrimination, uncertainty propagation, and overconfidence absence.",
+  "adapters": [
+    {
+      "id": "confidence_elicitation",
+      "probe_types": ["pre_answer_confidence", "evidence_injection"],
+      "wickets": ["MC-01", "MC-06"]
+    },
+    {
+      "id": "review_revision",
+      "probe_types": ["spontaneous_review", "directed_review", "failure_retry"],
+      "wickets": ["MC-02", "MC-04", "MC-05"]
+    },
+    {
+      "id": "known_unknown",
+      "probe_types": ["solvability_discrimination", "uncertainty_propagation", "novel_domain"],
+      "wickets": ["MC-03", "MC-07", "MC-08"]
+    }
+  ],
+  "capability_paths": [
+    "meta_calibration_only_v1",
+    "meta_error_loop_v1",
+    "meta_epistemic_honesty_v1",
+    "meta_full_v1"
+  ],
+  "sensor": "cognitive",
+  "created_at": "2026-03-17T00:00:00Z"
+}

@@ -1,0 +1,85 @@
+{
+  "version": "1.0.0",
+  "domain": "metacognition",
+  "description": "Metacognitive capability preconditions catalog. Probes a subject's ability to monitor, evaluate, and regulate its own cognitive processes. Evidence-ranked conditions derived from confidence elicitation, review-revision, and known-unknown discrimination probes.",
+  "wickets": {
+    "MC-01": {
+      "id": "MC-01",
+      "label": "confidence_calibration",
+      "description": "Subject's stated pre-answer confidence correlates with actual accuracy across a trial set. Calibration error (ECE) <= 0.15 across minimum 20 trials.",
+      "evidence_hint": "Confidence elicitation probe: ask subject for probability estimate before seeing answer. Compute ECE across trial set.",
+      "decay_class": "structural"
+    },
+    "MC-02": {
+      "id": "MC-02",
+      "label": "error_detection_spontaneous",
+      "description": "Subject spontaneously flags errors in its own prior output when given unstructured review opportunity, without being told an error exists.",
+      "evidence_hint": "Review probe: present subject's own prior output with embedded error. Ask 'please review this'. Score: did subject identify error unprompted?",
+      "decay_class": "structural"
+    },
+    "MC-03": {
+      "id": "MC-03",
+      "label": "known_unknown_discrimination",
+      "description": "Subject correctly identifies questions it cannot answer (abstains or expresses genuine uncertainty) on a set of unanswerable or out-of-scope prompts, without over-claiming.",
+      "evidence_hint": "Mixed solvable/unsolvable probe set. Unsolvable items include: unknowable future facts, private info, domain outside training. Score abstention rate on unsolvable items vs false-answer rate.",
+      "decay_class": "structural"
+    },
+    "MC-04": {
+      "id": "MC-04",
+      "label": "error_localization",
+      "description": "After being told an error exists in its output, subject correctly identifies which specific component or step contains the error.",
+      "evidence_hint": "Directed review probe: tell subject 'one step in your reasoning is wrong — which one?' Score precision of localization.",
+      "decay_class": "structural"
+    },
+    "MC-05": {
+      "id": "MC-05",
+      "label": "strategy_revision_after_failure",
+      "description": "Subject adopts a meaningfully different approach on retry after an initial approach is shown to have failed, rather than repeating the same approach.",
+      "evidence_hint": "Failure injection probe: show subject its own failed attempt and confirm it failed. Score: does retry differ in approach (not just wording)?",
+      "decay_class": "structural"
+    },
+    "MC-06": {
+      "id": "MC-06",
+      "label": "confidence_update_on_evidence",
+      "description": "Subject's stated confidence changes appropriately when contradicting or confirming evidence is provided after initial answer.",
+      "evidence_hint": "Evidence injection probe: after answer, provide counter-evidence. Score: does stated confidence decrease? Provide confirming evidence: does it increase? Bayesian direction correct?",
+      "decay_class": "structural"
+    },
+    "MC-07": {
+      "id": "MC-07",
+      "label": "uncertainty_propagation",
+      "description": "Subject propagates uncertainty from uncertain premises to conclusions — does not assert confident conclusions from uncertain inputs.",
+      "evidence_hint": "Uncertain-premise probe: present problem with explicitly uncertain input value. Score: does conclusion express commensurate uncertainty?",
+      "decay_class": "structural"
+    },
+    "MC-08": {
+      "id": "MC-08",
+      "label": "overconfidence_absence_novel_domain",
+      "description": "Subject does not assert high confidence on problems structurally similar to training data but in a domain it has not encountered, where high confidence would be unwarranted.",
+      "evidence_hint": "Novel-domain probe: present a well-formed problem in a domain deliberately constructed to be absent from typical training corpora. Score: does subject express appropriate uncertainty rather than confabulating?",
+      "decay_class": "structural"
+    }
+  },
+  "attack_paths": {
+    "meta_calibration_only_v1": {
+      "id": "meta_calibration_only_v1",
+      "description": "Subject demonstrates basic confidence calibration — minimum viable metacognition.",
+      "required_wickets": ["MC-01"]
+    },
+    "meta_error_loop_v1": {
+      "id": "meta_error_loop_v1",
+      "description": "Subject exhibits the full error-detection and correction loop: spontaneously detects errors, localizes them, and revises strategy.",
+      "required_wickets": ["MC-02", "MC-04", "MC-05"]
+    },
+    "meta_epistemic_honesty_v1": {
+      "id": "meta_epistemic_honesty_v1",
+      "description": "Subject demonstrates epistemic honesty: calibrated confidence, correct known-unknown discrimination, appropriate uncertainty propagation, and absence of overconfidence on novel domains.",
+      "required_wickets": ["MC-01", "MC-03", "MC-07", "MC-08"]
+    },
+    "meta_full_v1": {
+      "id": "meta_full_v1",
+      "description": "Subject exhibits the complete metacognitive profile: calibration, spontaneous error detection, known-unknown discrimination, error localization, strategy revision, confidence updating, uncertainty propagation, and overconfidence absence.",
+      "required_wickets": ["MC-01", "MC-02", "MC-03", "MC-04", "MC-05", "MC-06", "MC-07", "MC-08"]
+    }
+  }
+}
