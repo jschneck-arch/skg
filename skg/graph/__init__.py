@@ -255,7 +255,12 @@ class WorkloadGraph:
         log.info(f"[graph] edge: {source} --[{relationship}]--> {target}")
         return edge
 
-    def neighbors(self, workload_id: str, relationship: str | None = None) -> list[tuple[str, str, float]]:
+    def neighbors(
+        self,
+        workload_id: str,
+        relationship: str | None = None,
+        min_weight: float = 0.0,
+    ) -> list[tuple[str, str, float]]:
         """
         Return (neighbor_workload_id, relationship, weight) for all neighbors.
         """
@@ -290,7 +295,7 @@ class WorkloadGraph:
                     results.append((edge.source_workload, rel, w))
                     seen.add(key)
 
-        return results
+        return [row for row in results if row[2] >= min_weight]
 
     # ── Prior management ──────────────────────────────────────────────────────
 
@@ -480,10 +485,17 @@ class WorkloadGraph:
 
             # Find workloads for target_domain on same target
             for wl_key, priors_list in self._workload_index().items():
-                # Match workloads on the same target IP in the target domain
+                # Match only workloads in the target domain on the same target IP.
+                # The prefix check (tgt_d + "::") is intentionally strict: a workload
+                # like "host::172.17.0.2" starts with "host::" while
+                # "container_escape::172.17.0.2" does not. The previous condition
+                # `or f"::{target_ip}" in wl_key` was too broad — it matched ALL
+                # workloads on the same IP regardless of domain, causing every
+                # web→X coupling to accumulate on every same-IP workload and
+                # producing actual_delta ≈ 0.83 vs. the intended 0.285.
                 if not _same_identity(wl_key, source_workload):
                     continue
-                if not (wl_key.startswith(tgt_d) or f"::{target_ip}" in wl_key):
+                if not wl_key.startswith(tgt_d + "::"):
                     continue
                 if wl_key == source_workload:
                     continue

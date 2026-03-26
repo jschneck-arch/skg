@@ -70,6 +70,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from skg.core.paths import DELTA_DIR, DISCOVERY_DIR, EVENTS_DIR, SKG_STATE_DIR
+
 log = logging.getLogger("skg.intel.calibrator")
 
 # ── Prior (hand-tuned) signal weights by evidence rank ───────────────────
@@ -92,7 +94,7 @@ LEARNING_RATE: float = 0.10
 MIN_SAMPLES: int = 10
 
 # Calibration state file
-CAL_STATE_FILE = Path("/var/lib/skg/calibration/signal_weights.json")
+CAL_STATE_FILE = SKG_STATE_DIR / "calibration" / "signal_weights.json"
 
 
 class ConfidenceCalibrator:
@@ -106,14 +108,8 @@ class ConfidenceCalibrator:
 
     def __init__(self, events_dir: Path | None = None,
                  delta_dir: Path | None = None):
-        try:
-            from skg.core.paths import EVENTS_DIR, DELTA_DIR, DISCOVERY_DIR
-            self.events_dirs  = [events_dir or EVENTS_DIR,
-                                  DISCOVERY_DIR]
-            self.delta_dir   = delta_dir or DELTA_DIR
-        except ImportError:
-            self.events_dirs = [events_dir or Path("/var/lib/skg/events")]
-            self.delta_dir   = delta_dir or Path("/var/lib/skg/delta")
+        self.events_dirs = [events_dir or EVENTS_DIR, DISCOVERY_DIR]
+        self.delta_dir = delta_dir or DELTA_DIR
 
         # Current calibrated weights (start from priors)
         self._weights: dict[int, float] = dict(PRIOR_SIGNAL_WEIGHTS)

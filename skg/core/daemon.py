@@ -12,7 +12,7 @@ The SKG daemon. Single entry point. Owns everything.
 The toolchains manage their own venvs and projection logic.
 The daemon calls them as subprocesses — no duplication.
 """
-import glob, json, logging, math, os, selectors, signal, subprocess, sys, threading, time
+import glob, hashlib, json, logging, math, os, selectors, signal, subprocess, sys, threading, time
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
@@ -29,6 +29,10 @@ from skg.core.paths import (
     ensure_runtime_dirs, TOOLCHAIN_DIR, CE_TOOLCHAIN_DIR, AD_TOOLCHAIN_DIR,
     HOST_TOOLCHAIN_DIR, IDENTITY_FILE, EVENTS_DIR, INTERP_DIR, LOG_FILE, PID_FILE,
     RESONANCE_DIR, SKG_HOME, SKG_CONFIG_DIR, SKG_STATE_DIR, DISCOVERY_DIR,
+)
+from skg.core.domain_registry import (
+    load_daemon_domains,
+    summarize_domain_inventory,
 )
 from skg.modes import Mode, ModeTransition, MODE_BEHAVIOR, valid_transition
 from skg.identity import Identity, parse_workload_ref
@@ -110,44 +114,8 @@ def _resonance_boot_timeout_s(default: float = 5.0) -> float:
     except Exception:
         return default
 
-# Registered domains: name → (cli_script, project_subcommand, interp_event_type)
-DOMAINS = {
-    "aprs": {
-        "dir":        TOOLCHAIN_DIR,
-        "cli":        "skg.py",
-        "project_sub": ["project", "aprs"],
-        "interp_type": "interp.attack_path.realizability",
-        "default_path": "log4j_jndi_rce_v1",
-    },
-    "container_escape": {
-        "dir":        CE_TOOLCHAIN_DIR,
-        "cli":        "skg_escape.py",
-        "project_sub": ["project"],
-        "interp_type": "interp.container_escape.realizability",
-        "default_path": "container_escape_privileged_v1",
-    },
-    "ad_lateral": {
-        "dir":        AD_TOOLCHAIN_DIR,
-        "cli":        "skg_lateral.py",
-        "project_sub": ["project"],
-        "interp_type": "interp.ad_lateral.realizability",
-        "default_path": "ad_kerberoast_v1",
-    },
-    "host": {
-        "dir":        HOST_TOOLCHAIN_DIR,
-        "cli":        "skg_host.py",
-        "project_sub": ["project"],
-        "interp_type": "interp.host.realizability",
-        "default_path": "host_ssh_initial_access_v1",
-    },
-    "data": {
-        "dir":        SKG_HOME / "skg-data-toolchain",
-        "cli":        "skg_data.py",
-        "project_sub": ["project"],
-        "interp_type": "interp.data.pipeline",
-        "default_path": "data_completeness_failure_v1",
-    },
-}
+DOMAINS = load_daemon_domains()
+DOMAIN_INVENTORY = summarize_domain_inventory()
 
 
 def setup_logging() -> logging.Logger:
@@ -704,6 +672,7 @@ class IngestRequest(BaseModel):
 def api_root():
     return {"skg": "online",
             "domains": list(DOMAINS.keys()),
+            "domain_inventory": DOMAIN_INVENTORY,
             "endpoints": ["/status", "/mode", "/identity", "/identity/history",
                           "/ingest", "/projections/{workload_id}",
                           "/gravity/status", "/gravity/start", "/gravity/stop"]}
@@ -844,13 +813,14 @@ def _compute_field_state_inner() -> dict:
         return data.get("payload", data) if isinstance(data, dict) else None
 
     def _normalize_projection_classification(classification: str) -> str:
-        if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
+        if classification in {"realized", "not_realized", "indeterminate",
+                               "indeterminate_h1", "unknown"}:
             return classification
         if classification in {"fully_realized"}:
             return "realized"
         if classification in {"blocked"}:
             return "not_realized"
-        if classification in {"partial", "indeterminate_h1"}:
+        if classification in {"partial"}:
             return "indeterminate"
         return classification or "unknown"
 
@@ -1087,13 +1057,14 @@ def get_projection_field(workload_id: str, domain: str = "host"):
         return data.get("payload", data) if isinstance(data, dict) else None
 
     def _normalize_projection_classification(classification: str) -> str:
-        if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
+        if classification in {"realized", "not_realized", "indeterminate",
+                               "indeterminate_h1", "unknown"}:
             return classification
         if classification in {"fully_realized"}:
             return "realized"
         if classification in {"blocked"}:
             return "not_realized"
-        if classification in {"partial", "indeterminate_h1"}:
+        if classification in {"partial"}:
             return "indeterminate"
         return classification or "unknown"
 
@@ -1280,6 +1251,36 @@ class AssistantExplainRequest(BaseModel):
     limit: int = 6
     context: dict[str, Any] | None = None
     task: str = ""
+
+
+class AssistantWhatIfRequest(BaseModel):
+    kind: str
+    id: str = ""
+    identity_key: str = ""
+    limit: int = 6
+    context: dict[str, Any] | None = None
+    question: str = ""
+    action: dict[str, Any] | None = None
+
+
+class AssistantDemandRequest(BaseModel):
+    kind: str
+    id: str = ""
+    identity_key: str = ""
+    limit: int = 6
+    context: dict[str, Any] | None = None
+
+
+class AssistantDraftDemandRequest(BaseModel):
+    demand: dict[str, Any] | None = None
+    demand_id: str = ""
+    demand_kind: str = ""
+    kind: str = ""
+    id: str = ""
+    identity_key: str = ""
+    limit: int = 6
+    context: dict[str, Any] | None = None
+    use_llm: bool = True
 
 
 @app.post("/collect")
@@ -2314,6 +2315,112 @@ def _assistant_compact_memory(neighborhood: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _assistant_compact_field_row(row: dict[str, Any]) -> dict[str, Any]:
+    unknown_nodes = list(row.get("unknown_nodes") or [])[:4]
+    resolution_required = row.get("resolution_required") or {}
+    return {
+        "workload_id": row.get("workload_id"),
+        "manifestation_key": row.get("manifestation_key"),
+        "attack_path_id": row.get("attack_path_id"),
+        "classification": row.get("classification"),
+        "E": row.get("E"),
+        "E_base": row.get("E_base"),
+        "fold_contribution": row.get("fold_contribution"),
+        "field_pull": row.get("field_pull"),
+        "compatibility_score": row.get("compatibility_score"),
+        "compatibility_span": row.get("compatibility_span"),
+        "decoherence": row.get("decoherence"),
+        "n_required": row.get("n_required"),
+        "n_realized": row.get("n_realized"),
+        "n_blocked": row.get("n_blocked"),
+        "n_unknown": row.get("n_unknown"),
+        "unknown_nodes": unknown_nodes,
+        "resolution_required": {
+            node: resolution_required.get(node)
+            for node in unknown_nodes
+            if node in resolution_required
+        },
+        "unresolved_reason": row.get("unresolved_reason"),
+        "computed_at": row.get("computed_at"),
+    }
+
+
+def _assistant_compact_transition(row: dict[str, Any]) -> dict[str, Any]:
+    keep = [
+        "computed_at",
+        "ts",
+        "timestamp",
+        "wicket_id",
+        "node_id",
+        "domain",
+        "attack_path_id",
+        "from_state",
+        "to_state",
+        "kind",
+        "reason",
+        "_workload_id",
+    ]
+    compact = {
+        key: row.get(key)
+        for key in keep
+        if key in row and row.get(key) not in (None, "", [], {})
+    }
+    if not compact:
+        for key in sorted(row.keys())[:8]:
+            value = row.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = value
+    return compact
+
+
+def _assistant_compact_value(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return value[:180]
+    if depth >= 2:
+        if isinstance(value, dict):
+            return {"keys": sorted(list(value.keys()))[:12], "count": len(value)}
+        if isinstance(value, list):
+            return [str(item)[:80] for item in value[:4]]
+        return value
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        keys = sorted(value.keys())[:8]
+        for key in keys:
+            compact[key] = _assistant_compact_value(value.get(key), depth + 1)
+        if len(value) > len(keys):
+            compact["_truncated_keys"] = len(value) - len(keys)
+        return compact
+    if isinstance(value, list):
+        items = [_assistant_compact_value(item, depth + 1) for item in value[:4]]
+        if len(value) > 4:
+            items.append(f"... +{len(value) - 4} more")
+        return items
+    return value
+
+
+def _assistant_compact_artifact_preview(preview: dict[str, Any], lines: int = 3) -> dict[str, Any]:
+    rows = []
+    for row in (preview.get("rows") or [])[:lines]:
+        compact_row = {}
+        if "line" in row:
+            compact_row["line"] = row.get("line")
+        if "keys" in row:
+            compact_row["keys"] = row.get("keys")
+        if "data" in row:
+            compact_row["data"] = _assistant_compact_value(row.get("data"))
+        elif "raw" in row:
+            compact_row["raw"] = str(row.get("raw") or "")[:180]
+        else:
+            compact_row.update(_assistant_compact_value(row))
+        rows.append(compact_row)
+    return {
+        "path": preview.get("path"),
+        "file": preview.get("file"),
+        "preview_kind": preview.get("preview_kind"),
+        "rows": rows,
+    }
+
+
 def _assistant_find_memory(neighborhoods: list[dict[str, Any]], selection_id: str, identity_key: str) -> dict[str, Any] | None:
     for index, row in enumerate(neighborhoods):
         row_id = f"{row.get('identity_key')}:{row.get('domain') or 'unknown'}:{index}"
@@ -2337,18 +2444,220 @@ def _assistant_find_fold(folds: list[dict[str, Any]], selection_id: str, identit
     return None
 
 
+def _assistant_graph_context(
+    identity_key: str,
+    workloads: list[str],
+    field_rows: list[dict[str, Any]],
+    limit: int = 6,
+) -> dict[str, Any]:
+    neighbors: list[dict[str, Any]] = []
+    priors: list[dict[str, Any]] = []
+    seen_neighbors: set[tuple[str, str]] = set()
+    seen_priors: set[tuple[str, str]] = set()
+
+    for workload_id in workloads:
+        if not workload_id:
+            continue
+        try:
+            rows = kernel.graph.neighbors(workload_id, min_weight=0.1)
+        except Exception:
+            rows = []
+        for neighbor_id, relationship, weight in rows:
+            key = (neighbor_id, relationship)
+            if key in seen_neighbors:
+                continue
+            seen_neighbors.add(key)
+            neighbors.append({
+                "workload_id": neighbor_id,
+                "identity_key": parse_workload_ref(neighbor_id).get("identity_key"),
+                "relationship": relationship,
+                "weight": round(float(weight or 0.0), 4),
+            })
+
+    for row in field_rows:
+        workload_id = row.get("workload_id") or ""
+        attack_path_id = row.get("attack_path_id") or ""
+        for wicket_id in (row.get("unknown_nodes") or [])[:4]:
+            key = (workload_id, wicket_id)
+            if key in seen_priors:
+                continue
+            seen_priors.add(key)
+            try:
+                prior = float(kernel.graph.get_prior(workload_id, wicket_id=wicket_id) or 0.0)
+            except Exception:
+                prior = 0.0
+            if prior <= 0.0:
+                continue
+            priors.append({
+                "workload_id": workload_id,
+                "identity_key": parse_workload_ref(workload_id).get("identity_key", identity_key),
+                "attack_path_id": attack_path_id,
+                "wicket_id": wicket_id,
+                "prior": round(prior, 4),
+            })
+
+    neighbors.sort(key=lambda item: (-float(item.get("weight") or 0.0), str(item.get("workload_id") or "")))
+    priors.sort(key=lambda item: (-float(item.get("prior") or 0.0), str(item.get("wicket_id") or "")))
+    return {
+        "neighbor_count": len(neighbors),
+        "neighbors": neighbors[:limit],
+        "prior_count": len(priors),
+        "priors": priors[:limit],
+    }
+
+
+def _assistant_gravity_context(identity_key: str) -> dict[str, Any]:
+    gravity_state = kernel.gravity_status() or {}
+    return {
+        "running": gravity_state.get("running"),
+        "cycle": gravity_state.get("cycle"),
+        "total_entropy": gravity_state.get("total_entropy"),
+        "total_unknowns": gravity_state.get("total_unknowns"),
+        "field_pull_boost": gravity_state.get("field_pull_boost"),
+        "last_cycle_at": gravity_state.get("last_cycle_at"),
+        "cycle_started_at": gravity_state.get("cycle_started_at"),
+        "current_activity": gravity_state.get("current_activity"),
+        "current_surface": gravity_state.get("current_surface"),
+        "last_returncode": gravity_state.get("last_returncode"),
+        "error": gravity_state.get("error"),
+        "recent_output": [str(line)[:180] for line in (gravity_state.get("recent_output") or [])[-4:]],
+        "identity_key": identity_key,
+    }
+
+
+def _assistant_reasoning_bundle(
+    *,
+    kind: str,
+    selection_id: str,
+    identity_key: str,
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    group: dict[str, Any],
+    field_rows: list[dict[str, Any]],
+    field_row_count: int,
+    folds: list[dict[str, Any]],
+    fold_count: int,
+    proposals: list[dict[str, Any]],
+    proposal_count: int,
+    memory: list[dict[str, Any]],
+    memory_count: int,
+    timeline: dict[str, Any],
+    artifacts: list[dict[str, Any]],
+    artifact_count: int,
+    limit: int,
+) -> dict[str, Any]:
+    surface_snapshot = _assistant_compact_target(
+        group or {
+            "identity_key": identity_key,
+            "manifestations": [],
+            "paths": [],
+        },
+        target or {},
+    )
+    workload_ids = sorted({
+        *(row.get("workload_id") for row in (group.get("paths") or []) if row.get("workload_id")),
+        *(row.get("workload_id") for row in field_rows if row.get("workload_id")),
+        *(row.get("workload_id") for row in (timeline.get("graph_neighbors") or []) if row.get("workload_id")),
+    })
+    return {
+        "version": 1,
+        "selection": {
+            "kind": kind,
+            "id": selection_id,
+            "identity_key": identity_key,
+        },
+        "subject": subject,
+        "surface": surface_snapshot,
+        "field_state": {
+            "count": field_row_count,
+            "paths": field_rows[:limit],
+        },
+        "folds": {
+            "count": fold_count,
+            "items": folds[:limit],
+        },
+        "proposals": {
+            "count": proposal_count,
+            "items": proposals[:limit],
+        },
+        "memory": {
+            "count": memory_count,
+            "items": memory[:limit],
+        },
+        "timeline": timeline,
+        "graph": _assistant_graph_context(identity_key, workload_ids[: max(limit * 2, 4)], field_rows, limit=limit),
+        "artifacts": {
+            "count": artifact_count,
+            "items": artifacts[: max(1, min(limit, 3))],
+        },
+        "gravity": _assistant_gravity_context(identity_key),
+    }
+
+
+def _assistant_prompt_view(context: dict[str, Any]) -> dict[str, Any]:
+    bundle = context.get("bundle")
+    if not isinstance(bundle, dict):
+        return {
+            "kind": context.get("kind"),
+            "identity_key": context.get("identity_key"),
+            "task": context.get("task"),
+            "subject": context.get("subject"),
+            "fold_count": context.get("fold_count"),
+            "proposal_count": context.get("proposal_count"),
+            "related_folds": (context.get("related_folds") or [])[:3],
+            "related_proposals": (context.get("related_proposals") or [])[:3],
+            "timeline": {
+                key: value
+                for key, value in (context.get("timeline") or {}).items()
+                if key != "recent_transitions"
+            },
+        }
+
+    prompt_view = {
+        "kind": context.get("kind"),
+        "id": context.get("id"),
+        "identity_key": context.get("identity_key"),
+        "task": context.get("task"),
+        "subject": context.get("subject"),
+        "bundle": bundle,
+    }
+    if context.get("question"):
+        prompt_view["question"] = context.get("question")
+    if context.get("action"):
+        prompt_view["action"] = context.get("action")
+    return prompt_view
+
+
+def _assistant_prompt_schema(task: str) -> str:
+    if task == "what_if":
+        return (
+            '{"summary":"string","assumptions":["string"],'
+            '"predicted_effects":["string"],"next_observations":["string"],'
+            '"cautions":["string"]}'
+        )
+    return '{"summary":"string","findings":["string"],"next_actions":["string"],"cautions":["string"]}'
+
+
 def _assistant_json_prompt(context: dict[str, Any]) -> str:
     task = str(context.get("task") or "target_summary")
     task_notes = str((context.get("assistant_config") or {}).get("task_prompt") or "")
     note_line = f"Task note: {task_notes}\n" if task_notes else ""
+    task_guardrail = ""
+    if task == "what_if":
+        task_guardrail = (
+            "Treat this as counterfactual planning over measured state.\n"
+            "Do not claim the action already happened.\n"
+            "Predict only likely effects on uncertainty, folds, proposals, graph pressure, or observation priority.\n"
+        )
     return (
         "You are the SKG AI assistant. You are not the substrate and you may not invent measurements.\n"
         "Use only the provided JSON context. Treat realized/blocked/indeterminate exactly as given.\n"
         "If something is unresolved, say it is indeterminate or unsupported.\n"
+        f"{task_guardrail}"
         f"Current task: {task}.\n"
         f"{note_line}"
         "Return only valid JSON with this schema:\n"
-        '{"summary":"string","findings":["string"],"next_actions":["string"],"cautions":["string"]}\n'
+        f"{_assistant_prompt_schema(task)}\n"
         "Context JSON:\n"
         f"{json.dumps(context, ensure_ascii=True)}"
     )
@@ -2388,7 +2697,18 @@ _OLLAMA_LOCK = threading.Lock()
 
 
 def _assistant_cache_key(context: dict[str, Any]) -> str:
-    return f"{context.get('identity_key','')}:{context.get('task','')}"
+    payload = {
+        "kind": context.get("kind"),
+        "id": context.get("id"),
+        "identity_key": context.get("identity_key"),
+        "task": context.get("task"),
+        "question": context.get("question"),
+        "action": context.get("action"),
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8", errors="replace")
+    ).hexdigest()[:12]
+    return f"{context.get('identity_key','')}:{context.get('task','')}:{digest}"
 
 
 def _assistant_ollama_background(context: dict[str, Any], model: str, num_predict: int) -> None:
@@ -2397,22 +2717,7 @@ def _assistant_ollama_background(context: dict[str, Any], model: str, num_predic
     try:
         from skg.resonance.llm_pool import get_pool
         pool = get_pool()
-        # Trim context to reduce prompt size for small models
-        slim = {
-            "kind": context.get("kind"),
-            "identity_key": context.get("identity_key"),
-            "task": context.get("task"),
-            "subject": context.get("subject"),
-            "fold_count": context.get("fold_count"),
-            "proposal_count": context.get("proposal_count"),
-            "related_folds": (context.get("related_folds") or [])[:3],
-            "related_proposals": (context.get("related_proposals") or [])[:3],
-            "timeline": {
-                k: v for k, v in (context.get("timeline") or {}).items()
-                if k != "recent_transitions"
-            },
-        }
-        prompt = _assistant_json_prompt(slim)
+        prompt = _assistant_json_prompt(_assistant_prompt_view(context))
         raw = pool.generate(prompt, num_predict=num_predict)
         payload = _assistant_parse_json(raw)
         if isinstance(payload, dict):
@@ -2461,10 +2766,121 @@ def _assistant_try_ollama(context: dict[str, Any], timeout_s: float = 8.0) -> tu
     return None, model
 
 
+def _assistant_action_label(context: dict[str, Any]) -> str:
+    action = context.get("action") or {}
+    subject = context.get("subject") or {}
+    if isinstance(action, dict):
+        for key in ("description", "command_hint", "command", "kind", "proposal_kind", "proposal_id"):
+            value = str(action.get(key) or "").strip()
+            if value:
+                return value
+    for key in ("description", "command_hint", "kind", "fold_type", "attack_path_id"):
+        value = str(subject.get(key) or "").strip()
+        if value:
+            return value
+    question = str(context.get("question") or "").strip()
+    if question:
+        return question
+    return "the proposed action"
+
+
+def _assistant_counterfactual_fallback(context: dict[str, Any]) -> dict[str, Any]:
+    bundle = context.get("bundle") or {}
+    field_state = ((bundle.get("field_state") or {}).get("paths") or [])[:4]
+    folds = ((bundle.get("folds") or {}).get("items") or [])[:4]
+    proposals = ((bundle.get("proposals") or {}).get("items") or [])[:4]
+    graph = bundle.get("graph") or {}
+    artifacts = ((bundle.get("artifacts") or {}).get("items") or [])[:2]
+    action = context.get("action") or {}
+    subject = context.get("subject") or {}
+    identity_key = context.get("identity_key") or "the selected identity"
+    label = _assistant_action_label(context)
+    lower_label = label.lower()
+    lower_question = str(context.get("question") or "").lower()
+    top_path = field_state[0] if field_state else {}
+
+    summary = (
+        f"If SKG takes {label}, the immediate effect is most likely on uncertainty and routing around "
+        f"{identity_key}, not on measured state."
+    )
+    assumptions = [
+        "This is a counterfactual over the current substrate snapshot, not an executed action.",
+        "Any predicted change remains hypothetical until new observation lands in SKG.",
+    ]
+    predicted_effects: list[str] = []
+    next_observations: list[str] = []
+    cautions = [
+        "Counterfactual output is not canonical state.",
+        "Small-model reasoning should be checked against the attached field, fold, proposal, and artifact objects.",
+    ]
+
+    if top_path:
+        predicted_effects.append(
+            f"Primary pressure remains {top_path.get('attack_path_id') or 'the top path'} "
+            f"with classification {top_path.get('classification') or 'unknown'} and E {float(top_path.get('E') or 0.0):.2f}."
+        )
+        if int(top_path.get("n_unknown") or 0) > 0:
+            predicted_effects.append(
+                f"It could reduce uncertainty on {int(top_path.get('n_unknown') or 0)} unresolved nodes "
+                f"if it produces the telemetry listed in resolution_required."
+            )
+        hints = top_path.get("resolution_required") or {}
+        if hints:
+            wicket_id = next(iter(hints))
+            next_observations.append(f"Best validation target is {wicket_id}: {hints[wicket_id]}.")
+
+    if folds:
+        predicted_effects.append(
+            f"Current fold pressure count is {len(folds)}; the action is useful only if it resolves a real fold or closes an observation gap."
+        )
+
+    if proposals:
+        predicted_effects.append(
+            f"Proposal pressure count is {len(proposals)}; executing a plan does not reduce that pressure until support changes are observed."
+        )
+
+    graph_priors = graph.get("priors") or []
+    if graph_priors:
+        top_prior = graph_priors[0]
+        predicted_effects.append(
+            f"Graph memory is already biasing {top_prior.get('wicket_id') or 'a wicket'} "
+            f"on {top_prior.get('workload_id') or 'the selected workload'} with prior {float(top_prior.get('prior') or 0.0):.2f}."
+        )
+
+    if subject.get("kind") == "catalog_growth" or action.get("proposal_kind") == "catalog_growth":
+        predicted_effects.append("Catalog growth would change SKG coverage and future fold pressure, not current measured target state.")
+        next_observations.append("After catalog growth, rerun observation on the same identity before treating any new path as realized.")
+    elif subject.get("kind") == "field_action" or action.get("proposal_kind") == "field_action" or action.get("command") or subject.get("command_hint"):
+        predicted_effects.append("Executing a field action could change the target, but SKG must re-observe before promoting that effect into state.")
+        next_observations.append("Plan a re-observation immediately after execution so intended change and stale evidence do not get conflated.")
+    elif any(token in lower_label or token in lower_question for token in ("observe", "sensor", "collect", "profile", "sweep", "probe")):
+        predicted_effects.append("Observation-focused actions mainly attack E_base and unresolved nodes; they do not by themselves collapse structural gaps.")
+    elif any(token in lower_label or token in lower_question for token in ("review", "note", "report")):
+        predicted_effects.append("Narrative actions change operator understanding, not SKG substrate state.")
+    else:
+        predicted_effects.append("Without new evidence, the likely effect is a change in operator priority rather than a substrate transition.")
+
+    if artifacts:
+        next_observations.append("Check the newest supporting artifact preview first so the counterfactual is grounded in the latest measured file.")
+
+    if not next_observations:
+        next_observations.append("Pick the action that closes the highest-E path or top unresolved fold before expanding scope.")
+
+    return {
+        "summary": summary,
+        "assumptions": assumptions[:4],
+        "predicted_effects": predicted_effects[:5],
+        "next_observations": next_observations[:4],
+        "cautions": cautions[:4],
+    }
+
+
 def _assistant_fallback(context: dict[str, Any]) -> dict[str, Any]:
     kind = context.get("kind")
     task = str(context.get("task") or "")
     subject = context.get("subject") or {}
+    if task == "what_if":
+        return _assistant_counterfactual_fallback(context)
     summary = "SKG assistant could not derive a summary."
     findings: list[str] = []
     next_actions: list[str] = []
@@ -2613,27 +3029,44 @@ def _assistant_default_task(kind: str) -> str:
 
 
 def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
+    limit = max(1, min(int(getattr(req, "limit", 6) or 6), 12))
     targets = list_targets()
     surface = field_surface()
     folds = folds_summary()
     proposals = list_proposals(status="all")
     memory = pearl_memory_manifold()
+    field_state = _compute_field_state()
 
     groups = _assistant_group_surface(surface.get("workloads") or [])
-    targets_by_identity = {row.get("ip"): row for row in targets.get("targets") or [] if row.get("ip")}
+    targets_by_identity = {
+        (row.get("ip") or row.get("host") or ""): row
+        for row in targets.get("targets") or []
+        if (row.get("ip") or row.get("host"))
+    }
     identity_key = req.identity_key or ""
 
     subject: dict[str, Any] | None = None
+    group: dict[str, Any] | None = None
+    target_row: dict[str, Any] = {}
     if req.kind == "target":
         identity_key = identity_key or req.id
         group = groups.get(identity_key)
+        target_row = targets_by_identity.get(identity_key, {})
+        if group is None and identity_key:
+            group = {
+                "identity_key": identity_key,
+                "manifestations": [],
+                "paths": [],
+            }
         if group:
-            subject = _assistant_compact_target(group, targets_by_identity.get(identity_key, {}))
+            subject = _assistant_compact_target(group, target_row)
     elif req.kind == "fold":
         fold = _assistant_find_fold(folds.get("folds") or [], req.id, identity_key)
         if fold:
             subject = _assistant_compact_fold(fold)
             identity_key = identity_key or fold.get("target_ip") or fold.get("location") or ""
+            group = groups.get(identity_key)
+            target_row = targets_by_identity.get(identity_key, {})
     elif req.kind == "proposal":
         proposal = None
         for row in proposals.get("proposals") or []:
@@ -2644,11 +3077,15 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
             subject = _assistant_compact_proposal(proposal)
             hosts = proposal.get("hosts") or []
             identity_key = identity_key or (hosts[0] if hosts else "")
+            group = groups.get(identity_key)
+            target_row = targets_by_identity.get(identity_key, {})
     elif req.kind == "memory":
         neighborhood = _assistant_find_memory(memory.get("neighborhoods") or [], req.id, identity_key)
         if neighborhood:
             subject = _assistant_compact_memory(neighborhood)
             identity_key = identity_key or neighborhood.get("identity_key") or ""
+            group = groups.get(identity_key)
+            target_row = targets_by_identity.get(identity_key, {})
 
     if not subject:
         raise HTTPException(404, f"Assistant subject not found for {req.kind}:{req.id}")
@@ -2657,19 +3094,74 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
         _assistant_compact_fold(fold)
         for fold in (folds.get("folds") or [])
         if identity_key and (fold.get("target_ip") or fold.get("location")) == identity_key
-    ][:req.limit]
+    ]
     identity_proposals = [
         _assistant_compact_proposal(proposal)
         for proposal in (proposals.get("proposals") or [])
         if not identity_key or identity_key in (proposal.get("hosts") or [])
-    ][:req.limit]
+    ]
     identity_memory = [
         _assistant_compact_memory(row)
         for row in (memory.get("neighborhoods") or [])
         if not identity_key or row.get("identity_key") == identity_key
-    ][:req.limit]
-    timeline = identity_timeline(identity_key, limit=max(4, req.limit * 2)) if identity_key else {}
-    artifacts = identity_artifacts(identity_key, limit=req.limit).get("artifacts", []) if identity_key else []
+    ]
+    identity_field_rows = sorted(
+        [
+            _assistant_compact_field_row(row)
+            for row in (field_state.values() if isinstance(field_state, dict) else [])
+            if not identity_key or row.get("identity_key") == identity_key
+        ],
+        key=lambda row: (-float(row.get("E") or 0.0), str(row.get("attack_path_id") or "")),
+    )
+    timeline_raw = identity_timeline(identity_key, limit=max(4, limit * 2)) if identity_key else {}
+    artifacts_raw = identity_artifacts(identity_key, limit=limit).get("artifacts", []) if identity_key else []
+    artifact_rows = []
+    for row in artifacts_raw[: max(1, min(limit, 3))]:
+        item = {
+            "file": row.get("file"),
+            "category": row.get("category"),
+            "mtime": row.get("mtime"),
+            "workload_id": row.get("workload_id"),
+            "path": row.get("path"),
+        }
+        if row.get("path"):
+            try:
+                preview = _artifact_preview_payload(row["path"], lines=min(limit, 4))
+                item["preview"] = _assistant_compact_artifact_preview(preview, lines=min(limit, 3))
+            except Exception:
+                pass
+        artifact_rows.append(item)
+
+    timeline = {
+        "workload_count": timeline_raw.get("workload_count", 0),
+        "snapshot_count": timeline_raw.get("snapshot_count", 0),
+        "transition_count": timeline_raw.get("transition_count", 0),
+        "recent_transitions": [
+            _assistant_compact_transition(row)
+            for row in (timeline_raw.get("transitions") or [])[:limit]
+        ],
+        "graph_neighbors": (timeline_raw.get("graph_neighbors") or [])[:limit],
+    }
+    bundle = _assistant_reasoning_bundle(
+        kind=req.kind,
+        selection_id=req.id,
+        identity_key=identity_key,
+        subject=subject,
+        target=target_row,
+        group=group or {},
+        field_rows=identity_field_rows[:limit],
+        field_row_count=len(identity_field_rows),
+        folds=identity_folds[:limit],
+        fold_count=len(identity_folds),
+        proposals=identity_proposals[:limit],
+        proposal_count=len(identity_proposals),
+        memory=identity_memory[:limit],
+        memory_count=len(identity_memory),
+        timeline=timeline,
+        artifacts=artifact_rows,
+        artifact_count=len(artifacts_raw),
+        limit=limit,
+    )
 
     return {
         "kind": req.kind,
@@ -2678,15 +3170,15 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
         "subject": subject,
         "fold_count": len(identity_folds),
         "proposal_count": len(identity_proposals),
-        "related_folds": identity_folds,
-        "related_proposals": identity_proposals,
-        "related_memory": identity_memory,
-        "timeline": {
-            "workload_count": timeline.get("workload_count", 0),
-            "snapshot_count": timeline.get("snapshot_count", 0),
-            "transition_count": timeline.get("transition_count", 0),
-            "recent_transitions": (timeline.get("transitions") or [])[:req.limit],
+        "field_path_count": len(identity_field_rows),
+        "related_folds": identity_folds[:limit],
+        "related_proposals": identity_proposals[:limit],
+        "related_memory": identity_memory[:limit],
+        "field_state": {
+            "count": len(identity_field_rows),
+            "paths": identity_field_rows[:limit],
         },
+        "timeline": timeline,
         "artifacts": [
             {
                 "file": row.get("file"),
@@ -2694,30 +3186,92 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
                 "mtime": row.get("mtime"),
                 "workload_id": row.get("workload_id"),
             }
-            for row in artifacts[:req.limit]
+            for row in artifact_rows[:limit]
         ],
+        "bundle": bundle,
     }
+
+
+def _assistant_task_prompt(assistant_cfg: dict[str, Any], task: str) -> str:
+    tasks = assistant_cfg.get("tasks") or {}
+    return (tasks.get(task) if isinstance(tasks, dict) else "") or ""
+
+
+def _assistant_prepare_context(req: Any, default_task: str) -> tuple[dict[str, Any], str]:
+    base_context: dict[str, Any] | None = None
+    try:
+        if getattr(req, "kind", ""):
+            base_context = _assistant_context(req)
+    except HTTPException:
+        if not isinstance(getattr(req, "context", None), dict):
+            raise
+
+    override = getattr(req, "context", None)
+    if override is not None and not isinstance(override, dict):
+        raise HTTPException(400, "Assistant context must be an object")
+
+    if isinstance(override, dict):
+        context = dict(base_context or {})
+        context.update(override)
+        if base_context:
+            context.setdefault("bundle", base_context.get("bundle"))
+            context.setdefault("field_state", base_context.get("field_state"))
+            context.setdefault("timeline", base_context.get("timeline"))
+    elif isinstance(base_context, dict):
+        context = base_context
+    else:
+        raise HTTPException(404, f"Assistant subject not found for {getattr(req, 'kind', '')}:{getattr(req, 'id', '')}")
+
+    assistant_cfg = _assistant_config()
+    task = getattr(req, "task", "") or default_task
+    task_prompt = _assistant_task_prompt(assistant_cfg, task)
+    context.setdefault("kind", getattr(req, "kind", ""))
+    context.setdefault("id", getattr(req, "id", ""))
+    context.setdefault("identity_key", getattr(req, "identity_key", ""))
+    context["task"] = task
+    context["assistant_config"] = {
+        "enabled": bool(assistant_cfg.get("enabled", True)),
+        "timeout_s": float(assistant_cfg.get("timeout_s", 8.0) or 8.0),
+        "num_predict": int(assistant_cfg.get("num_predict", 220) or 220),
+        "task_prompt": task_prompt,
+    }
+    return context, task
+
+
+def _assistant_bundle_context(req: Any) -> dict[str, Any]:
+    context, _task = _assistant_prepare_context(
+        req,
+        _assistant_default_task(getattr(req, "kind", "") or "target"),
+    )
+    bundle = context.get("bundle")
+    if not isinstance(bundle, dict):
+        raise HTTPException(400, "Assistant bundle unavailable")
+    return context
+
+
+def _assistant_draft_context_request(req: Any, demand: dict[str, Any] | None = None) -> Any:
+    import types as _types
+
+    selection = dict((demand or {}).get("selection") or {})
+    kind = str(getattr(req, "kind", "") or selection.get("kind") or "").strip()
+    if not kind:
+        raise HTTPException(400, "kind is required to draft an assistant demand")
+    return _types.SimpleNamespace(
+        kind=kind,
+        id=str(getattr(req, "id", "") or selection.get("id") or ""),
+        identity_key=str(getattr(req, "identity_key", "") or selection.get("identity_key") or ""),
+        limit=int(getattr(req, "limit", 6) or 6),
+        context=getattr(req, "context", None),
+        question="",
+        action=None,
+    )
 
 
 @app.post("/assistant/explain")
 def assistant_explain(req: AssistantExplainRequest):
     try:
-        context = req.context or _assistant_context(req)
-        if not isinstance(context, dict):
-            raise HTTPException(400, "Assistant context must be an object")
-        assistant_cfg = _assistant_config()
-        task = req.task or _assistant_default_task(req.kind)
-        task_prompt = ((assistant_cfg.get("tasks") or {}).get(task) if isinstance(assistant_cfg.get("tasks"), dict) else "") or ""
-        context.setdefault("kind", req.kind)
-        context.setdefault("id", req.id)
-        context.setdefault("identity_key", req.identity_key)
+        context, task = _assistant_prepare_context(req, _assistant_default_task(req.kind))
         context["task"] = task
-        context["assistant_config"] = {
-            "enabled": bool(assistant_cfg.get("enabled", True)),
-            "timeout_s": float(assistant_cfg.get("timeout_s", 8.0) or 8.0),
-            "num_predict": int(assistant_cfg.get("num_predict", 220) or 220),
-            "task_prompt": task_prompt,
-        }
         mode = "fallback"
         model = None
         computing = False
@@ -2755,7 +3309,10 @@ def assistant_explain(req: AssistantExplainRequest):
                 "identity_key": context.get("identity_key"),
                 "fold_count": context.get("fold_count"),
                 "proposal_count": context.get("proposal_count"),
+                "field_path_count": context.get("field_path_count"),
                 "artifact_count": len(context.get("artifacts") or []),
+                "graph_neighbor_count": len((((context.get("bundle") or {}).get("graph") or {}).get("neighbors") or [])),
+                "bundle_version": ((context.get("bundle") or {}).get("version")),
                 "timeline": context.get("timeline") or {},
             },
             "assistant_config": context.get("assistant_config") or {},
@@ -2766,56 +3323,195 @@ def assistant_explain(req: AssistantExplainRequest):
         raise HTTPException(500, f"Assistant error: {exc}")
 
 
+@app.post("/assistant/what-if")
+def assistant_what_if(req: AssistantWhatIfRequest):
+    try:
+        context, task = _assistant_prepare_context(req, "what_if")
+        context["task"] = task
+        if req.question:
+            context["question"] = str(req.question)
+        elif context.get("question") is None:
+            context["question"] = ""
+        if isinstance(req.action, dict) and req.action:
+            context["action"] = dict(req.action)
+        elif not context.get("action") and req.kind == "proposal" and isinstance(context.get("subject"), dict):
+            subject = context.get("subject") or {}
+            context["action"] = {
+                "proposal_id": subject.get("id"),
+                "proposal_kind": subject.get("kind"),
+                "description": subject.get("description"),
+                "command_hint": subject.get("command_hint"),
+            }
+
+        mode = "fallback"
+        model = None
+        computing = False
+        if context["assistant_config"]["enabled"]:
+            rendered, model = _assistant_try_ollama(
+                context,
+                timeout_s=float(context["assistant_config"]["timeout_s"]),
+            )
+            if rendered:
+                mode = "ollama"
+            else:
+                with _OLLAMA_LOCK:
+                    computing = _assistant_cache_key(context) in _OLLAMA_INFLIGHT
+        else:
+            rendered = None
+
+        if not isinstance(rendered, dict):
+            rendered = _assistant_fallback(context)
+        return {
+            "mode": mode,
+            "model": model,
+            "computing": computing,
+            "task": task,
+            "selection": {
+                "kind": req.kind,
+                "id": req.id,
+                "identity_key": context.get("identity_key"),
+            },
+            "question": context.get("question") or "",
+            "action": context.get("action") or {},
+            "summary": rendered.get("summary") or "",
+            "assumptions": list(rendered.get("assumptions") or []),
+            "predicted_effects": list(rendered.get("predicted_effects") or []),
+            "next_observations": list(rendered.get("next_observations") or []),
+            "cautions": list(rendered.get("cautions") or []),
+            "references": {
+                "identity_key": context.get("identity_key"),
+                "field_path_count": context.get("field_path_count"),
+                "fold_count": context.get("fold_count"),
+                "proposal_count": context.get("proposal_count"),
+                "artifact_count": len(context.get("artifacts") or []),
+                "graph_neighbor_count": len((((context.get("bundle") or {}).get("graph") or {}).get("neighbors") or [])),
+                "bundle_version": ((context.get("bundle") or {}).get("version")),
+                "timeline": context.get("timeline") or {},
+            },
+            "assistant_config": context.get("assistant_config") or {},
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Assistant what-if error: {exc}")
+
+
+@app.post("/assistant/demands")
+def assistant_demands(req: AssistantDemandRequest):
+    try:
+        from skg.assistant import derive_demands
+
+        context = _assistant_bundle_context(req)
+        bundle = context.get("bundle") or {}
+        demands = derive_demands(bundle, limit=req.limit)
+        return {
+            "selection": bundle.get("selection") or {
+                "kind": req.kind,
+                "id": req.id,
+                "identity_key": context.get("identity_key"),
+            },
+            "bundle_version": bundle.get("version"),
+            "count": len(demands),
+            "demands": demands,
+            "references": {
+                "identity_key": context.get("identity_key"),
+                "field_path_count": context.get("field_path_count"),
+                "fold_count": context.get("fold_count"),
+                "proposal_count": context.get("proposal_count"),
+                "artifact_count": len(context.get("artifacts") or []),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Assistant demand error: {exc}")
+
+
+@app.post("/assistant/draft-demand")
+def assistant_draft_demand(req: AssistantDraftDemandRequest):
+    try:
+        from skg.assistant import derive_demands, draft_demand, select_demand
+
+        inline_demand = dict(req.demand or {}) if isinstance(req.demand, dict) else None
+        context_req = _assistant_draft_context_request(req, inline_demand)
+        context = _assistant_bundle_context(context_req)
+        bundle = context.get("bundle") or {}
+        derived = derive_demands(bundle, limit=12)
+        demand = select_demand(
+            derived,
+            demand_id=str((inline_demand or {}).get("id") or req.demand_id or ""),
+            demand_kind=str((inline_demand or {}).get("demand_kind") or req.demand_kind or ""),
+        )
+        if not isinstance(demand, dict) or not demand:
+            raise HTTPException(404, "Assistant demand not found for current physics state")
+
+        drafted = draft_demand(demand, use_llm=bool(req.use_llm))
+        return {
+            "ok": True,
+            "selection": (context.get("bundle") or {}).get("selection") or demand.get("selection") or {},
+            "derived_count": len(derived),
+            "draft": drafted,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Assistant draft error: {exc}")
+
+
+def _artifact_preview_payload(path: str, lines: int = 12) -> dict[str, Any]:
+    preview_lines = max(1, min(lines, 40))
+    candidate = Path(path)
+    allowed_roots = [EVENTS_DIR, INTERP_DIR, SKG_STATE_DIR / "discovery"]
+    resolved = candidate.resolve()
+    if not any(str(resolved).startswith(str(root.resolve())) for root in allowed_roots if root.exists()):
+        raise HTTPException(403, "Artifact path outside allowed runtime roots")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(404, "Artifact not found")
+
+    payload: dict[str, object] = {
+        "path": str(resolved),
+        "file": resolved.name,
+        "preview_kind": "text",
+        "rows": [],
+    }
+
+    if resolved.suffix == ".ndjson":
+        payload["preview_kind"] = "ndjson"
+        rows = []
+        for index, line in enumerate(resolved.read_text(errors="replace").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except Exception:
+                parsed = {"raw": line[:500]}
+            rows.append({"line": index + 1, "data": parsed})
+            if len(rows) >= preview_lines:
+                break
+        payload["rows"] = rows
+        return payload
+
+    if resolved.suffix == ".json":
+        payload["preview_kind"] = "json"
+        data = json.loads(resolved.read_text())
+        if isinstance(data, dict):
+            payload["rows"] = [{
+                "keys": sorted(list(data.keys()))[:40],
+                "data": data,
+            }]
+        else:
+            payload["rows"] = [{"data": data}]
+        return payload
+
+    payload["rows"] = [{"raw": line} for line in resolved.read_text(errors="replace").splitlines()[:preview_lines]]
+    return payload
+
+
 @app.get("/artifact/preview")
 def artifact_preview(path: str, lines: int = 12):
     """Bounded preview of one runtime artifact file."""
     try:
-        preview_lines = max(1, min(lines, 40))
-        candidate = Path(path)
-        allowed_roots = [EVENTS_DIR, INTERP_DIR, SKG_STATE_DIR / "discovery"]
-        resolved = candidate.resolve()
-        if not any(str(resolved).startswith(str(root.resolve())) for root in allowed_roots if root.exists()):
-            raise HTTPException(403, "Artifact path outside allowed runtime roots")
-        if not resolved.exists() or not resolved.is_file():
-            raise HTTPException(404, "Artifact not found")
-
-        payload: dict[str, object] = {
-            "path": str(resolved),
-            "file": resolved.name,
-            "preview_kind": "text",
-            "rows": [],
-        }
-
-        if resolved.suffix == ".ndjson":
-            payload["preview_kind"] = "ndjson"
-            rows = []
-            for index, line in enumerate(resolved.read_text(errors="replace").splitlines()):
-                if not line.strip():
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except Exception:
-                    parsed = {"raw": line[:500]}
-                rows.append({"line": index + 1, "data": parsed})
-                if len(rows) >= preview_lines:
-                    break
-            payload["rows"] = rows
-            return payload
-
-        if resolved.suffix == ".json":
-            payload["preview_kind"] = "json"
-            data = json.loads(resolved.read_text())
-            if isinstance(data, dict):
-                payload["rows"] = [{
-                    "keys": sorted(list(data.keys()))[:40],
-                    "data": data,
-                }]
-            else:
-                payload["rows"] = [{"data": data}]
-            return payload
-
-        payload["rows"] = [{"raw": line} for line in resolved.read_text(errors="replace").splitlines()[:preview_lines]]
-        return payload
+        return _artifact_preview_payload(path, lines=lines)
     except HTTPException:
         raise
     except Exception as exc:
@@ -2935,7 +3631,8 @@ def proposal_reset(proposal_id: str):
     """Reset an error/expired/executed proposal back to pending so it can be re-triggered."""
     import json as _json
     from skg.forge.proposals import _proposal_path, ACCEPTED_DIR
-    for search_dir in [Path("/var/lib/skg/proposals"), ACCEPTED_DIR]:
+    proposals_dir = SKG_STATE_DIR / "proposals"
+    for search_dir in [proposals_dir, ACCEPTED_DIR]:
         p = search_dir / f"{proposal_id}.json"
         if not p.exists():
             # prefix match
@@ -2950,7 +3647,7 @@ def proposal_reset(proposal_id: str):
                 data.pop("reviewed_at", None)
                 data.pop("triggered_at", None)
                 # Move back to proposals dir if in accepted
-                dest = Path("/var/lib/skg/proposals") / p.name
+                dest = proposals_dir / p.name
                 dest.write_text(_json.dumps(data, indent=2))
                 if str(p) != str(dest):
                     p.unlink(missing_ok=True)
@@ -3307,7 +4004,7 @@ def fold_resolve(fold_id: str, target_ip: str = ""):
 
 def _load_skg_env() -> None:
     """Load /etc/skg/skg.env key=value pairs into os.environ (do not override existing)."""
-    env_file = Path("/etc/skg/skg.env")
+    env_file = SKG_CONFIG_DIR / "skg.env"
     if not env_file.exists():
         return
     try:
@@ -3347,3 +4044,13 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+# Populate the thin registry so topology/energy.py can reach these functions
+# without importing the full daemon.  Runs at module import time — safe because
+# _all_targets_index and _identity_world don't start any server or threads.
+try:
+    from skg.core import daemon_registry as _dr
+    _dr._all_targets_index = _all_targets_index
+    _dr._identity_world    = _identity_world
+except Exception:
+    pass

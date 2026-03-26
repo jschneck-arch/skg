@@ -1,0 +1,12 @@
+{
+  "table": "users",
+  "primary_key": "user_id",
+  "ttl_hours": 168,
+  "required_fields": ["user_id", "username", "email", "created_at"],
+  "bounds": {
+    "role": {"enum": ["user", "admin", "mod"]}
+  },
+  "foreign_keys": [],
+  "expected_count_per_batch": null,
+  "distribution_baselines": {}
+}

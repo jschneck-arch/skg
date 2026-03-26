@@ -1,4 +1,5 @@
 {
+  "domain": "host",
   "version": "1.0.0",
   "description": "Host recon and privilege escalation attack preconditions catalog. Evidence-ranked conditions derived from SSH/WinRM collection, Nmap scans, and Metasploit session data.",
   "wickets": {

@@ -1,0 +1,112 @@
+# SKG Lab Environment — docker-compose
+#
+# Brings up intentionally vulnerable targets for SKG engagement testing.
+# These are INTENTIONALLY VULNERABLE containers. Run only on an isolated network.
+#
+# Usage:
+#   docker-compose -f docker-compose.lab.yml up -d
+#   skg target add-subnet 172.28.0.0/24
+#   skg gravity --cycles 3
+#
+# Services: metasploitable2 (172.28.0.10), dvwa (172.28.0.20), bwapp (172.28.0.30)
+#
+# After testing:
+#   docker-compose -f docker-compose.lab.yml down
+
+version: "3.8"
+
+networks:
+  skg-lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+
+  # ── Metasploitable 2 ────────────────────────────────────────────────────────
+  # Classic intentionally vulnerable Linux host.
+  # SSH: msfadmin/msfadmin  |  Web: http://172.28.0.10/
+  # Covers: host, web, ftp, smb, data domains
+  metasploitable2:
+    image: tleemcjr/metasploitable2
+    hostname: metasploitable2
+    networks:
+      skg-lab:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "2222:22"      # SSH (exposed on localhost so you can test manually)
+      - "8080:80"      # HTTP
+    restart: unless-stopped
+
+  # ── DVWA (Damn Vulnerable Web Application) ──────────────────────────────────
+  # Web-only target: SQLi, CMDI, XSS, CSRF, file upload.
+  # Login: admin/password  |  Web: http://172.28.0.20/
+  # Covers: web domain — WB-05 through WB-20 wickets
+  dvwa:
+    image: vulnerables/web-dvwa
+    hostname: dvwa
+    networks:
+      skg-lab:
+        ipv4_address: 172.28.0.20
+    ports:
+      - "8081:80"
+    restart: unless-stopped
+
+  # ── bWAPP (Buggy Web Application) ───────────────────────────────────────────
+  # PHP/MySQL web app with 100+ web vulnerabilities.
+  # Web: bee/bug  →  http://172.28.0.30/
+  # MySQL: root/'' (empty password)  |  database: bWAPP
+  # Covers: web domain — SQLi, XSS, CMDI, file upload, plus DB surface
+  bwapp:
+    image: raesene/bwapp
+    hostname: bwapp
+    networks:
+      skg-lab:
+        ipv4_address: 172.28.0.30
+    ports:
+      - "8082:80"      # HTTP
+      - "3306:3306"    # MySQL direct
+    environment:
+      MYSQL_ROOT_PASSWORD: ""
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: bWAPP
+    restart: unless-stopped
+
+  # ── SKG operator surface ─────────────────────────────────────────────────────
+  # The SKG daemon (FastAPI + gravity field UI) runs on the host, not in Docker.
+  # Add it to this network so it can reach the lab targets without a bridge route.
+  #
+  # To add your host to the skg-lab network, run:
+  #   docker network connect skg-lab $(hostname)
+  # Or use host networking:
+  #   export SKG_LAB_GW=172.28.0.1
+
+# ── Quick-start targets.yaml snippet ──────────────────────────────────────────
+#
+# Add to /etc/skg/targets.yaml:
+#
+#   - host: 172.28.0.10
+#     method: ssh
+#     user: msfadmin
+#     password: msfadmin
+#     workload_id: metasploitable2
+#     enabled: true
+#     domains: [host, web]
+#     tags: [linux, metasploitable, lab]
+#
+#   - host: 172.28.0.20
+#     method: http
+#     url: http://172.28.0.20/
+#     workload_id: dvwa
+#     enabled: true
+#     domains: [web]
+#     tags: [dvwa, web, sqli, cmdi]
+#
+#   - host: 172.28.0.30
+#     method: http
+#     url: http://172.28.0.30/
+#     workload_id: bwapp
+#     enabled: true
+#     domains: [web, db_exposure]
+#     tags: [bwapp, web, sqli, mysql, lab]

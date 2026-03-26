@@ -40,6 +40,12 @@ from skg.core.paths import FORGE_STAGING, SKG_HOME
 
 log = logging.getLogger("skg.forge.generator")
 
+# Post-install hooks: callables invoked with (installed_path: Path) after
+# every successful toolchain install. Register via append().
+# gravity_field.py uses this to re-register wicket wavelengths so that
+# formerly dark hypotheses become observable after a new toolchain lands.
+_post_install_hooks: list = []
+
 # ---------------------------------------------------------------------------
 # Projector boilerplate template — pure boilerplate, domain name only variable
 # ---------------------------------------------------------------------------
@@ -209,7 +215,7 @@ def _build_adapter_prompt(domain: str, description: str, catalog: dict,
         trimmed = ex[:2000] if len(ex) > 2000 else ex
         examples_str += f"\n--- EXAMPLE ADAPTER {i} ---\n{trimmed}\n"
 
-    return f"""You are a Python code generator. Generate a complete SKG adapter parse.py for the {domain} toolchain.
+    return f"""You are a Python code generator. Generate a complete, FULLY IMPLEMENTED SKG adapter parse.py for the {domain} toolchain.
 
 DOMAIN: {domain}
 DESCRIPTION: {description}
@@ -242,12 +248,84 @@ RULES:
    - "blocked" = condition confirmed absent (control in place)
    - "unknown" = insufficient evidence to determine
 
-OUTPUT: Only the complete Python file. No markdown, no explanation."""
+CRITICAL — FUNCTIONAL CHECK LOGIC REQUIRED:
+- Every check_WICKETID() function MUST implement real parsing logic based on the evidence_hint
+- NEVER write: status = "unknown"  # Replace with ...
+- NEVER write: # TODO
+- NEVER have both branches of an if/else return the same status
+- Each check function must do ONE of:
+  a) Parse a version string and compare (e.g. version < (2,4,0) → "realized", else "blocked")
+  b) Search for a string pattern (e.g. "NOPASSWD" in sudo_output → "realized")
+  c) Check if output is non-empty and non-error (e.g. key_file exists → "realized")
+  d) Check OS/platform type (e.g. "solaris" in uname → relevant, else "blocked")
+  e) Check for presence of a process/service (e.g. "docker" in ps_output → "realized")
+
+EXAMPLE of good check function:
+def check_XY_01(collection, out, attack_path_id, run_id, workload_id):
+    ssh_output = collection.get("ssh_banner", "")
+    # OpenSSH < 8.0 allows some deprecated key types
+    m = re.search(r'OpenSSH_(\\d+)\\.(\\d+)', ssh_output or "")
+    if m:
+        ver = (int(m.group(1)), int(m.group(2)))
+        if ver < (8, 0):
+            status, conf = "realized", 0.85
+        else:
+            status, conf = "blocked", 0.85
+    else:
+        status, conf = "unknown", 0.5
+    emit(out, "XY-01", status, 3, "ssh_collection", "OpenSSH version from banner", conf,
+         attack_path_id, run_id, workload_id, {{"detail": ssh_output[:100]}})
+
+COLLECTION COMMAND DESIGN: The main() function must run real SSH commands that produce parseable output. Use commands like:
+- Version checks: "apache2 -v 2>/dev/null || httpd -v 2>/dev/null || echo not_found"
+- Service status: "systemctl is-active servicename 2>/dev/null || echo not_found"
+- File/permission checks: "ls -la /path/to/file 2>/dev/null || echo not_found"
+- Process presence: "ps aux | grep -i processname | grep -v grep || echo not_found"
+- Package version: "dpkg -l packagename 2>/dev/null | awk '/^ii/{{print $3}}' || echo not_found"
+
+OUTPUT: Only the complete Python file. No markdown, no explanation. No TODO comments. No placeholder status values."""
 
 
 # ---------------------------------------------------------------------------
 # Adapter post-processing — validate and fix common generation issues
 # ---------------------------------------------------------------------------
+
+def _check_adapter_quality(code: str, domain: str) -> tuple[bool, list[str]]:
+    """
+    Detect placeholder patterns that indicate the adapter is not functional.
+    Returns (is_acceptable, list_of_issues).
+    """
+    issues = []
+    lines = code.splitlines()
+
+    # Count TODO lines and stub patterns
+    todo_lines = [i+1 for i, l in enumerate(lines)
+                  if "# TODO" in l or "# todo" in l.lower()]
+    stub_lines = [i+1 for i, l in enumerate(lines)
+                  if ("Replace with" in l or "Replace With" in l)
+                  and ("unknown" in l or "realized" in l or "blocked" in l)]
+
+    # Check: both branches of if/else returning "unknown"
+    same_branch_stubs = 0
+    for i in range(len(lines) - 2):
+        l_stripped = lines[i].replace(" ", "").replace('"', "'")
+        if "status='unknown'" in l_stripped:
+            for j in range(i+1, min(i+4, len(lines))):
+                lj_stripped = lines[j].replace(" ", "").replace('"', "'")
+                if "status='unknown'" in lj_stripped:
+                    same_branch_stubs += 1
+                    break
+
+    if todo_lines:
+        issues.append(f"TODO markers at lines {todo_lines[:5]}")
+    if stub_lines:
+        issues.append(f"Placeholder 'Replace with' comments at lines {stub_lines[:5]}")
+    if same_branch_stubs >= 2:
+        issues.append(f"Both if/else branches return 'unknown' in {same_branch_stubs} check functions — no real parsing logic")
+
+    is_acceptable = len(issues) == 0
+    return is_acceptable, issues
+
 
 def _fix_adapter(code: str, domain: str, catalog: dict) -> str:
     """Fix common generation issues in adapter code."""
@@ -484,6 +562,68 @@ def generate_toolchain(
         adapter_code = _generate_template_adapter(domain, catalog, gap)
         errors.append("Used template adapter — check collection commands")
 
+    # Quality gate: detect stub/TODO patterns — HARD REJECT.
+    # A stub adapter is worse than no adapter: it silently produces wrong
+    # wicket states that corrupt field inference.  If the LLM returned a stub,
+    # retry once with an explicit anti-stub reinforcement prompt; if the retry
+    # also fails, return an error result so the proposal is never staged.
+    if adapter_code:
+        _ok, _issues = _check_adapter_quality(adapter_code, domain)
+        if not _ok:
+            log.warning("[forge] adapter quality gate FAIL for %s — retrying with anti-stub prompt: %s",
+                        domain, _issues)
+            # One retry with stub rejection injected into prompt
+            _retry_code = None
+            try:
+                _stub_hint = (
+                    "\n\nPREVIOUS ATTEMPT WAS REJECTED by the quality gate.\n"
+                    f"Issues found: {'; '.join(_issues)}\n"
+                    "You MUST NOT use TODO, pass, raise NotImplementedError, or placeholder comments.\n"
+                    "Every check function must contain real conditional logic that reads from `collection`.\n"
+                )
+                _retry_prompt = adapter_prompt + _stub_hint
+                if generation_backend and "ollama" in generation_backend:
+                    from skg.resonance.ollama_backend import OllamaBackend
+                    _ob = OllamaBackend()
+                    _rraw = _ob.generate(_retry_prompt, num_predict=1024)
+                    _rraw = re.sub(r'^```python\s*', '', _rraw)
+                    _rraw = re.sub(r'^```\s*', '', _rraw)
+                    _rraw = re.sub(r'\s*```$', '', _rraw).strip()
+                    if len(_rraw) > 200 and 'def ' in _rraw:
+                        _retry_code = _fix_adapter(_rraw, domain, catalog)
+                elif os.environ.get("ANTHROPIC_API_KEY"):
+                    _rraw2 = _generate_adapter_via_api(_retry_prompt, os.environ["ANTHROPIC_API_KEY"])
+                    _retry_code = _fix_adapter(_rraw2, domain, catalog)
+            except Exception as _re:
+                log.debug("[forge] adapter retry exception: %s", _re)
+
+            if _retry_code:
+                _ok2, _issues2 = _check_adapter_quality(_retry_code, domain)
+                if _ok2:
+                    adapter_code = _retry_code
+                    log.info("[forge] adapter retry passed quality gate for %s", domain)
+                else:
+                    log.error("[forge] adapter retry still failed quality gate for %s: %s", domain, _issues2)
+                    errors.extend([f"adapter_quality_hard_fail: {i}" for i in _issues2])
+                    return {
+                        "id": proposal_id,
+                        "domain": domain,
+                        "status": "error",
+                        "error": "adapter quality gate: stub adapter after retry — not staged",
+                        "quality_issues": _issues2,
+                        "files_written": [],
+                    }
+            else:
+                errors.extend([f"adapter_quality_hard_fail: {i}" for i in _issues])
+                return {
+                    "id": proposal_id,
+                    "domain": domain,
+                    "status": "error",
+                    "error": "adapter quality gate: stub adapter, retry unavailable — not staged",
+                    "quality_issues": _issues,
+                    "files_written": [],
+                }
+
     # ----- Step 3: Write toolchain directory structure ---------------------
     log.info(f"[forge] writing toolchain to: {out_dir}")
 
@@ -622,6 +762,24 @@ def install_toolchain(staging_path: str | Path,
     log.info(f"[forge] installed: {dest}")
     result["installed"] = True
 
+    # Install Python dependencies declared by the toolchain (if any).
+    # Generated toolchains may emit a requirements.txt so they can pull in
+    # domain-specific libraries (e.g. impacket for AD, paramiko for SSH).
+    req_file = dest / "requirements.txt"
+    if req_file.exists():
+        try:
+            import subprocess, sys
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(req_file), "--quiet"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode == 0:
+                log.info(f"[forge] dependencies installed from {req_file}")
+            else:
+                log.warning(f"[forge] pip install failed for {req_file}: {proc.stderr[:200]}")
+        except Exception as exc:
+            log.warning(f"[forge] dependency install error: {exc}")
+
     # Load through the shared projector discovery path so install-time
     # activation matches runtime activation.
     try:
@@ -635,6 +793,13 @@ def install_toolchain(staging_path: str | Path,
             log.warning(f"[forge] projector discovery failed: {tc_name}")
     except Exception as exc:
         log.warning(f"[forge] projector registration failed: {exc}")
+
+    # Notify registered post-install hooks (e.g. wicket graph re-registration).
+    for _hook in list(_post_install_hooks):
+        try:
+            _hook(dest)
+        except Exception as _he:
+            log.debug(f"[forge] post-install hook error: {_he}")
 
     return result
 

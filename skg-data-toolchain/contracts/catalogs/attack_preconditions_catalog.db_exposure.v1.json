@@ -1,0 +1,133 @@
+{
+  "domain": "db_exposure",
+  "version": "1.0.0",
+  "description": "Database exposure attack surface: service discovery, default and reused credentials, remote access, anonymous access, and sensitive data enumeration. Works via SSH without pre-configured data_sources.yaml.",
+  "wickets": {
+    "DE-01": {
+      "id": "DE-01",
+      "label": "db_service_listening",
+      "description": "A database service (MySQL/MariaDB on 3306, PostgreSQL on 5432, MongoDB on 27017, Redis on 6379, MSSQL on 1433) is listening on the target, confirming a database attack surface exists.",
+      "evidence_hint": "Run 'ss -tlnp' or 'netstat -tlnp' and check for listening sockets on ports 3306, 5432, 27017, 6379, 1433, 1521.",
+      "default_rank": 4,
+      "decay_class": "ephemeral"
+    },
+    "DE-02": {
+      "id": "DE-02",
+      "label": "db_version_disclosed",
+      "description": "Database engine version is obtainable — either from the login banner, SELECT VERSION(), or process cmdline — enabling targeted CVE selection.",
+      "evidence_hint": "Run 'mysql -V', 'psql --version', or 'mongod --version' locally, or connect and run SELECT VERSION().",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "DE-03": {
+      "id": "DE-03",
+      "label": "default_credentials_accepted",
+      "description": "The database accepts a well-known default credential pair: MySQL root with empty password, PostgreSQL postgres/postgres, MongoDB no auth, Redis no requirepass, or other vendor defaults.",
+      "evidence_hint": "Attempt: mysql -u root -h 127.0.0.1 --password='' -e 'SELECT 1'; psql -U postgres -h 127.0.0.1 -c 'SELECT 1'; redis-cli PING. Success response = realized.",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "DE-04": {
+      "id": "DE-04",
+      "label": "cred_reuse_success",
+      "description": "A credential pair harvested from another service on this target (SSH, web, OS) was accepted by the database, confirming credential reuse.",
+      "evidence_hint": "Take username/password pairs from HO-18 (harvested_credentials) wicket and test each against discovered DB service.",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "DE-05": {
+      "id": "DE-05",
+      "label": "remote_access_allowed",
+      "description": "The database bind address is not restricted to localhost (127.0.0.1 / ::1). It binds to 0.0.0.0 or a routable interface, making it directly reachable from outside the host.",
+      "evidence_hint": "Check 'ss -tlnp' for database port binding to 0.0.0.0 or non-loopback address; inspect my.cnf for bind-address, postgresql.conf for listen_addresses.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "DE-06": {
+      "id": "DE-06",
+      "label": "databases_enumerable",
+      "description": "An authenticated (or unauthenticated) session can list available databases, confirming the attacker has read access to the database catalog.",
+      "evidence_hint": "Run SHOW DATABASES (MySQL), \\l or SELECT datname FROM pg_database (PG), show dbs (Mongo), KEYS * (Redis) after obtaining access.",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "DE-07": {
+      "id": "DE-07",
+      "label": "sensitive_tables_visible",
+      "description": "Tables with names suggesting sensitive data (users, accounts, passwords, credentials, tokens, payment, credit_card, ssn, health) are visible in at least one database.",
+      "evidence_hint": "Run SHOW TABLES IN <db> (MySQL) or SELECT tablename FROM pg_tables (PG) and check for pattern-matched sensitive names.",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "DE-08": {
+      "id": "DE-08",
+      "label": "auth_disabled",
+      "description": "The database is configured with authentication disabled or completely open: MongoDB with --noauth or security.authorization: disabled; Redis with no requirepass and no bind restriction; MySQL with skip-grant-tables.",
+      "evidence_hint": "Inspect mongod.conf for security.authorization, redis.conf for requirepass, my.cnf for skip-grant-tables; attempt unauthenticated connection.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "DE-09": {
+      "id": "DE-09",
+      "label": "db_config_readable",
+      "description": "Database configuration files (my.cnf, postgresql.conf, mongod.conf, redis.conf) are readable via SSH, exposing bind addresses, auth config, replication setup, and potentially embedded credentials.",
+      "evidence_hint": "Read /etc/mysql/my.cnf, /etc/mysql/mysql.conf.d/mysqld.cnf, /etc/postgresql/*/main/postgresql.conf, /etc/mongod.conf, /etc/redis/redis.conf.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "DE-10": {
+      "id": "DE-10",
+      "label": "db_user_with_file_priv",
+      "description": "A MySQL/MariaDB user account has FILE privilege, enabling LOAD DATA INFILE / SELECT INTO OUTFILE attacks that can read arbitrary host files or write web shells.",
+      "evidence_hint": "Run SHOW GRANTS FOR CURRENT_USER(); or SELECT user, File_priv FROM mysql.user WHERE File_priv='Y'.",
+      "default_rank": 2,
+      "decay_class": "structural"
+    },
+    "DE-11": {
+      "id": "DE-11",
+      "label": "db_user_with_super_priv",
+      "description": "The authenticated database user has SUPER or DBA-equivalent privilege, enabling configuration changes, user creation, and in MySQL FILE privilege escalation.",
+      "evidence_hint": "SHOW GRANTS FOR CURRENT_USER() — look for SUPER, ALL PRIVILEGES, GRANT OPTION. PG: SELECT rolsuper FROM pg_roles WHERE rolname=current_user.",
+      "default_rank": 2,
+      "decay_class": "structural"
+    }
+  },
+  "attack_paths": {
+    "db_default_creds_v1": {
+      "label": "Database Default Credential Access",
+      "description": "Database service is listening, accepts a vendor default credential, and exposes the database catalog — attacker has authenticated read access with no prior knowledge.",
+      "required_wickets": ["DE-01", "DE-03", "DE-06"],
+      "ordered": false
+    },
+    "db_cred_reuse_v1": {
+      "label": "Database Credential Reuse",
+      "description": "Database service is listening and a credential harvested from another service (SSH, web login) was accepted — lateral movement within the host via credential reuse.",
+      "required_wickets": ["DE-01", "DE-04", "DE-06"],
+      "ordered": false
+    },
+    "db_anonymous_access_v1": {
+      "label": "Unauthenticated Database Access",
+      "description": "Database authentication is disabled and the service is listening — attacker has direct access to all databases and tables with no credentials required.",
+      "required_wickets": ["DE-01", "DE-08", "DE-06"],
+      "ordered": false
+    },
+    "db_remote_exposure_v1": {
+      "label": "Database Remotely Accessible",
+      "description": "Database binds to a non-loopback address and accepts default or reused credentials from a remote client — not just accessible from the host itself.",
+      "required_wickets": ["DE-01", "DE-05", "DE-03"],
+      "ordered": false
+    },
+    "db_file_priv_escalation_v1": {
+      "label": "MySQL FILE Privilege Escalation",
+      "description": "Authenticated MySQL/MariaDB session with FILE privilege — attacker can read /etc/passwd, /etc/shadow, write webshells, or exfiltrate arbitrary files via LOAD DATA / SELECT INTO OUTFILE.",
+      "required_wickets": ["DE-01", "DE-03", "DE-10"],
+      "ordered": false
+    },
+    "db_data_exfiltration_v1": {
+      "label": "Sensitive Table Data Exfiltration",
+      "description": "Database session with enumeration access reveals tables containing sensitive data (user credentials, tokens, PII) — direct exfiltration path.",
+      "required_wickets": ["DE-01", "DE-06", "DE-07"],
+      "ordered": false
+    }
+  }
+}

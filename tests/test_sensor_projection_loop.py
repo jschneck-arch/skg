@@ -4,7 +4,7 @@ import os
 import tempfile
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -83,6 +83,26 @@ def _load_daemon_module():
     spec = importlib.util.spec_from_file_location(
         "skg_daemon_test",
         "/opt/skg/skg/core/daemon.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_exploit_dispatch_module():
+    spec = importlib.util.spec_from_file_location(
+        "skg_exploit_dispatch_test",
+        "/opt/skg/skg-gravity/exploit_dispatch.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_cred_reuse_module():
+    spec = importlib.util.spec_from_file_location(
+        "skg_cred_reuse_test",
+        "/opt/skg/skg-gravity/cred_reuse.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -497,6 +517,56 @@ class SensorProjectionLoopTests(unittest.TestCase):
 
         self.assertIn(("web::172.17.0.3", "same_identity", 0.85), neighbors)
 
+    def test_surface_reader_prefers_newest_projection_by_mtime(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            interp_dir = Path(tmpdir)
+            older = interp_dir / "host_demo_zzzz9999.json"
+            newer = interp_dir / "host_demo_aaaa0001.json"
+
+            older.write_text(json.dumps({
+                "workload_id": "host::10.0.0.1",
+                "attack_path_id": "host_ssh_initial_access_v1",
+                "classification": "realized",
+                "host_score": 1.0,
+            }))
+            newer.write_text(json.dumps({
+                "workload_id": "host::10.0.0.1",
+                "attack_path_id": "host_ssh_initial_access_v1",
+                "classification": "not_realized",
+                "host_score": 0.0,
+            }))
+            os.utime(older, (older.stat().st_atime, older.stat().st_mtime - 5))
+
+            rows = _read_interp_dir(interp_dir)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["classification"], "not_realized")
+
+    def test_surface_includes_graph_neighbors_above_min_weight(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            interp_dir = base / "interp"
+            graph_dir = base / "graph"
+            interp_dir.mkdir()
+
+            (interp_dir / "host_demo.json").write_text(json.dumps({
+                "workload_id": "host::10.0.0.1",
+                "attack_path_id": "host_ssh_initial_access_v1",
+                "classification": "indeterminate",
+                "required_wickets": ["HO-01"],
+                "realized": [],
+                "blocked": [],
+                "unknown": ["HO-01"],
+                "host_score": 0.0,
+            }))
+
+            graph = WorkloadGraph(graph_dir)
+            graph.add_edge("host::10.0.0.1", "web::10.0.0.2", "same_subnet")
+
+            result = surface(interp_dir=interp_dir, graph=graph)
+
+        self.assertEqual(result["workloads"][0]["neighbors"], ["web::10.0.0.2"])
+
     def test_weighted_energy_counts_unresolved_mass_not_only_flat_unknown(self):
         engine = EnergyEngine()
         flat = engine.compute_weighted(
@@ -653,6 +723,35 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0].location, "172.17.0.3")
         self.assertEqual(matching[0].why["identity_key"], "172.17.0.3")
+
+    def test_temporal_folds_use_configured_state_dir_for_pearls(self):
+        import skg.kernel.folds as folds_module
+
+        detector = FoldDetector()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            pearl = {
+                "timestamp": (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat(),
+                "energy_snapshot": {
+                    "workload_id": "host::10.0.0.7",
+                    "identity_key": "10.0.0.7",
+                    "decay_class": "operational",
+                },
+                "state_changes": [
+                    {"wicket_id": "HO-03", "to": "realized"},
+                ],
+            }
+            (state_dir / "pearls.jsonl").write_text(
+                json.dumps(pearl) + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(folds_module, "SKG_STATE_DIR", state_dir):
+                folds = detector.detect_temporal(state_dir / "missing-events")
+
+        matching = [f for f in folds if f.why.get("wicket_id") == "HO-03"]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].why["identity_key"], "10.0.0.7")
 
     def test_pearl_manifold_groups_reinforced_wickets_by_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1725,8 +1824,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
             "relations": [{"relation": "docker_host", "other_identity": "172.17.0.1", "strength": 0.9}],
         }
 
-        with mock.patch("skg.core.daemon._all_targets_index", return_value=[target]), \
-             mock.patch("skg.core.daemon._identity_world", return_value=world):
+        with mock.patch("skg.core.daemon_registry._all_targets_index", return_value=[target]), \
+             mock.patch("skg.core.daemon_registry._identity_world", return_value=world):
             clusters = compute_field_fibers()
 
         cluster = next(c for c in clusters if c.anchor == "172.17.0.3")
@@ -2057,6 +2156,618 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertAlmostEqual(topo.spheres["web"].pearl_persistence, 0.9, places=6)
         self.assertTrue(topo.spheres["web"].protected_state)
         self.assertIn("persistent preserved structure", topo.spheres["web"].protected_reason)
+
+    def test_assistant_context_builds_reasoning_bundle_with_field_and_graph_state(self):
+        daemon = _load_daemon_module()
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            events_dir = tmp / "events"
+            interp_dir = tmp / "interp"
+            state_dir = tmp / "state"
+            discovery_dir = state_dir / "discovery"
+            events_dir.mkdir()
+            interp_dir.mkdir()
+            discovery_dir.mkdir(parents=True)
+
+            artifact = events_dir / "gravity_http_10.0.0.7_x.ndjson"
+            artifact.write_text(
+                json.dumps({
+                    "payload": {
+                        "workload_id": "host::10.0.0.7",
+                        "detail": "https probe",
+                    }
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            req = types.SimpleNamespace(
+                kind="target",
+                id="10.0.0.7",
+                identity_key="10.0.0.7",
+                limit=3,
+            )
+            target = {
+                "ip": "10.0.0.7",
+                "services": [{"port": 443, "service": "https"}],
+                "os": "linux",
+                "kind": "host",
+                "profile": {"evidence_count": 4},
+            }
+            surface_rows = {
+                "workloads": [{
+                    "identity_key": "10.0.0.7",
+                    "workload_id": "host::10.0.0.7",
+                    "manifestation_key": "host::10.0.0.7",
+                    "domain": "host",
+                    "attack_path_id": "host_ssh_initial_access_v1",
+                    "classification": "indeterminate",
+                    "score": 0.82,
+                    "realized": ["HO-01"],
+                    "blocked": [],
+                    "unknown": ["HO-02"],
+                }]
+            }
+            field_state = {
+                "host::10.0.0.7/host_ssh_initial_access_v1": {
+                    "workload_id": "host::10.0.0.7",
+                    "identity_key": "10.0.0.7",
+                    "manifestation_key": "host::10.0.0.7",
+                    "attack_path_id": "host_ssh_initial_access_v1",
+                    "classification": "indeterminate",
+                    "E": 0.75,
+                    "E_base": 0.5,
+                    "fold_contribution": 0.15,
+                    "field_pull": 0.1,
+                    "compatibility_score": 0.9,
+                    "compatibility_span": 2,
+                    "decoherence": 0.2,
+                    "n_required": 4,
+                    "n_realized": 2,
+                    "n_blocked": 0,
+                    "n_unknown": 2,
+                    "unknown_nodes": ["HO-02", "HO-03"],
+                    "resolution_required": {
+                        "HO-02": "SSH sweep",
+                        "HO-03": "HTTP probe",
+                    },
+                    "unresolved_reason": "Need more telemetry",
+                    "computed_at": "2026-03-26T00:00:00+00:00",
+                }
+            }
+            folds = {"folds": [{
+                "fold_id": "fold-1",
+                "fold_type": "structural",
+                "target_ip": "10.0.0.7",
+                "gravity_weight": 1.2,
+                "detail": "redis service has no toolchain",
+                "why": {"service": "redis", "attack_path_id": "host_ssh_initial_access_v1"},
+            }]}
+            proposals = {"proposals": [{
+                "id": "prop-1",
+                "proposal_kind": "field_action",
+                "status": "pending",
+                "description": "run host observation",
+                "domain": "host",
+                "hosts": ["10.0.0.7"],
+                "confidence": 0.6,
+                "fold_ids": ["fold-1"],
+                "recall": {"growth_memory": {"delta": 0.02, "proposal_reasons": ["repeat pressure"]}},
+                "action": {"command_hint": "skg sensors trigger"},
+            }]}
+            memory = {"neighborhoods": [{
+                "identity_key": "10.0.0.7",
+                "domain": "host",
+                "pearl_count": 2,
+                "mean_energy": 0.5,
+                "transition_density": 0.4,
+                "manifestation_keys": ["host::10.0.0.7"],
+                "reinforced_wickets": ["HO-02"],
+                "reinforced_reasons": ["repeat pressure"],
+            }]}
+            timeline = {
+                "workload_count": 1,
+                "snapshot_count": 2,
+                "transition_count": 1,
+                "transitions": [{
+                    "computed_at": "2026-03-26T00:01:00+00:00",
+                    "wicket_id": "HO-02",
+                    "from_state": "unknown",
+                    "to_state": "realized",
+                    "_workload_id": "host::10.0.0.7",
+                }],
+                "graph_neighbors": [{"workload_id": "web::10.0.0.7:443", "weight": 0.4}],
+            }
+            artifacts = {"artifacts": [{
+                "file": artifact.name,
+                "path": str(artifact),
+                "category": "events",
+                "mtime": "2026-03-26T00:02:00+00:00",
+                "workload_id": "host::10.0.0.7",
+            }]}
+
+            with mock.patch.object(daemon, "EVENTS_DIR", events_dir), \
+                 mock.patch.object(daemon, "INTERP_DIR", interp_dir), \
+                 mock.patch.object(daemon, "SKG_STATE_DIR", state_dir), \
+                 mock.patch.object(daemon, "list_targets", return_value={"targets": [target]}), \
+                 mock.patch.object(daemon, "field_surface", return_value=surface_rows), \
+                 mock.patch.object(daemon, "folds_summary", return_value=folds), \
+                 mock.patch.object(daemon, "list_proposals", return_value=proposals), \
+                 mock.patch.object(daemon, "pearl_memory_manifold", return_value=memory), \
+                 mock.patch.object(daemon, "_compute_field_state", return_value=field_state), \
+                 mock.patch.object(daemon, "identity_timeline", return_value=timeline), \
+                 mock.patch.object(daemon, "identity_artifacts", return_value=artifacts), \
+                 mock.patch.object(daemon.kernel, "gravity_status", return_value={
+                     "running": True,
+                     "cycle": 5,
+                     "current_activity": "routing",
+                     "recent_output": ["candidate 10.0.0.7"],
+                 }), \
+                 mock.patch.object(daemon.kernel.graph, "neighbors", return_value=[
+                     ("web::10.0.0.7:443", "same_identity", 0.4),
+                 ]), \
+                 mock.patch.object(daemon.kernel.graph, "get_prior", return_value=0.33):
+                context = daemon._assistant_context(req)
+
+        bundle = context["bundle"]
+        self.assertEqual(bundle["version"], 1)
+        self.assertEqual(context["field_path_count"], 1)
+        self.assertEqual(bundle["field_state"]["count"], 1)
+        self.assertEqual(bundle["field_state"]["paths"][0]["E"], 0.75)
+        self.assertEqual(bundle["graph"]["neighbor_count"], 1)
+        self.assertEqual(bundle["graph"]["priors"][0]["prior"], 0.33)
+        self.assertEqual(bundle["artifacts"]["count"], 1)
+        self.assertEqual(bundle["artifacts"]["items"][0]["preview"]["preview_kind"], "ndjson")
+        self.assertEqual(bundle["gravity"]["cycle"], 5)
+
+    def test_assistant_cache_key_distinguishes_selection_and_action(self):
+        daemon = _load_daemon_module()
+        first = {
+            "kind": "target",
+            "id": "10.0.0.7",
+            "identity_key": "10.0.0.7",
+            "task": "what_if",
+            "action": {"kind": "observe"},
+        }
+        second = {
+            "kind": "proposal",
+            "id": "prop-1",
+            "identity_key": "10.0.0.7",
+            "task": "what_if",
+            "action": {"kind": "execute"},
+        }
+
+        self.assertNotEqual(daemon._assistant_cache_key(first), daemon._assistant_cache_key(second))
+
+    def test_assistant_what_if_fallback_uses_bundle_physics(self):
+        daemon = _load_daemon_module()
+        req = types.SimpleNamespace(
+            kind="proposal",
+            id="prop-1",
+            identity_key="10.0.0.7",
+            question="What if we run this?",
+            action=None,
+        )
+        context = {
+            "kind": "proposal",
+            "id": "prop-1",
+            "identity_key": "10.0.0.7",
+            "subject": {
+                "id": "prop-1",
+                "kind": "field_action",
+                "description": "run host observation",
+                "command_hint": "skg sensors trigger",
+            },
+            "field_path_count": 1,
+            "fold_count": 1,
+            "proposal_count": 1,
+            "artifacts": [{"file": "gravity_http_10.0.0.7_x.ndjson"}],
+            "timeline": {"workload_count": 1, "snapshot_count": 2, "transition_count": 1},
+            "assistant_config": {"enabled": False},
+            "bundle": {
+                "version": 1,
+                "field_state": {
+                    "paths": [{
+                        "workload_id": "host::10.0.0.7",
+                        "attack_path_id": "host_ssh_initial_access_v1",
+                        "classification": "indeterminate",
+                        "E": 0.75,
+                        "n_unknown": 2,
+                        "resolution_required": {"HO-02": "SSH sweep"},
+                    }],
+                },
+                "folds": {"items": [{"fold_id": "fold-1"}]},
+                "proposals": {"items": [{"id": "prop-1"}]},
+                "graph": {
+                    "neighbors": [{"workload_id": "web::10.0.0.7:443", "weight": 0.4}],
+                    "priors": [{"workload_id": "host::10.0.0.7", "wicket_id": "HO-02", "prior": 0.33}],
+                },
+                "artifacts": {"items": [{"file": "gravity_http_10.0.0.7_x.ndjson"}]},
+            },
+        }
+
+        with mock.patch.object(daemon, "_assistant_prepare_context", return_value=(context, "what_if")):
+            result = daemon.assistant_what_if(req)
+
+        self.assertEqual(result["task"], "what_if")
+        self.assertEqual(result["action"]["proposal_kind"], "field_action")
+        self.assertTrue(result["predicted_effects"])
+        self.assertTrue(any("E 0.75" in row for row in result["predicted_effects"]))
+        self.assertTrue(any("counterfactual" in row.lower() for row in result["cautions"]))
+
+    def test_assistant_demand_derivation_prefers_physics_selected_artifacts(self):
+        from skg.assistant.demands import derive_demands
+
+        bundle = {
+            "selection": {"kind": "target", "id": "10.0.0.7", "identity_key": "10.0.0.7"},
+            "subject": {
+                "identity_key": "10.0.0.7",
+                "services": ["443/https", "22/ssh"],
+                "paths": [],
+            },
+            "surface": {
+                "identity_key": "10.0.0.7",
+                "services": ["443/https", "22/ssh"],
+            },
+            "field_state": {
+                "paths": [{
+                    "workload_id": "host::10.0.0.7",
+                    "attack_path_id": "host_ssh_initial_access_v1",
+                    "classification": "indeterminate",
+                    "E": 0.75,
+                    "unknown_nodes": ["HO-02", "HO-03"],
+                    "resolution_required": {"HO-02": "SSH sweep"},
+                }],
+            },
+            "folds": {
+                "items": [
+                    {
+                        "fold_id": "fold-struct",
+                        "fold_type": "structural",
+                        "gravity_weight": 1.4,
+                        "detail": "redis service has no toolchain",
+                        "why": {"service": "redis", "attack_path_id": "host_ssh_initial_access_v1"},
+                    },
+                    {
+                        "fold_id": "fold-proj",
+                        "fold_type": "projection",
+                        "gravity_weight": 1.1,
+                        "detail": "attack path implied but missing wickets",
+                        "why": {"service": "https", "attack_path_id": "web_https_follow_on_v1"},
+                    },
+                ],
+            },
+            "proposals": {
+                "items": [{
+                    "id": "prop-1",
+                    "kind": "field_action",
+                    "domain": "host",
+                    "description": "run host observation",
+                    "command_hint": "msfconsole -r observe.rc",
+                    "confidence": 0.6,
+                }],
+            },
+        }
+
+        demands = derive_demands(bundle, limit=6)
+        kinds = [row["demand_kind"] for row in demands]
+
+        self.assertIn("observation_rc", kinds)
+        self.assertIn("wicket_patch", kinds)
+        self.assertIn("catalog_patch", kinds)
+
+    def test_assistant_writer_persists_valid_catalog_patch_draft_without_llm(self):
+        from skg.assistant.writer import draft_demand
+        import skg.assistant.writer as writer_module
+
+        demand = {
+            "id": "dmd_demo_catalog",
+            "demand_kind": "catalog_patch",
+            "contract": "catalog_patch",
+            "identity_key": "10.0.0.7",
+            "source": {"kind": "fold", "id": "fold-struct"},
+            "title": "Draft catalog patch",
+            "rationale": "Physics indicates a coverage deficit.",
+            "inputs": {
+                "domain": "web",
+                "service_family": "redis",
+                "detail": "redis service has no toolchain",
+                "filename_stub": "catalog_patch_10_0_0_7_redis",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with mock.patch.object(writer_module, "SKG_STATE_DIR", state_dir):
+                result = draft_demand(demand, use_llm=False)
+
+            saved = Path(result["path"])
+            saved_exists = saved.exists()
+            payload = json.loads(saved.read_text())
+
+        self.assertTrue(saved_exists)
+        self.assertEqual(result["mode"], "deterministic")
+        self.assertEqual(payload["patch_type"], "catalog_patch_v1")
+        self.assertEqual(payload["domain"], "web")
+
+    def test_assistant_validator_rejects_invalid_catalog_patch_shape(self):
+        from skg.assistant.validators import get_contract, validate_draft
+
+        result = validate_draft(
+            {"contract": "catalog_patch"},
+            {
+                "filename_hint": "bad.json",
+                "content": {
+                    "patch_type": "catalog_patch_v1",
+                    "domain": "host",
+                    "description": "draft",
+                    "reason": "physics",
+                    "wickets": [],
+                    "attack_paths": "not-a-mapping",
+                },
+                "notes": ["review"],
+            },
+            get_contract("catalog_patch"),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("wickets" in err for err in result["errors"]))
+        self.assertTrue(any("attack_paths" in err for err in result["errors"]))
+
+    def test_contract_backed_msf_action_proposal_writes_artifact_and_metadata(self):
+        import skg.assistant.action_proposals as proposal_module
+
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+
+            def _fake_create_action(**kwargs):
+                return {"id": "prop-msf-1", **kwargs}
+
+            with mock.patch.object(proposal_module, "create_action", side_effect=_fake_create_action):
+                proposal, artifact = proposal_module.create_msf_action_proposal(
+                    contract_name="msf_rc",
+                    rc_text="use auxiliary/scanner/http/http_version\nexit\n",
+                    filename_hint="demo.rc",
+                    out_dir=out_dir,
+                    domain="web",
+                    description="demo",
+                    attack_surface="10.0.0.7:80",
+                    hosts=["10.0.0.7"],
+                    category="runtime_observation",
+                    evidence="demo evidence",
+                    action={"instrument": "msf", "target_ip": "10.0.0.7", "port": 80},
+                )
+
+            self.assertEqual(proposal["action"]["artifact_contract"], "msf_rc")
+            self.assertEqual(proposal["action"]["rc_file"], artifact["path"])
+            self.assertTrue(Path(artifact["path"]).exists())
+            self.assertTrue(Path(artifact["meta_path"]).exists())
+
+    def test_daemon_assistant_demands_and_draft_endpoint(self):
+        daemon = _load_daemon_module()
+        import skg.assistant.writer as writer_module
+
+        context = {
+            "identity_key": "10.0.0.7",
+            "field_path_count": 1,
+            "fold_count": 2,
+            "proposal_count": 1,
+            "artifacts": [],
+            "bundle": {
+                "version": 1,
+                "selection": {"kind": "target", "id": "10.0.0.7", "identity_key": "10.0.0.7"},
+                "subject": {"identity_key": "10.0.0.7"},
+                "surface": {"services": ["443/https"]},
+                "field_state": {
+                    "paths": [{
+                        "workload_id": "host::10.0.0.7",
+                        "attack_path_id": "host_ssh_initial_access_v1",
+                        "classification": "indeterminate",
+                        "E": 0.75,
+                        "unknown_nodes": ["HO-02"],
+                        "resolution_required": {"HO-02": "SSH sweep"},
+                    }],
+                },
+                "folds": {
+                    "items": [{
+                        "fold_id": "fold-struct",
+                        "fold_type": "structural",
+                        "gravity_weight": 1.4,
+                        "detail": "redis service has no toolchain",
+                        "why": {"service": "redis", "attack_path_id": "host_ssh_initial_access_v1"},
+                    }],
+                },
+                "proposals": {
+                    "items": [{
+                        "id": "prop-1",
+                        "kind": "field_action",
+                        "domain": "host",
+                        "description": "run host observation",
+                        "command_hint": "msfconsole -r observe.rc",
+                        "confidence": 0.6,
+                    }],
+                },
+            },
+        }
+
+        req = types.SimpleNamespace(
+            kind="target",
+            id="10.0.0.7",
+            identity_key="10.0.0.7",
+            limit=6,
+            context=None,
+            demand=None,
+            demand_id="",
+            demand_kind="catalog_patch",
+            use_llm=False,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with mock.patch.object(daemon, "_assistant_bundle_context", return_value=context), \
+                 mock.patch.object(writer_module, "SKG_STATE_DIR", state_dir):
+                listed = daemon.assistant_demands(req)
+                drafted = daemon.assistant_draft_demand(req)
+                drafted_exists = Path(drafted["draft"]["path"]).exists()
+
+        self.assertGreaterEqual(listed["count"], 2)
+        self.assertEqual(drafted["draft"]["demand"]["demand_kind"], "catalog_patch")
+        self.assertTrue(drafted_exists)
+
+    def test_daemon_assistant_draft_uses_derived_demand_not_inline_payload(self):
+        daemon = _load_daemon_module()
+        import skg.assistant.writer as writer_module
+
+        context = {
+            "identity_key": "10.0.0.7",
+            "field_path_count": 0,
+            "fold_count": 1,
+            "proposal_count": 0,
+            "artifacts": [],
+            "bundle": {
+                "version": 1,
+                "selection": {"kind": "target", "id": "10.0.0.7", "identity_key": "10.0.0.7"},
+                "subject": {"identity_key": "10.0.0.7"},
+                "surface": {"services": ["443/https"]},
+                "field_state": {"paths": []},
+                "folds": {
+                    "items": [{
+                        "fold_id": "fold-struct",
+                        "fold_type": "structural",
+                        "gravity_weight": 1.4,
+                        "detail": "redis service has no toolchain",
+                        "why": {"service": "redis", "attack_path_id": "host_ssh_initial_access_v1"},
+                    }],
+                },
+                "proposals": {"items": []},
+            },
+        }
+
+        req = types.SimpleNamespace(
+            kind="target",
+            id="10.0.0.7",
+            identity_key="10.0.0.7",
+            limit=6,
+            context=None,
+            demand={
+                "id": "manual-inline",
+                "demand_kind": "catalog_patch",
+                "contract": "catalog_patch",
+                "identity_key": "10.0.0.7",
+                "source": {"kind": "manual", "id": "caller"},
+                "title": "manual",
+                "rationale": "manual",
+                "inputs": {"domain": "manual", "filename_stub": "manual"},
+                "selection": {"kind": "target", "id": "10.0.0.7", "identity_key": "10.0.0.7"},
+            },
+            demand_id="",
+            demand_kind="",
+            use_llm=False,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td)
+            with mock.patch.object(daemon, "_assistant_bundle_context", return_value=context), \
+                 mock.patch.object(writer_module, "SKG_STATE_DIR", state_dir):
+                drafted = daemon.assistant_draft_demand(req)
+
+        self.assertEqual(drafted["draft"]["demand"]["source"]["kind"], "fold")
+        self.assertEqual(drafted["draft"]["demand"]["source"]["id"], "fold-struct")
+
+    def test_msf_sensor_resolves_only_requested_targets(self):
+        from skg.sensors import msf_sensor as msf_sensor_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_dir = Path(tmpdir) / "cfg"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "targets.yaml").write_text(
+                "\n".join([
+                    "targets:",
+                    "  - host: 10.0.0.7",
+                    "    workload_id: host::10.0.0.7",
+                    "  - host: 10.0.0.8",
+                    "    workload_id: host::10.0.0.8",
+                ]),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(msf_sensor_module, "SKG_CONFIG_DIR", cfg_dir), \
+                 mock.patch.object(msf_sensor_module, "SKG_HOME", Path(tmpdir)):
+                sensor = msf_sensor_module.MsfSensor({"password": "x"})
+                targets = sensor._resolve_targets(["host::10.0.0.7"])
+
+        self.assertEqual(targets, ["10.0.0.7"])
+
+    def test_exploit_dispatch_uses_contract_backed_proposal_helper(self):
+        exploit_dispatch = _load_exploit_dispatch_module()
+
+        with tempfile.TemporaryDirectory() as td:
+            out_dir = Path(td)
+            fake_proposal = {"id": "prop-1"}
+            fake_artifact = {"path": str(out_dir / "demo.rc"), "meta_path": str(out_dir / "demo.rc.meta.json")}
+            with mock.patch.object(
+                exploit_dispatch,
+                "EXPLOIT_MAP",
+                {
+                    "demo_path": [{
+                        "module": "exploit/test/demo",
+                        "requires": ["HO-01"],
+                        "options": {"RHOSTS": "{target_ip}", "RPORT": "{port}"},
+                        "confidence": 0.7,
+                    }]
+                },
+            ), mock.patch.object(
+                exploit_dispatch,
+                "create_msf_action_proposal",
+                return_value=(fake_proposal, fake_artifact),
+            ) as helper, mock.patch.object(
+                exploit_dispatch,
+                "interactive_review",
+                return_value={"decision": "deferred"},
+            ):
+                proposals = exploit_dispatch.generate_exploit_proposals(
+                    path_id="demo_path",
+                    target_ip="10.0.0.7",
+                    port=80,
+                    realized_wickets=["HO-01"],
+                    out_dir=out_dir,
+                )
+
+        self.assertEqual(proposals, [fake_proposal])
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(helper.call_args.kwargs["contract_name"], "msf_rc")
+
+    def test_cred_reuse_uses_contract_backed_action_proposal(self):
+        cred_reuse = _load_cred_reuse_module()
+        import skg.assistant.action_proposals as proposal_module
+
+        captured = {}
+
+        def _fake_create_action_proposal(**kwargs):
+            captured.update(kwargs)
+            return {"id": "prop-cred-1"}, {"path": "/tmp/cred_reuse_demo.json"}
+
+        with mock.patch.object(
+            proposal_module,
+            "create_action_proposal",
+            side_effect=_fake_create_action_proposal,
+        ) as helper:
+            cred_reuse._emit_cred_proposal(
+                target_ip="10.0.0.8",
+                port=22,
+                user="alice",
+                secret="s3cr3t",
+                cred_type="password",
+                origin_ip="10.0.0.7",
+                service_type="ssh",
+            )
+
+        self.assertEqual(helper.call_count, 1)
+        self.assertEqual(captured["contract_name"], "credential_test_plan")
+        self.assertEqual(captured["action"]["instrument"], "ssh")
+        self.assertEqual(captured["action"]["dispatch"]["kind"], "cred_reuse")
+        self.assertEqual(captured["artifact_content"]["plan_type"], "cred_reuse_v1")
+        self.assertEqual(captured["artifact_content"]["target_ip"], "10.0.0.8")
+        self.assertIn("--service ssh", captured["artifact_content"]["command_hint"])
 
 
 if __name__ == "__main__":

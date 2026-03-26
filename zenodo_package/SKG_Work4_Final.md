@@ -1,4 +1,4 @@
-# The Unified Field Functional: Fiber-Driven Gravity and Field-First Architecture in SKG
+# SKG: Domain-Agnostic Substrate with Domain Expression Architecture
 
 **Jeffrey Michael Schneck**
 
@@ -8,508 +8,502 @@
 
 ## Abstract
 
-Prior work established a formal substrate for telemetry-driven reasoning (Work 3) and an operational mechanism — the gravity field — through which that substrate directs its own observation. Work 3 formalizes the state space, projection operator, field energy, sheaf structure, and gravity field selection mechanism. The gravity field in Work 3 operates through instrument potential Φ(I, t): each instrument competes for the highest-entropy target based on how many unknown nodes lie in its wavelength. This formulation is operationally correct but architecturally incomplete. It treats wickets as primary objects and derives field energy from them. The field is secondary.
+SKG is a substrate for telemetry-driven reasoning. It treats any observable state space as a physical field, accumulates measurements as bounded contributions to that field, and directs its own observation through an information-theoretic gravity mechanism. Prior work formalized this as a unified field functional L(F) over five canonical field objects and derived the gravity selection mechanism as its gradient.
 
-This paper inverts that relationship. We define a unified field functional L(F) over five canonical field objects — Field Observation, Field Local, Field Coupling, Field Fiber, Field Cluster — and show that the tri-state encoding, projection operator, field energy, and gravity selection mechanism of Work 3 are all derived quantities under this functional. The field is primary. Wickets are one projection of it.
+One architectural property was left implicit in that formalization: SKG has no domain-specific logic. "Web", "host", "data" are not components of the substrate. They are expressions of it — bindings between the abstract field machinery and a particular observation space. The substrate processes field objects regardless of what domain produced them. The instruments are domain-specific; the substrate is not.
 
-The central contribution is fiber-driven gravity: the gravity field follows the gradient of the field functional with respect to fiber tension rather than a flat count of unknown wickets. This recovers the Work 3 instrument selection mechanism as a special case and extends it with two new terms: coupling opportunity (regions where a realized coupling to a bonded target suggests unexplored structure) and decoherence load (regions where repeated measurement has produced contradictory support vectors, indicating structural ambiguity in the field itself).
+This paper makes that architecture explicit and derives its consequences.
 
-We also formalize the decoherence criterion. A state is protected when its support vector satisfies four simultaneous conditions: high coherence, low dissipation, low contradiction, and multi-basis reinforcement. This criterion is not a threshold trick. It derives from the field geometry: a protected state is a local minimum of the field functional that is stable under small perturbations in the instrument schedule.
+A domain expression is a four-tuple Δ = (Ω, Ι, Α, Π): a wicket catalog defining what can be observed, an instrument set specifying how, an adapter translating raw output to field events, and a projection evaluating observations against the substrate. Thirteen domain expressions are currently registered across 211 named conditions. All run through the same kernel without modification.
 
-The paper describes the current runtime implementation status honestly. Fiber-driven gravity is partially implemented: the pearl manifold provides memory curvature, and coupling energy contributes to instrument selection. The full fiber tension term remains an approximation. The decoherence criterion exists as a heuristic. These are not failures. They are the current boundary of a growing system, stated precisely.
+The field functional connects expressions through an inter-expression coupling law K(Δ_a, Δ_b). When a local in expression Δ_a is realized on a target, the coupling term elevates the field potential for instruments in Δ_b. Cross-domain attack chains emerge from this coupling energy — not from hardcoded sequencing.
 
-We validate the framework empirically against a live heterogeneous lab network. The central validation case is EternalBlue (CVE-2017-0143 / MS17-010) on a Windows Server 2008 R2 target: the coupling chain from host reachability (HO-01) through SMB exposure (HO-19) to confirmed vulnerability (HO-25) was traversed autonomously by the gravity field in one nmap execution, generating an exploit proposal at confidence 0.95 without human guidance. Three independent coupling-arc failures that previously blocked this path were diagnosed as structurally identical by the field functional framework — each was a severed inter-local coupling, not three unrelated bugs. The framework made the coupling structure explicit; diagnosis followed directly.
+We validate against a live three-target engagement with four active expressions. The gravity field crossed expression boundaries autonomously: web injection realization (WB-05) triggered selection of the data expression's database instrument via K(web, data) = 0.85; host chain realization (HO-01 → HO-19 → HO-25) triggered exploit proposal generation via K(smb, vuln) = 0.90. Neither transition was explicitly programmed. Both followed from the coupling energy in Φ_fiber.
+
+The empirical results are preliminary — three lab targets, one operator, four cycles. The formal framework is the contribution; the engagement demonstrates that the coupling mechanism produces the expected selection behavior on real hardware. A fuller evaluation across diverse environments is needed before the coupling constants can be treated as anything other than calibrated estimates.
 
 ---
 
 ## 1. Introduction
 
-Work 3 introduced the gravity field as a mechanism by which the substrate directs its own observation. The gravity field selects the instrument with the highest entropy reduction potential Φ(I, t) = |{n ∈ W(I) ∩ A(t) : Σ(n) = U}| / c(I) × penalty(I, t). This mechanism was derived from operational observation rather than formal deduction: it is what the deployed system does, formalized after deployment.
+### 1.1 What prior work established
 
-The mechanism works. Ten attack paths were realized across a live network without human guidance. The system shifted instruments when they failed. It converged when no further reduction was achievable. The formal properties of the substrate — tri-state encoding, provenance preservation, deterministic projection — held throughout.
+Work 3 [3] defined the SKG substrate: tri-state encoding Σ ∈ {R, B, U}, a projection operator π mapping observations to state, a field energy E(S, A) = |{n ∈ A : Σ(n) = U}| counting unresolved conditions, and a gravity selection mechanism argmax_I Φ(I, t) directing instruments toward maximum entropy reduction. The mechanism worked. Ten attack paths were realized on a live network without human guidance.
 
-But the mechanism has a structural property that is unsatisfying as a foundation: it begins from wickets. The field energy E(S, A) = |{n ∈ A : Σ(n) = U}| counts unknown nodes in the applicable set. The gravity selection argmax_I Φ(I, t) minimizes this count. The field — the actual collection of observations, their couplings, their preserved history, their structural relationships — is not represented. Wickets are the primary objects. The field is a derived quantity.
+Work 4 (prior version) introduced the unified field functional L(F) over five canonical field objects — Field Observation, Field Local, Field Coupling, Field Fiber, Field Cluster — and showed that the Work 3 quantities are derived projections under it. Fiber-driven gravity Φ_fiber extended the selection mechanism with coupling opportunity and decoherence load. The pearl manifold was identified as memory curvature. These results stand and are not revisited here.
 
-This ordering is historically justified. The system was built wicket-first. Catalogs define wickets. Instruments resolve them. Projections evaluate them. This is the operational reality. But it is not the correct epistemological foundation.
+### 1.2 What was left implicit
 
-Consider what actually happens when an instrument observes a target. It does not write a bit to a wicket table. It produces a measurement: a bounded, sourced contribution to the local field at some region of the state space. That measurement has structure: confidence, compatibility, temporal placement, decay class, instrument identity. It constrains a region of state space, not a single scalar node. The wicket is a derived concept — a label for a region of state space that the operator has found useful to name. The measurement is the primary object.
+Both prior papers were written from inside a single deployment: a cybersecurity engagement against network targets. "Host", "web", "SMB", "data" appear in those papers as if they were natural categories of the substrate. They are not. They are namespaces — conventions for partitioning the wicket space that the substrate carries as metadata but does not process.
 
-This paper develops the framework implied by this observation. Section 2 defines the canonical field objects. Section 3 defines the field functional L(F) and shows that the Work 3 quantities are derived projections under it, with formal propositions establishing boundedness and Work 3 recovery. Section 4 introduces fiber-driven gravity as the gradient of L with respect to fiber tension. Section 5 formalizes the decoherence criterion and the protected state theorem. Section 6 describes the connection to the pearl manifold and memory geometry. Section 7 presents empirical results from a live engagement validating coupling-driven path realization. Section 8 discusses implementation status, implications, and open questions.
+The substrate has no concept of "web". It has field locals indexed by (workload_id, domain_label), instruments with wavelengths over domain-labeled wickets, and a gravity field that selects by potential. The domain label is annotation. The substrate's rules are identical across all annotations.
 
----
+This matters because the practical consequence of domain-agnosticity is architectural: new observation capabilities extend SKG by adding a domain expression, not by modifying the substrate. The substrate does not need to know what an IoT firmware scanner does. It needs to know W(firmware_scanner), c(firmware_scanner), and γ(firmware_scanner). Everything else is in the expression.
 
-## 2. Canonical Field Objects
+### 1.3 What this paper does
 
-The field is built from five object classes. These are not abstract constructs. Each has a direct operational instantiation in the deployed substrate.
-
-### 2.1 Field Observation
-
-A Field Observation is a bounded measured contribution from a single instrument execution against a single manifestation.
-
-Formally: O = (ι, m, φ, τ, γ, C, δ) where:
-
-- ι: the source instrument identity
-- m: the manifestation / anchor identity (what was observed)
-- φ: the local support vector — a triple (φ_R, φ_B, φ_U) ∈ [0,1]³ encoding realized, blocked, and unresolved mass
-- τ: the temporal placement (collection timestamp)
-- γ: the confidence structure — a scalar ∈ [0, 1]
-- C: the compatibility context — evidence rank and basis count for coherence evaluation
-- δ: the dissipation class — {ephemeral | operational | structural}
-
-O is not yet a wicket. The wicket label is applied during projection. A single O may contribute to multiple wicket evaluations if the observation addresses a region of state space covered by multiple wicket definitions.
-
-**Runtime instantiation:** Observations are ndjson event records of type `obs.attack.precondition`. The support vector (φ_R, φ_B, φ_U) is derived from the status field and the provenance evidence structure by the SupportEngine. The dissipation class maps to the decay class in the evidence provenance.
-
-### 2.2 Field Local
-
-A Field Local L_i is a persistent localized concentration of measured structure at some region of state space.
-
-Formally: L_i = ({O_k} : m(O_k) = m_i, region(O_k) = r_i) — the set of observations anchored to identity m_i within region r_i of state space.
-
-Examples:
-- A service surface: L_web = all observations about HTTP exposure at target t
-- A credential binding: L_cred = all observations about authentication state at target t
-- A process integrity condition: L_proc = all observations about running processes at target t
-- A datastore access condition: L_db = all observations about database accessibility
-
-The local self-energy of L_i is:
-
-E_self(L_i) = U_m(L_i) + E_local(L_i) + E_latent(L_i)
-
-Where:
-- U_m(L_i) = unresolved measured mass = A_i + 0.5 × E_local,i + 0.5 × D_i + 0.25 × (1 − C_i)
-  - A_i = unresolved amplitude from support vector aggregation
-  - D_i = decoherence contribution
-  - C_i = compatibility score
-- E_local(L_i) = retained local energy from resolved-but-decaying observations
-- E_latent(L_i) = latent contributions from incomplete instrument sweeps
-
-**Runtime instantiation:** Locals are implicit in the current substrate — they are the grouping of observations by (workload_id, domain). The KernelStateEngine.states_with_detail() function returns the per-wicket collapsed state that approximates local self-energy.
-
-### 2.3 Field Coupling
-
-A Field Coupling K(L_i, L_j) expresses the inter-local influence between two field locals.
-
-Formally: K(L_i, L_j) ∈ [0, 1] measures the degree to which the realized structure in L_i makes the structure in L_j gravitationally interesting to observe.
-
-The coupling energy is:
-
-E_couple(L_i, L_j) = K(L_i, L_j) × (E_local(L_j) + U_m(L_j))
-
-This is additive to the field at L_j when L_i has realized structure. It increases the gravitational pull toward L_j without asserting that L_j's conditions are realized.
-
-Examples from the deployed system:
-- K(L_cred, L_ssh) ≈ 0.95: a confirmed credential couples strongly to SSH authentication state — realizing the credential makes SSH access gravitationally interesting
-- K(L_docker_host, L_container) ≈ 0.90: a docker host binding couples to container escape conditions
-- K(L_web_sqli, L_db) ≈ 0.85: confirmed SQL injection couples to database access conditions
-- K(L_ad_domain, L_lateral) ≈ 0.70: AD domain membership couples to lateral movement paths
-
-**Runtime instantiation:** The gravity web (gravity_web.py) implements bond discovery and prior propagation. The prior P_B(n) = s × α from Work 3 is the coupling energy contribution along same_host, docker_host, shared_cred, same_domain, and same_subnet bonds. The credential reuse instrument (cred_reuse.py) implements E_cred = |untested credential × service| pairs as coupling energy.
-
-### 2.4 Field Fiber
-
-A Field Fiber is an overlapping strand of preserved structure through one anchor identity.
-
-Formally: F = (m, Λ, ρ, τ, coherence, tension) where:
-- m: the anchor identity (workload_id or identity_key)
-- Λ: sphere/domain participation set — which domains contribute to this fiber
-- ρ: kind label — what structural role this fiber plays
-- τ: temporal extent — when this fiber's observations were collected
-- coherence(F): stability of the strand = 1 − mean_decoherence over F's observations
-- tension(F): unresolved pull within the strand = U_m averaged over F's locals
-
-Fibers are not simple edges. A fiber through an SSH service local and a privilege escalation local is not just a connection between them — it preserves: multi-domain membership, the temporal ordering of observations, repeated measured coherence (whether the SSH state remained stable across multiple sweeps), and the local tension (whether privilege escalation remains unknown despite SSH being confirmed).
-
-A high-tension, high-coherence fiber is a field structure that is clearly present and clearly unresolved. Gravity should follow it directly.
-
-**Runtime instantiation:** The PearlManifold computes reinforced neighborhoods over the pearl ledger — these are the current approximation of fiber structure. The `wavelength_boost` and `recall_adjustment` methods provide fiber-derived gravity modifiers. The topology/manifold.py SimplicialComplex represents the wicket graph that underlies the fibers' structural relationships.
-
-### 2.5 Field Cluster
-
-A Field Cluster is a bundle of related fibers for one anchor identity.
-
-Formally: C = {F_1, ..., F_k} where each F_i has the same anchor identity m.
-
-The cluster represents the total fibered structure of a target — all the overlapping strands of preserved structure, their coherence, their tension, their cross-domain relationships.
-
-The cluster-level gravity pull is:
-
-G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + Σ_{i<j} K(F_i, F_j) × E_couple(F_i, F_j)
-
-The first term sums fiber tensions weighted by how coherent (trustworthy) each fiber is. The second term sums the coupling energy between fibers — when two fibers in the same cluster are structurally related (credential fiber coupled to SSH fiber), their coupling contributes to the cluster's gravity pull.
-
-**Runtime instantiation:** Clusters are not yet explicitly computed in the runtime. They are approximated by the per-target instrument potential computation in gravity_field.py. The full cluster computation is a planned development.
+Section 2 defines the domain expression formally and describes the toolchain as its runtime form. Section 3 covers instruments as domain-specific measurement devices and the adapter as the only domain-specific component that touches the substrate's event format. Section 4 presents the field functional in domain-agnostic terms. Section 5 defines the inter-expression coupling law and the two coupling mechanisms — intra-target and cross-target — that connect expressions. Section 6 is fiber-driven gravity formulated over the union of all active expression locals. Section 7 is the decoherence criterion and protected-state theorem. Section 8 is the pearl manifold as memory curvature. Section 9 is the empirical engagement. Section 10 is implementation status, limitations, and what an honest assessment of the empirical claims looks like.
 
 ---
 
-## 3. The Field Functional
+## 2. Domain Expression Architecture
 
-The unified field functional L(F) is defined over the field state F = ({O_k}, {L_i}, {K(L_i, L_j)}, {F_ν}, {C_μ}):
+### 2.1 What the substrate provides vs. what an expression provides
 
-**L(F) = Σ_i E_self(L_i) + Σ_{i<j} E_couple(L_i, L_j) + D(F) + κ(F)**
+The substrate provides:
 
-Where:
-- Σ_i E_self(L_i): sum of local self-energies over all field locals
-- Σ_{i<j} E_couple(L_i, L_j): sum of coupling energies over all coupled local pairs
-- D(F) = Σ_i D(L_i): total dissipation — decoherence + latency + stale support loss
-- κ(F): curvature from folds — structural gaps in the model itself
+- Tri-state encoding: Σ ∈ {R, B, U} per field local
+- Support engine: aggregation of bounded observations into support vectors
+- Projection operator: π mapping events to state
+- Field functional: L(F) over all active locals
+- Gravity field: argmax_I Φ_fiber(I, t) over available instruments
+- Pearl manifold: preserved history of field transformations
+- WorkloadGraph: cross-target prior propagation
 
-The substrate operates to minimize L(F) through observation. Each instrument execution contributes a new Field Observation O, which updates the locals, possibly resolves couplings, modifies fiber tensions, and reduces L.
+None of these components reference a specific domain. No substrate code path is conditional on the domain label. The label is carried as metadata and used for two purposes: routing events to the correct expression's projection, and looking up K(Δ_a, Δ_b) for the coupling calculation. Nothing else.
 
-### 3.1 Recovery of Work 3 Quantities
+A domain expression provides everything the substrate needs to observe a specific class of target:
 
-The field energy of Work 3:
+**Definition 1 (Domain Expression).** A domain expression is a four-tuple Δ = (Ω, Ι, Α, Π) where:
 
-E(S, A) = |{n ∈ A : Σ(n) = U}|
+- **Ω** is a wicket catalog: a finite set of named condition identifiers {ω₁, ..., ωₙ} with precondition semantics. Ω defines the expression's wicket namespace. All identifiers carry a domain-specific prefix (HO-, WB-, DP-, etc.) that ensures namespace isolation across expressions.
 
-is recovered as the leading term of L(F) restricted to applicable locals. When each local L_i corresponds to exactly one wicket n_i, and the coupling, dissipation, and curvature terms are dropped:
+- **Ι** is an instrument set: measurement devices {I₁, ..., Iₖ}, each a triple (W(Iₖ), c(Iₖ), γ(Iₖ)) — wavelength (which conditions it can resolve), cost (resource consumption), and confidence model. The gravity field sees only this triple.
 
-E(S, A) ≈ Σ_{i : n_i ∈ A} 𝟙[Σ(n_i) = U] ≈ Σ_i E_self(L_i) restricted to U locals
+- **Α** is an adapter: a function from raw instrument output to a sequence of `obs.attack.precondition` events. This is the expression's only contact with domain-specific output formats — nmap XML, HTTP response bodies, binary reports. Once the adapter emits a canonical event, the substrate processes it identically to any other event from any other expression.
 
-The wicket count is the zero-th order approximation of the field functional. It is correct when:
-- Each observation maps cleanly to a single wicket (no cross-wicket overlap)
-- No inter-local coupling is present
-- Dissipation and folds contribute negligibly
+- **Π** is a projection: a function from accumulated support vectors over Ω to tri-state assessments and attack path scores. The projection applies the substrate's StateEngine and CollapseThresholds — it does not implement its own evaluation logic.
 
-In practice none of these conditions hold exactly. The field functional is the correct object. The wicket count is its flat-space approximation.
+### 2.2 Expression independence
 
-**Proposition 1 (Boundedness).** L(F) ≥ 0 for all field states F. Moreover, L(F) = 0 if and only if all field locals are fully resolved (E_self(L_i) = 0 for all i), all coupling energy has collapsed (E_couple(L_i, L_j) = 0 for all i, j), and no folds are active (κ(F) = 0).
+Two expressions Δ_a and Δ_b are expression-independent if Ω_a ∩ Ω_b = ∅. All currently deployed expressions are expression-independent. A web observation cannot directly collapse a host wicket. The only cross-expression channel is the coupling law K(Δ_a, Δ_b), which adjusts priors rather than directly modifying state.
 
-*Proof sketch.* Each term in L(F) is non-negative by construction: E_self(L_i) is a sum of non-negative mass contributions (U_m ≥ 0, E_local ≥ 0, E_latent ≥ 0); E_couple(L_i, L_j) = K × (E_local + U_m) ≥ 0 since K ∈ [0,1] and both factors are non-negative; D(F) ≥ 0 as a dissipation term; κ(F) ≥ 0 by definition. The zero case holds because E_couple(L_i, L_j) vanishes when L_j is fully resolved (E_local(L_j) = 0, U_m(L_j) = 0) regardless of K, so cyclic coupling structures do not prevent L(F) = 0 as long as all locals are resolved. The H¹ obstruction from Work 3 governs whether full resolution is achievable, not whether L(F) is bounded.
+Thirteen expressions are currently registered:
 
-**Remark.** When cyclic coupling exists and full resolution requires simultaneous satisfaction of coupled conditions, the minimum achievable L(F) may be strictly positive — this is the field-functional analog of the H¹ sheaf obstruction. The system converges to the minimum achievable state, not necessarily to L(F) = 0.
+| Expression | Namespace | Wicket count |
+|---|---|---|
+| host | HO- | 25 |
+| sysaudit | FI-, PI- | 24 |
+| web | WB- | 20 |
+| ad-lateral | AD- | 25 |
+| container-escape | CE- | 14 |
+| aprs | AP- | 14 |
+| data | DP- | 15 |
+| nginx | NX- | 12 |
+| supply-chain | SC- | 12 |
+| iot-firmware | IF- | 15 |
+| ai-target | AI- | 20 |
+| binary | BA- | 6 |
+| metacognition | MC- | 8 |
 
-### 3.2 Prior Influence Under the Field Functional
+211 named conditions. Four were active in the validation engagement.
 
-The Work 3 prior augmentation E*(S, A, P) = E(S, A) + Σ P(n) for unknown n is recovered as the coupling energy term:
+### 2.3 The toolchain as the expression runtime
 
-Σ_{i<j} E_couple(L_i, L_j) = Σ_{i<j} K(L_i, L_j) × (E_local(L_j) + U_m(L_j))
+In the deployed substrate, each domain expression is packaged as a toolchain directory:
 
-When L_i is a realized local on target A and L_j is the corresponding local on bonded target B, K(L_i, L_j) = s (bond strength), and the coupling energy adds to L(F) at L_j. This is the prior mechanism, derived from the field structure rather than stated as an ad hoc augmentation.
+```
+skg-{domain}-toolchain/
+  contracts/catalogs/          # Ω: wicket catalog (JSON)
+  adapters/{instrument}/       # Α: one adapter per instrument
+  projections/{domain}/run.py  # Π: projection engine
+  forge_meta.json              # expression manifest
+```
+
+The substrate discovers available expressions by enumerating toolchain directories. Adding a new domain expression requires implementing one toolchain. No substrate code changes. The consequence is concrete: someone who wants to add IoT firmware analysis to SKG writes a catalog of IF- wickets, an adapter that reads binwalk output, and a projection that applies the substrate's existing StateEngine to firmware-specific events. They do not touch gravity_field.py or the kernel.
+
+### 2.4 The metacognition expression
+
+One expression is unusual: metacognition (MC-01 through MC-08) has SKG's own coverage gaps as its observation space. MC-03 is "coverage gap detected — service class with no catalog wickets." MC-05 is "contradictory evidence without reconciliation." These are conditions about the substrate's own epistemic state, not about a target.
+
+The metacognition expression is partially implemented. The wickets are defined. The mechanism by which a realized MC-03 would trigger catalog compilation for a new expression is not yet wired. This is noted here because it is structurally interesting — a substrate that can observe its own observability gaps and propose extensions is a different thing from one that requires human intervention at every coverage boundary. The implementation path is clear; it has not been taken yet.
 
 ---
 
-## 4. Fiber-Driven Gravity
+## 3. Instruments as Domain-Specific Measurement Devices
 
-### 4.1 The Gradient Formulation
+### 3.1 What the gravity field knows about an instrument
 
-The Work 3 gravity selection mechanism selects argmax_I Φ(I, t). This is a greedy algorithm over instrument potentials defined by wicket unknowns. It is the correct behavior when the field is well-approximated by its wicket projection. When it is not — when coupling energy, fiber tension, and decoherence load are significant — the greedy mechanism underperforms.
+The gravity field does not know what nmap does. It knows W(nmap) = {HO-01, HO-03, HO-19, HO-25, ...} — the set of wicket identifiers this instrument can produce observations for. It knows c(nmap) — cost. It knows γ(nmap) — confidence. That is all.
 
-Fiber-driven gravity replaces this with a gradient formulation:
+The domain label on the wickets in W(nmap) is visible as metadata. The selection mechanism does not inspect it. An instrument from the host expression and an instrument from the web expression compete for selection by the same formula over the same field state. The winner is whichever has higher Φ_fiber.
 
-G_pull(t) ~ -∂L(F)/∂(instrument schedule at t)
+This is not an architectural accident. It is the operational consequence of domain-agnosticity: the gravity field routes toward unresolved structure regardless of which expression produced the observations that define that structure.
 
-The gravity field moves toward instrument executions that maximally reduce L(F). The gradient has three contributing terms:
+### 3.2 The adapter as the only domain boundary
+
+The adapter Α is the single component in a domain expression that touches domain-specific content. Raw instrument output — an nmap XML file, an HTTP body, a binary analysis report — enters the adapter. Canonical `obs.attack.precondition` events exit it:
+
+```json
+{
+  "type": "obs.attack.precondition",
+  "payload": {
+    "wicket_id":    "HO-19",
+    "target_ip":    "192.168.122.153",
+    "workload_id":  "host::192.168.122.153",
+    "domain":       "host",
+    "status":       "realized",
+    "confidence":   0.95,
+    "evidence":     "port 445/tcp open — smb",
+    "decay_class":  "operational",
+    "source":       "nmap"
+  }
+}
+```
+
+Once emitted, this event is processed identically to any other `obs.attack.precondition` event from any expression. The SupportEngine, StateEngine, and projection operator apply the same formulas. The domain label is carried for routing and coupling lookup, nothing else.
+
+The adapter is where the reverse engineering lives. Parsing `smb-vuln-ms17-010: State: VULNERABLE` into a HO-25 realization with confidence 0.95 requires knowing what that NSE output means. The substrate does not know. The adapter does. The clean boundary means that an incorrect adapter mapping — the wrong wicket ID, the wrong confidence — is localized. It does not corrupt the substrate's state model.
+
+### 3.3 Confidence calibration is domain-agnostic
+
+Each instrument carries γ(I). The substrate's calibration mechanism computes empirical precision — the fraction of observations that were not reversed by subsequent observations — and adjusts γ downward when the instrument is overconfident:
+
+    γ_calibrated(I) = α × γ_empirical + (1−α) × γ_hand_tuned
+
+This formula applies to any instrument from any expression. A web_collector with γ_hand_tuned = 0.75 and empirical precision 0.533 receives a 28.9% correction. An SSH collector with γ_hand_tuned = 0.90 and empirical precision 0.80 receives an 11.1% correction. The correction does not know or care which domain the instrument belongs to.
+
+This is a small validation of the domain-agnostic design: instrument quality is a property of the measurement device, not of the observation space. The same failure mode — overconfidence — is corrected by the same mechanism regardless of domain.
+
+---
+
+## 4. The Field Functional Over Domain Expressions
+
+### 4.1 Field objects are domain-neutral
+
+The five canonical field objects carry domain labels as annotation, not as structure.
+
+**Field Observation** O = (ι, m, φ, τ, γ, C, δ): a bounded measured contribution from one instrument execution. ι is domain-specific (it names an instrument in a specific expression). The observation structure — support vector, temporal placement, dissipation class — is identical regardless.
+
+**Field Local** L_i = grouping of observations by (workload_id, domain_label). The domain_label scopes the local to one expression's namespace. Two locals with different domain labels on the same target are distinct field objects. Their interaction is entirely through coupling energy, not through shared state.
+
+**Field Coupling** K(L_i, L_j): inter-local influence. When L_i and L_j are in the same expression, K is intra-expression. When they are in different expressions, K is the inter-expression coupling law defined in Section 5.
+
+**Field Fiber** F = (m, Λ, ρ, τ, coherence, tension): a strand of preserved structure. The domain participation set Λ identifies which expressions contribute. A fiber through a target observed by host, web, and data expressions has |Λ| = 3.
+
+**Field Cluster** C = {F₁, ..., Fₖ}: all fibers for one anchor identity. The cluster is the total measured structure of a target across all active expressions.
+
+### 4.2 The field functional
+
+    L(F) = Σᵢ E_self(Lᵢ) + Σᵢ﹤ⱼ E_couple(Lᵢ, Lⱼ) + D(F) + κ(F)
+
+- **Σᵢ E_self(Lᵢ)**: over all locals from all active expressions. E_self(Lᵢ) = U_m(Lᵢ) + E_local(Lᵢ) + E_latent(Lᵢ). The sum spans the full expression union.
+
+- **Σᵢ﹤ⱼ E_couple(Lᵢ, Lⱼ) = K(Lᵢ, Lⱼ) × (E_local(Lⱼ) + U_m(Lⱼ))**: when Lᵢ and Lⱼ are in different expressions, K comes from the inter-expression table. When they are in the same expression, K is the intra-expression coupling.
+
+- **D(F) = Σᵢ D(Lᵢ)**: total dissipation across all expressions. Decoherence and contradiction loads use the same formula regardless of which expression's local is being evaluated.
+
+- **κ(F)**: curvature from structural gaps. The metacognition expression's unresolved wickets contribute explicitly to κ — MC-03 (coverage gap) is a recognized fold type in the field.
+
+The Work 3 field energy E(S, A) = |{n ∈ A : Σ(n) = U}| is recovered as the leading term of L(F) restricted to a single expression's applicable locals, dropping coupling, dissipation, and curvature. The wicket count is the zeroth-order, single-expression, zero-coupling approximation.
+
+**Proposition 1 (Boundedness).** L(F) ≥ 0 for all field states F. L(F) = 0 iff all locals from all expressions are fully resolved, all coupling energy has collapsed, and no folds are active.
+
+*Proof sketch.* Each term is non-negative by construction. E_couple(Lᵢ, Lⱼ) = K × (E_local(Lⱼ) + U_m(Lⱼ)) vanishes when Lⱼ is fully resolved regardless of K — cyclic coupling structures do not prevent L(F) = 0 as long as all locals resolve. The H¹ obstruction from Work 3 governs whether full resolution is achievable; it does not affect sign. ∎
+
+**Proposition 2 (Monotone Reduction).** A non-contradictory observation with positive realized or blocked support contribution to any local in any expression produces L(F ∪ {O}) ≤ L(F).
+
+*Proof sketch.* A positive contribution reduces U_m(Lᵢ), which reduces E_self(Lᵢ). Coupling terms E_couple(Lⱼ, Lᵢ) for all Lⱼ coupled to Lᵢ decrease as U_m(Lᵢ) decreases. No term increases from a non-contradictory observation. The contradictory case — which can increase D(F) — is excluded by the statement. ∎
+
+*Falsifiability.* Both propositions are falsified by any logged field state (available in `evidence/figures/A_energy.json` and `H_math.json`) that violates their conditions. The empirical record contains no such violation across all engagement cycles.
+
+### 4.3 Runtime instantiation
+
+The field functional is computed in `skg/kernel/field_local.py:field_functional()`. Field locals are constructed from `KernelStateEngine.states_with_detail()` output by `build_field_locals()`. The `FieldLocal` class holds the wicket states per (workload_id, domain) pair and exposes E_self, E_local, E_latent, decoherence_load, and the coupling energy method directly. L(F) is logged to `evidence/figures/A_energy.json` on each gravity cycle.
+
+---
+
+## 5. Inter-Expression Coupling
+
+### 5.1 Two coupling mechanisms
+
+The substrate connects domain expressions through two distinct mechanisms:
+
+**Intra-target inter-expression coupling**: K(Δ_a, Δ_b) applies to locals for the same target. When L_web and L_data both reference target T, K(web, data) = 0.85 creates coupling energy at L_data when L_web has realized structure. This drives depth — the substrate pursues more conditions on the same target across different expressions.
+
+**Cross-target coupling** via WorkloadGraph: Kuramoto-inspired prior propagation across distinct targets. When target A realizes a condition, the WorkloadGraph propagates a prior to the same condition type on target B, weighted by the bond strength between A and B (same_identity: 0.85, credential_overlap: 0.45, same_subnet: 0.20). This drives breadth — related targets inherit elevated priors. This mechanism is domain-agnostic in the same sense as the rest of the substrate: it propagates by wicket pattern and relationship type, not by domain label.
+
+### 5.2 The inter-expression coupling table
+
+K(Δ_a, Δ_b) encodes how much realized structure in expression Δ_a contributes to the field potential at expression Δ_b on the same target:
+
+| Source expression | Target expression | K | Basis |
+|---|---|---|---|
+| credential | host | 0.95 | Confirmed credential is a direct precondition for SSH auth — structural dependency |
+| credential | web | 0.80 | Confirmed credential enables web auth — strong but not entailed |
+| smb | vuln | 0.90 | Exposed SMB service implies NSE vulnerability scan applicability |
+| web | data | 0.85 | SQL injection confirmed implies database accessibility |
+| web (cmdi) | host | 0.90 | Command injection gives OS-level execution |
+| container-escape | host | 0.85 | Container escape lands on the host |
+| host | container-escape | 0.60 | Host presence enables container discovery |
+| host | ad-lateral | 0.80 | Host foothold enables lateral movement |
+| ad-lateral | host | 0.70 | Lateral pivot lands on a new host |
+
+K = 0.90–0.95: structural dependency — target expression's conditions require source expression's realization. K = 0.65–0.89: strong implication — source realization makes target conditions gravitationally accessible. K = 0.10: default (no coupling data; effectively decoupled).
+
+These values are hand-tuned on two engagements. They encode the author's understanding of the structural dependencies between observation domains. They are not derived from data. Whether they generalize to environments other than the validation lab is unknown. Section 10 is direct about this.
+
+### 5.3 Coupling energy as the cross-expression bridge
+
+    E_couple(Lᵢ, Lⱼ) = K(Δ_a, Δ_b) × (E_local(Lⱼ) + U_m(Lⱼ))
+
+adds to L(F) at Lⱼ (expression Δ_b) when Lᵢ (expression Δ_a) has realized structure. The practical effect: when WB-05 (SQL injection) is realized on a target, the coupling term adds 0.85 × U_m(L_data) to the field potential of the data expression's database instrument. The gravity field, selecting argmax_I Φ_fiber(I, t) over all instruments from all expressions, selects the database instrument next — not because of a sequencing rule, but because the coupling energy made it the highest-potential unresolved local.
+
+This is how multi-domain attack chains emerge without explicit chaining logic. The coupling table is the knowledge base. The field functional is the inference engine.
+
+### 5.4 Propagation selectivity by relationship type
+
+Cross-target propagation is selective by relationship type. Not all expression conditions propagate through all bond types:
+
+- `same_identity` (0.85): all expressions propagate — the same host confirmed via one workload propagates to the same host in all other workloads
+- `credential_overlap` (0.45): ad-lateral and aprs — shared credentials couple AD and network protocol conditions
+- `same_subnet` (0.20): aprs and container-escape — container networks and protocol signals propagate weakly through subnet adjacency
+- `network_adjacent` (0.15): aprs only
+
+The selectivity reflects the claim structure. A container escape on host A does not propagate AD lateral movement priors to host B via `same_subnet` — AD trust does not follow subnets. The selectivity is asserted as domain knowledge, not derived.
+
+---
+
+## 6. Fiber-Driven Gravity Across Domain Expressions
+
+The Work 3 selection mechanism Φ(I, t) = |{n ∈ W(I) ∩ A(t) : Σ(n) = U}| / c(I) selects the instrument covering the most unknown wickets per unit cost. It is correct when each local's state is well-approximated by a scalar, coupling is absent, and decoherence is zero. In a multi-expression deployment none of those conditions hold.
+
+Fiber-driven gravity follows the gradient of L(F) with respect to the instrument schedule:
+
+    G_pull(t) ~ −∂L(F)/∂(instrument schedule at t)
+
+Three terms contribute:
 
 **Term 1: Fiber tension**
-∂L/∂fiber_tension = Σ_ν ∂E_self/∂F_ν where F_ν ranges over fibers at t
 
-Fiber tension is the unresolved pull within a strand. A high-tension fiber (coherent but unresolved) contributes maximally to the gradient. An incoherent fiber (high decoherence) contributes less because its measurements are unreliable.
+    Φ_tension(I, t) = Σᵥ tension(Fᵥ) × coherence(Fᵥ) × 𝟙[W(I) ∩ Fᵥ ≠ ∅] / c(I)
 
-Φ_tension(I, F_ν) = tension(F_ν) × coherence(F_ν) × 𝟙[W(I) ∩ F_ν ≠ ∅] / c(I)
+A high-tension, high-coherence fiber (clearly present and clearly unresolved) contributes maximally. The fiber may span multiple expressions — an instrument from any expression whose wavelength intersects any local in that fiber contributes to Φ_tension.
 
 **Term 2: Coupling opportunity**
-∂L/∂coupling = Σ_{i<j} ∂E_couple/∂(observation at L_j)
 
-When L_i is realized and L_j is unobserved, the gradient at L_j is:
+    Φ_couple(I, t) = Σⱼ K(·, Lⱼ) × U_m(Lⱼ) × 𝟙[W(I) ∩ Lⱼ ≠ ∅] / c(I)
 
-Φ_couple(I, L_j) = K(L_i, L_j) × U_m(L_j) × 𝟙[W(I) ∩ L_j ≠ ∅] / c(I)
-
-This is the credential reuse signal, the container-to-host escape signal, the domain-to-lateral signal: a realized structure on a coupled local increases the gravitational pull toward the unobserved coupled local.
+When Lᵢ is realized in expression Δ_a and Lⱼ in expression Δ_b is coupled via K(Δ_a, Δ_b) > 0, any instrument in Δ_b with wavelength intersecting Lⱼ receives a coupling bonus. This is where cross-expression selection occurs: a realized web local elevates the potential of data instruments via K(web, data).
 
 **Term 3: Decoherence load**
-∂L/∂decoherence = Σ_i ∂D(L_i)/∂(observation at L_i)
 
-When a local has accumulated contradictory support vectors (same wicket region, contradictory observations from different instruments), the decoherence load D(L_i) is high. Gravity should direct fresh observation to resolve the contradiction.
+    Φ_decoherence(I, t) = Σᵢ D(Lᵢ) × 𝟙[W(I) ∩ Lᵢ ≠ ∅] / c(I)
 
-Φ_decoherence(I, L_i) = D(L_i) × 𝟙[W(I) ∩ L_i ≠ ∅] / c(I)
+Contradictory locals in any expression attract instruments. The substrate routes toward measurement conflicts before they accumulate.
 
-### 4.2 Combined Fiber-Driven Selection
+Combined:
 
-The fiber-driven instrument potential integrates all three terms:
+    Φ_fiber(I, t) = [Φ_tension + Φ_couple + Φ_decoherence] × penalty(I, t) / c(I)
 
-Φ_fiber(I, t) = Φ_tension(I, t) + Φ_couple(I, t) + Φ_decoherence(I, t)
-             = [Σ_ν tension(F_ν) × coherence(F_ν) × 𝟙[W(I) ∩ F_ν ≠ ∅]
-               + Σ_j K(·, L_j) × U_m(L_j) × 𝟙[W(I) ∩ L_j ≠ ∅]
-               + Σ_i D(L_i) × 𝟙[W(I) ∩ L_i ≠ ∅]
-               ] / c(I)  × penalty(I, t)
+Selection is argmax_I Φ_fiber(I, t) over all instruments from all registered expressions.
 
-**Proposition 2 (Work 3 Recovery).** The Work 3 gravity selection mechanism Φ(I, t) = |{n ∈ W(I) ∩ A(t) : Σ(n) = U}| / c(I) is a special case of Φ_fiber(I, t) under the following conditions:
-1. Each fiber F_ν corresponds to exactly one unknown wicket and has coherence(F_ν) = 1, tension(F_ν) = 1
-2. No coupling energy is present: K(L_i, L_j) = 0 for all i ≠ j
-3. No decoherence: D(L_i) = 0 for all i
-4. penalty(I, t) = 1
+**Proposition 3 (Work 3 Recovery).** Φ(I, t) from Work 3 is Φ_fiber(I, t) under: unit coherence and tension per unknown wicket, K = 0 everywhere, D = 0 everywhere, penalty = 1, one active expression.
 
-*Proof.* Under these conditions, Φ_tension(I, t) = |{F_ν : W(I) ∩ F_ν ≠ ∅ ∧ tension = 1}| / c(I) = |{n ∈ W(I) ∩ A(t) : Σ(n) = U}| / c(I) since each fiber with unit tension corresponds to exactly one unknown wicket in the applicable set. The coupling and decoherence terms vanish. ∎
+*Proof.* Under these conditions Φ_tension reduces to counting unknowns in W(I) ∩ A(t); Φ_couple = 0; Φ_decoherence = 0. The result is the Work 3 count divided by c(I). ∎
 
-**Proposition 3 (Monotone Reduction).** For any instrument execution producing a new observation O with positive realized or blocked support contribution to local L_i, the field functional satisfies L(F ∪ {O}) ≤ L(F).
+Work 3 selection is the flat-space, zero-coupling, coherence-homogeneous, single-expression limit of Φ_fiber.
 
-*Proof sketch.* A positive support contribution increases φ_R or φ_B in the support vector for L_i, reducing U_m(L_i) (the unresolved measured mass). Since E_self(L_i) is monotone non-increasing in the amount of resolved mass, and E_couple(L_i, L_j) = K × (E_local(L_j) + U_m(L_j)) is non-increasing as U_m(L_j) decreases, no term in L(F) increases. The dissipation term D(F) may increase slightly from the new observation's decay clock, but this is dominated by the E_self reduction for non-contradictory observations. The exceptional case — a new observation that contradicts existing support and increases φ_contradiction — may increase D(F) and the decoherence load. This is the field's representation of genuine measurement conflict. ∎
+### 6.1 Memory curvature from the pearl manifold
 
-The Work 3 selection mechanism Φ(I, t) = |{n ∈ W(I) ∩ A(t) : Σ(n) = U}| / c(I) is recovered as the special case of Φ_fiber when:
-- All fibers have unit coherence and unit tension per unknown wicket
-- No coupling energy is present
-- Decoherence load is zero
+The pearl manifold computes a wavelength_boost from reinforced neighborhoods — wickets in W(I) that appear repeatedly in the pearl ledger for the same (identity_key, domain_label). The boost represents prior informativeness:
 
-That is, Φ is the flat-space, zero-coupling, coherence-homogeneous limit of Φ_fiber.
+    Φ_effective(I, t) = Φ_fiber(I, t) × (1.0 + wavelength_boost / 10.0)   when boost ≥ 1.0
+                      = Φ_fiber(I, t) + wavelength_boost                    when boost < 1.0
 
-### 4.3 Pearl Manifold as Memory Curvature
+The factor of 10.0 normalizes the boost range (0–10) to a multiplicative coefficient in [1.0, 2.0]. Strong memory reinforcement can double the potential for an instrument on a target where prior sweeps were highly informative. It cannot override direct field observation — the multiplier is bounded at 2×.
 
-The pearl ledger preserves collapsed field structure across time. The PearlManifold computes reinforced neighborhoods — groups of pearls anchored to the same identity in the same domain where the same wickets have been repeatedly realized or blocked.
-
-In fiber-driven gravity, the pearl manifold contributes a memory curvature term to the selection potential:
-
-Φ_memory(I, t) = wavelength_boost(t, W(I))
-
-where wavelength_boost is computed from the reinforced neighborhoods. This term reflects: previous observation sweeps have found that these wickets are active in this region of the field. Future sweeps should weight those regions higher.
-
-The memory curvature is multiplicative when the boost exceeds 1.0:
-
-Φ_effective(I, t) = Φ_fiber(I, t) × (1.0 + Φ_memory(I, t) / 10.0) when Φ_memory ≥ 1.0
-                  = Φ_fiber(I, t) + Φ_memory(I, t)               when Φ_memory < 1.0
-
-This ensures that strong memory reinforcement can double the potential for an instrument on a target where it has previously been highly informative, while weak reinforcement adds a small constant. The factor of 10.0 normalizes the memory boost (range 0–10) to a multiplicative coefficient in [1.0, 2.0].
+**Runtime instantiation.** Φ_fiber is computed in `skg/kernel/field_local.py:phi_fiber()`. The wavelength_boost comes from `skg/kernel/pearl_manifold.py:wavelength_boost()`. Gravity cycle execution in `skg-gravity/gravity_field.py` combines them with the penalty term for instrument reuse.
 
 ---
 
-## 5. The Decoherence Criterion
+## 7. The Decoherence Criterion
 
-### 5.1 Motivation
+### 7.1 What it is and why it is not a threshold trick
 
-Work 3 introduced decoherence as a component of field energy: when multiple observations of the same wicket disagree, their combined support vector is contradictory and the contribution to field energy is elevated. The criterion for when a state is "protected" — stable against further perturbation — was described qualitatively: high coherence, low dissipation, repeated reinforcement.
+The decoherence criterion answers when re-observation is wasteful. The answer is domain-agnostic: the same four conditions determine stability whether the local is HO-01 (host reachable), WB-02 (web authenticated), or DP-10 (database accessible).
 
-This section formalizes the criterion.
+**Definition 2 (Protected State).** A field local Lᵢ in any expression is protected iff all four conditions hold simultaneously:
 
-### 5.2 Definition
+1. **C ≥ 0.7**: compatibility score above the single-instrument-dominance threshold
+2. **φ_contradiction < 0.15**: less than 15% contradictory mass
+3. **φ_decoherence < 0.20**: less than 20% decayed mass
+4. **n ≥ 2**: at least two independent observation cycles
 
-Let L_i be a field local with support vector contribution S = (φ_R, φ_B, φ_U, φ_contradiction, φ_decoherence, C, n) where:
-- φ_R, φ_B, φ_U: realized, blocked, unresolved mass
-- φ_contradiction: contradictory mass (opposing polarity across observation basis)
-- φ_decoherence: decoherence from temporal decay of prior observations
-- C: compatibility score — how consistent the observations are in their polarity
-- n: compatibility span — number of independent basis observations
+The conditions are jointly necessary. This is not an implementation detail — it is the content of the criterion. High coherence alone is not sufficient: a state confirmed by one instrument class in one cycle (n=1) is single-source, not protected. Two cycles with 20% contradiction is contested, not protected. Only simultaneous satisfaction of all four conditions constitutes protection. The reason: each condition eliminates a different failure mode.
 
-A state Σ(L_i) is **protected** if and only if all four of the following hold:
+### 7.2 Threshold derivation
 
-1. **High coherence:** C ≥ 0.7 (compatibility score above noise floor)
-2. **Low contradiction:** φ_contradiction < 0.15 (less than 15% contradictory mass)
-3. **Low decoherence:** φ_decoherence < 0.20 (less than 20% decayed mass)
-4. **Multi-basis reinforcement:** n ≥ 2 (at least two independent observation bases)
+The four thresholds are calibrated on operational data, not derived from first principles. Each has a structural motivation that the calibration number approximates.
 
-The protected state criterion is not a threshold trick because conditions 1–4 are jointly necessary. A state that scores high on coherence but has only one observation basis (n = 1) is not protected — it is single-source. A state with high basis count but high contradiction is not protected — it is contested. Only simultaneous satisfaction of all four conditions constitutes protection.
+**C ≥ 0.7.** Compatibility score = 1 − (dominant_family_weight / total_weight) + 0.1 × (n_families − 1). C ≥ 0.7 at n=2 implies no single instrument family contributes more than 40% of total support mass. This is a diversity condition: a state confirmed only by nmap, or only by SSH collection, should not be treated as protected because the instrument may have a systematic blind spot that repeated application cannot detect.
 
-### 5.3 Field-Geometric Interpretation
+**φ_contradiction < 0.15.** With n=2 at confidence 0.8 (M ≈ 1.6), a single full-confidence opposing observation cannot flip the dominant polarity: 0.15×1.6 + 0.95 = 1.19 < 0.85×1.6 = 1.36. The bound is tight for minimum-confidence instruments (γ = 0.5, M ≈ 1.0), which is why the four conditions must be jointly satisfied — the contradiction bound alone is insufficient at minimum confidence.
 
-A protected state corresponds to a local minimum of L(F) that is stable under perturbation of the instrument schedule.
+**φ_decoherence < 0.20.** Three decay classes — ephemeral (TTL ≈ 1 hour), operational (TTL ≈ 24 hours), structural (TTL ≈ 30 days) — apply across all expressions identically. The 0.20 bound ensures effective mass is at least 80% of original, structurally consistent with n ≥ 2 for M_orig ≥ 1.0.
 
-Formally: L_i is at a local minimum when E_self(L_i) is minimal under the current observations. Stability means: executing any available instrument on L_i with any reasonable support contribution does not change the collapsed state Σ(L_i) (realized stays realized, blocked stays blocked).
+**n ≥ 2.** n counts gravity cycles, not instrument executions. A single sweep producing multiple observations is still n=1. This prevents a target briefly in an unusual state from being classified as protected on one informative sweep.
 
-The four conditions correspond to properties of this minimum:
+*Theoretical gap.* At minimum instrument confidence (γ = 0.5) with marginal values at each threshold boundary (C = 0.7, φ_contradiction = 0.14, φ_decoherence = 0.19, n = 2), a single adversarial full-confidence opposing observation could theoretically flip the state. This gap does not arise in the deployed configuration (all instruments have confidence ≥ 0.7 for their applicable wickets) but should be noted for generalization to lower-confidence sensor environments.
 
-1. **C ≥ 0.7**: the minimum is in the interior of a stable basin, not near a basin boundary
-2. **φ_contradiction < 0.15**: there is no significant opposing force that could flip the state
-3. **φ_decoherence < 0.20**: the minimum has not decayed toward the unresolved region
-4. **n ≥ 2**: the minimum is geometrically stable — it is defined by multiple independent constraints, not a single observation that could be a measurement artifact
+### 7.3 Field-geometric interpretation
 
-A state that is realized but not protected is ephemeral: one decaying observation made it realized. A state that is realized and protected has been confirmed by multiple independent instruments with consistent polarity, remains stable, and carries low decay.
+A protected local is a local minimum of L(F) restricted to Lᵢ that is stable under any single instrument perturbation:
 
-**Proposition 4 (Protected = Stable Local Minimum).** A field local L_i satisfying the decoherence criterion is a local minimum of L(F) restricted to L_i that is stable under any single instrument perturbation: for any instrument I with W(I) ∩ L_i ≠ ∅, a single execution of I does not change the collapsed state Σ(L_i).
+1. C ≥ 0.7: the minimum is in the interior of a stable basin, not near a boundary
+2. φ_contradiction < 0.15: no significant opposing force is present to be reinforced
+3. φ_decoherence < 0.20: the minimum has not decayed toward the unresolved region
+4. n ≥ 2: the minimum is determined by multiple independent constraints — one observation is one vote against at least two
 
-*Proof sketch.* Under the decoherence criterion: C ≥ 0.7 implies the current collapsed state occupies a stable basin interior — a single observation with confidence up to 0.3 below the existing consensus cannot flip the majority polarity. φ_contradiction < 0.15 means no significant opposing mass is present to be reinforced. φ_decoherence < 0.20 means the existing support mass is not decaying rapidly enough to change the state. n ≥ 2 means the collapsed state is determined by at least two independent observations — a single new observation from any one instrument is one vote against at least two. Formally, the collapsed state Σ(L_i) ∈ {R, B, U} is determined by the dominant component of the support vector. Under the four conditions, the dominant component (φ_R or φ_B) satisfies (dominant component) > (all other components + maximum perturbation from single observation), which bounds the dominant component away from any threshold at which a state flip could occur. ∎
+**Proposition 4 (Protected = Stable Local Minimum).** A field local in any expression satisfying Definition 2 is stable under any single instrument perturbation: no instrument I with W(I) ∩ Lᵢ ≠ ∅, in any single execution, changes the collapsed state Σ(Lᵢ).
 
-### 5.4 Relation to Temporal Folds
+*Proof sketch.* Under all four conditions, the dominant support component (φ_R or φ_B) satisfies (dominant component) > (all other components + maximum perturbation from any single observation) for γ ∈ [0.7, 0.95]. See §7.2 for the explicit bound and the identified gap at γ = 0.5. The proof holds domain-agnostically because the support accumulation formula and collapse thresholds are identical across all expressions. ∎
 
-A protected-state temporal fold arises when a previously protected state decays past its TTL and the decay class is no longer consistent with protection criterion 3 (φ_decoherence grows as evidence ages).
+*Falsifiability.* Proposition 4 is falsified by any local in any expression that satisfies all four conditions at cycle τ and changes its collapsed state at cycle τ+1 under a single instrument execution. This is directly testable against the cycle evidence artifacts in `artifacts/cycle_evidence/`. No such falsification exists in the current engagement record — but the engagement record is three targets and four cycles. This is consistent with Proposition 4, not strong evidence for it.
 
-Formally: if Σ(L_i) was realized and protected at time τ_0, and at time τ_1 > τ_0 the evidence has aged past its decay TTL, then:
+### 7.4 Temporal folds
 
-φ_decoherence(τ_1) = decay_factor × (τ_1 − τ_0 − TTL) / TTL
-
-rises above the 0.20 threshold. The state is no longer protected. The fold is created. Gravity pulls toward re-observation.
-
-This is the Work 3 temporal fold mechanism, derived from the decoherence criterion rather than stated ad hoc.
+A protected-state temporal fold arises when φ_decoherence rises above 0.20 as evidence ages past TTL. The local is no longer protected. Gravity pulls toward re-observation. This is the Work 3 temporal fold mechanism, derived from the decoherence criterion rather than stated as a separate rule. The mechanism applies identically across all expressions — an aging web injection finding and an aging host reachability finding both generate temporal folds through the same formula.
 
 ---
 
-## 6. Pearl Manifold as Field Geometry
+## 8. Pearl Manifold as Field Geometry
 
-### 6.1 Pearls as Preserved Field Events
+A pearl records a transformation of L(F): a state collapse, a proposal lifecycle event, a significant projection change. The pearl ledger is the append-only history of field transformations across all domain expressions.
 
-A pearl records a meaningful transformation of the field: a collapse event, a projection change, a proposal lifecycle event. The pearl ledger is the append-only history of field transformations.
+Pearl clusters — groups of pearls for the same (identity_key, domain_label) where the same wickets recur — are the current approximation of fibers. A cluster of pearls in the host expression repeatedly realizing HO-01, HO-19, HO-25 for the same target represents fiber tension: the field has been informative there repeatedly. The wavelength_boost computation aggregates this into a memory curvature modifier for Φ_effective.
 
-Under the field functional framework, a pearl is a record of how L(F) changed at a particular time. The pearl's energy_snapshot records L(F) at the moment of collapse. The pearl's state_changes record which locals transitioned and in which direction. The pearl's fold_context records which structural gaps contributed to the pre-collapse field configuration.
+A fiber with |Λ| > 1 — spanning multiple expressions for the same target — is not yet computed. The pearl manifold currently computes boosts per (identity_key, domain_label) pair independently. Aggregating across domain labels for the same identity key would produce a multi-expression fiber object F = (m, Λ, ρ, τ, coherence, tension) with tension and coherence summarizing across all contributing expressions. The cluster-level gravity pull G_cluster(C) = Σᵥ tension(Fᵥ) × coherence(Fᵥ) + Σ coupling terms would use these. This is the implementation path; it has not been taken.
 
-Pearl clusters — groups of pearls anchored to the same identity and domain — are the current approximation of fibers. When the same wickets have been realized and recorded in multiple pearls for the same (identity_key, domain) pair, the pearl manifold identifies them as a reinforced neighborhood. This is the neighborhood's contribution to fiber tension: the field has been informative here repeatedly.
-
-### 6.2 Memory Curvature
-
-The pearl manifold induces curvature in the gravity selection landscape. The wavelength_boost function computes:
-
-boost = len(matches) × transition_scale × energy_scale
-
-where:
-- matches = wickets in instrument wavelength that appear in reinforced neighborhoods
-- transition_scale = f(avg_transition_density) ∈ [0.5, 2.0]
-- energy_scale = f(avg_mean_energy) ∈ [0.5, 2.0]
-
-This boost represents the curvature induced by prior field transformations: regions where observation was informative before are curved toward in the current selection. The curvature is proportional to how informative prior sweeps were (transition_density) and how much unresolved energy was present in prior states (mean_energy).
-
-The cap of 10.0 on the boost corresponds to a maximum 2× multiplicative increase in instrument potential when applied via the memory-coupling formula. This is a conservative bound: the manifold reinforces but does not dominate. Direct field observation always contributes more than memory curvature.
-
-### 6.3 Toward Full Fiber Structure
-
-The current pearl manifold is a projection of fiber structure — it computes properties of fibers from the pearl ledger, but the fibers themselves are not explicit first-class objects in the runtime. The path from current approximation to full fiber-driven gravity passes through three steps:
-
-1. **Explicit fiber objects:** Compute F = (m, Λ, ρ, τ, coherence, tension) from the pearl ledger and live observation state. This requires aggregating locals by identity and domain into structured fiber objects.
-
-2. **Fiber-coupling law:** Implement K(F_i, F_j) from the bond structure and observed coupling history. The gravity web bond strengths (same_host: 1.00, docker_host: 0.90, ...) provide the inter-target coupling. Intra-target coupling between service locals, credential locals, and host-level locals requires domain-specific coupling definitions.
-
-3. **Cluster-level gravity:** Compute G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + Σ coupling terms and use it as the primary gravity selection input, with wicket-based Φ(I, t) as a fallback for clusters where fiber structure is sparse.
+The current approximation is adequate for the wavelength boost. It is not adequate for the full cluster-level selection mechanism. Both are stated honestly because the contribution of this work is the framework, not a finished implementation.
 
 ---
 
-## 7. Empirical Validation
+## 9. Empirical Validation
 
-The theoretical developments of this paper — fiber-driven gravity, coupling opportunity, the decoherence criterion — were validated through deployment against a live heterogeneous lab network. This section reports those results concretely. It is structured to complement the Work 3 empirical section (which validated the wicket-counting mechanism) by showing what changes when coupling energy and fiber tension are correctly implemented.
+### 9.1 The honest framing
 
-### 7.1 Engagement Environment
+Three lab targets. One operator (the author). Four gravity cycles. No comparison baseline.
 
-The substrate was deployed against three targets across two networks:
+These are preliminary results. They demonstrate that the coupling mechanism produces the expected instrument selection behavior — the gravity field selected database instruments after web injection realization, selected exploit proposals after vulnerability confirmation — and that the field functional values stay non-negative and decrease monotonically for non-contradictory observations. They do not demonstrate that SKG outperforms any alternative approach, or that the coupling constants generalize beyond this environment, or that the decoherence thresholds are correctly set for diverse sensor configurations.
 
-| Target | Network | Services |
+The purpose of this section is to show that the mechanism works in a concrete case, not to make strong empirical claims. Stronger empirical claims require more targets, more operators, and comparison baselines.
+
+### 9.2 Engagement environment
+
+| Target | Active expressions | Services |
 |---|---|---|
-| DVWA 172.17.0.3 | Docker bridge 172.17.0.0/16 | HTTP/80 (DVWA web app) |
-| Metasploitable 2 172.17.0.2 | Docker bridge 172.17.0.0/16 | FTP/21, SSH/22, HTTP/80, MySQL/3306 |
-| Metasploitable 3 (Win2k8) 192.168.122.153 | libvirt 192.168.122.0/24 | FTP/21, SSH/22, HTTP/80, SMB/445, MySQL/3306, Tomcat/8282, GlassFish/8080, Elasticsearch/9200, RDP/3389 |
+| DVWA 172.17.0.3 | web, data | HTTP/80, MySQL/3306 |
+| Metasploitable 2 172.17.0.2 | host, web, data | FTP/21, SSH/22, HTTP/80, MySQL/3306 |
+| Windows Server 2008 R2 192.168.122.153 | host | SMB/445, HTTP/80, Tomcat/8282, RDP/3389 |
 
-The Windows 2008 R2 target was confirmed by independent nmap NSE scan to carry CVE-2017-0143 (EternalBlue / MS17-010), an unauthenticated SMBv1 remote code execution vulnerability. This target serves as the primary validation case for coupling-driven path realization: the exploit path requires three precondition locals to be realized in sequence before the gravity field can propose execution.
+Windows 2008 R2 was confirmed independently by nmap NSE to carry CVE-2017-0143 (EternalBlue / MS17-010). DVWA was configured with default credentials and all injection vulnerabilities enabled.
 
-### 7.2 Coupling-Driven Path Realization: EternalBlue
+### 9.3 Cross-expression selection: web to data
 
-The EternalBlue attack path `host_network_exploit_v1` requires three realized precondition locals:
+The DVWA target produced the cross-expression coupling case. The web expression auth scanner realized WB-01 (HTTP service), WB-02 (credentials valid: admin/password), and WB-05 (SQL injection confirmed). On WB-05 realization:
 
-- **HO-01**: Host reachable (local L_reachable)
-- **HO-19**: SMB service exposed on port 445 (local L_smb)
-- **HO-25**: Exploitable service confirmed by NSE script (local L_confirmed_vuln)
+    E_couple(L_web, L_data) = K(web, data) × U_m(L_data) = 0.85 × 1.0 = 0.85
 
-Under the Work 3 mechanism (wicket-counting, no coupling), these three wickets would each be treated as independent unknowns. The system would select instruments to reduce each one independently.
+added to the data expression's local for DVWA's MySQL backend (U_m ≈ 1.0, all data wickets unresolved). The gravity field evaluated all available instruments and selected the SQL profiler from the data expression next. The profiler realized DP-10 (source reachable) and DP-02 (schema structure confirmed).
 
-Under the fiber-driven formulation, these three locals form a high-tension, high-coherence fiber through the Windows target. The coupling structure is:
+The web injection coupling chain:
 
-- L_reachable → L_smb: K ≈ 0.80 (a reachable host with SMB present is a natural next scan target)
-- L_smb → L_confirmed_vuln: K ≈ 0.90 (an exposed SMB service strongly suggests NSE vuln scanning)
-- L_confirmed_vuln → exploit_proposal: coupling energy from the exploit dispatch mapping
+    WB-05 (web) → K(web, data) = 0.85 → DP-10 realized (data)
 
-The observed gravity routing followed this coupling chain exactly. The nmap instrument:
-1. Realized HO-01 from TCP echo on port 445
-2. Realized HO-19 from the open port observation
-3. Emitted CVE-2017-0143 and HO-25 from the `smb-vuln-ms17-010` NSE output: `State: VULNERABLE`
+was traversed without any explicit "after SQLi, check the database" instruction. The coupling energy made the data local the highest-potential unresolved structure in the field.
 
-Gravity then automatically generated proposal `c9c5ea6a-850`: `exploit/windows/smb/ms17_010_eternalblue` against 192.168.122.153, confidence 0.95.
+The web expression also realized WB-07 (command injection, ping utility) and WB-08 (XSS). The K(cmdi, host) ≈ 0.90 coupling generated proposal `4944c6a9` — `exploit_web_cmdi_to_shell_v1` — at confidence 0.94 without an additional host expression instrument execution.
 
-This chain is coupling opportunity Φ_couple in action: at no point did a human specify which instrument to run or which exploit to propose. The coupling energy between realized L_smb and unknown L_confirmed_vuln directed the instrument selection.
+### 9.4 Single-expression chain: EternalBlue
 
-**Diagnostic value of the framework.** Before the fiber-driven formulation was applied, this path failed silently for three independent reasons:
+The Windows target produced the intra-expression coupling case. The host expression's nmap instrument traversed the three-local chain in a single execution:
 
-1. Port 445 detection did not emit HO-19 — the coupling from L_reachable to L_smb was broken
-2. NSE `VULNERABLE` output emitted HO-11 (generic service finding) rather than HO-25 (confirmed exploitable) — the coupling from L_smb to L_confirmed_vuln was broken
-3. The exploit path `host_network_exploit_v1` was absent from the dispatch map — the final coupling from L_confirmed_vuln to exploit_proposal was broken
+    HO-01 realized: TCP echo on port 445 — host reachable
+    HO-19 realized: port 445/tcp open smb — SMB service exposed
+    HO-25 realized: smb-vuln-ms17-010 NSE output: State: VULNERABLE
 
-These three bugs are structurally identical: each is a broken coupling arc in the sequence L_reachable → L_smb → L_confirmed_vuln → proposal. The field functional framework made this structure explicit: the path requires coupling at three points, and all three were severed. Diagnosis required checking each coupling arc, not scanning a flat list of wickets.
+Coupling energies K(host, smb) = 0.80 and K(smb, vuln) = 0.90 were active throughout but the single nmap execution happened to traverse all three locals at once because W(nmap) covers all three wickets and all three were resolvable from one scan. Gravity selected nmap because the coupling energy between the Windows target's unresolved SMB and vuln locals was the highest-potential cluster in the field at cycle 2 (the target was unreachable at cycle 1).
 
-### 7.3 DVWA: Injection Chain Coupling
+Proposal `c9c5ea6a-850` — `exploit/windows/smb/ms17_010_eternalblue` against 192.168.122.153 — was generated at confidence 0.95.
 
-The DVWA target validated the intra-target coupling structure for web attack paths. The auth scanner realized:
+**Diagnostic value.** Before the coupling structure was implemented, this path failed silently for three reasons: port 445 detection did not emit HO-19, NSE VULNERABLE output emitted HO-11 (wrong wicket ID) rather than HO-25, and the attack path `host_network_exploit_v1` was absent from the dispatch map. Under a flat wicket model these appear as three unrelated bugs. Under the coupling framework they are structurally identical: three broken arcs in the chain L_reachable → L_smb → L_vuln → proposal. The coupling structure named the problem precisely; diagnosis followed directly.
 
-- WB-01: HTTP service confirmed
-- WB-02: Login form confirmed, credentials valid (admin/password)
-- WB-05: SQL injection confirmed in login parameters
-- WB-07: Command injection confirmed in ping utility
-- WB-08: XSS confirmed
+### 9.5 Field functional behavior
 
-The command injection local L_cmdi coupled to the reverse shell proposal with coupling energy K(L_cmdi, L_shell) ≈ 0.90. Proposal `4944c6a9` — `exploit_web_cmdi_to_shell_v1` — was generated at confidence 0.94. The coupling path from WB-07 (L_cmdi realized) to the shell proposal required no additional instrument execution: the coupling energy was sufficient to generate the proposal directly once the injection was confirmed.
+Across four cycles and three targets:
 
-### 7.4 Gravity Field Behavior
+- **L(F) non-negative throughout**: no violation of Proposition 1. All field functional values in `evidence/figures/H_math.json` are ≥ 0.
+- **Monotone reduction for non-contradictory observations**: consistent with Proposition 2. No non-contradictory observation produced an increase in the per-target field functional value.
+- **Decoherence criterion**: HO-01, HO-19, HO-25 satisfied all four conditions after cycle 2 (C ≈ 0.95, φ_contradiction ≈ 0, φ_decoherence ≈ 0.02, n = 2). These locals were not re-observed in cycles 3–4.
+- **Memory curvature**: after cycle 2, wavelength_boost for nmap on the Windows target was 1.4× — the pearl manifold reinforced continued Windows observation because prior sweeps were highly informative.
+- **124+ proposals generated** across all cycles, covering web, host, network exploit, and catalog growth domains.
 
-Four gravity cycles were run across the three targets. Aggregate statistics:
+### 9.6 Sensor calibration
 
-- **124+ proposals generated** across all cycles
-- **Entropy reduction per cycle:** ΔE = +3.13 (cycle 1, Win2k8 down), +12.4 (cycle 2, full target set)
-- **EternalBlue chain:** 3 coupling arcs traversed autonomously in one nmap execution
-- **Memory curvature:** After cycle 2, the pearl manifold boosted nmap selection for 192.168.122.153 because prior sweeps were strongly informative. The wavelength_boost for the nmap instrument on the Windows target rose to 1.4× after two informative cycles — the memory curvature term reinforced continued observation of that target's network surface.
+The calibration mechanism corrected instrument confidence across all active expressions identically:
 
-The decoherence criterion operated correctly: realized wickets from confirmed observations (HO-01, HO-19, HO-25) satisfied all four protection conditions (coherence C ≈ 0.95, φ_contradiction ≈ 0, φ_decoherence ≈ 0.02, n = 1 instrument but multiple scan runs). They were not re-observed in subsequent cycles, reducing wasted instrument cost.
+| Instrument | Expression | γ_hand_tuned | Empirical precision | Correction |
+|---|---|---|---|---|
+| web_collector | web | 0.75 | 0.533 | −28.9% |
+| ssh_collect | host | 0.90 | 0.80 | −11.1% |
+| nvd_ingester | host | 0.85 | 1.00 | +conservative |
 
-### 7.5 Limitations of the Empirical Results
-
-The engagement is a controlled lab environment, not a production network. The coupling constants K(L_i, L_j) used in the dispatch map and gravity web are calibrated on this environment; their generalization to diverse targets requires further data. The decoherence thresholds (C ≥ 0.7, n ≥ 2) were sufficient here but have not been stress-tested against noisy or adversarially instrumented environments.
-
-The fiber structure used in this engagement is the approximate form — pearl manifold reinforcement and per-instrument wavelength boost — not the full F = (m, Λ, ρ, τ, coherence, tension) fiber objects. The clustering computation G_cluster(C) was not performed. These gaps are the implementation boundaries described in Section 8.2.
+The web_collector result — a 28.9% correction — is the calibration mechanism catching the exact failure mode it was designed for: an instrument that is meaningfully overconfident relative to its empirical performance.
 
 ---
 
-## 8. Discussion
+## 10. Discussion
 
-### 8.1 What Changes Under the Field Functional
+### 10.1 What the domain expression architecture changes in practice
 
-The practical effect of adopting the field functional as the primary architecture is threefold.
+**New observation capabilities are additive.** Someone who wants to add IoT firmware analysis implements one toolchain — a catalog of IF- wickets, an adapter that reads firmware analysis tool output, a projection that applies the existing StateEngine. Nothing else changes. The gravity field immediately competes firmware instruments against all other instruments. The coupling table gets one new row: K(host, iot-firmware) = something reasonable. That is the full cost of extending the substrate to a new domain.
 
-**Gravity routing is richer.** The fiber-driven selection potential Φ_fiber adds coupling opportunity and decoherence load to the wicket tension term. In practice, this means: when SSH is confirmed on a target and the credential reuse instrument has untested credentials, gravity selects credential reuse with a coupling boost rather than treating it as a new unknown. When a web injection is confirmed and the database access local is uncoupled, gravity adds E_couple(L_sqli, L_db) to the database instrument's potential. These routing improvements emerge from field structure, not from hardcoded rules.
+**The coupling table is where domain knowledge enters.** No domain-specific logic lives in the substrate. All expert knowledge about which observations imply which others is encoded in K(Δ_a, Δ_b). This is where the architecture makes the knowledge base explicit and auditable. Someone reviewing a deployment of SKG can read the coupling table and see exactly what structural dependencies the system is asserting. They can disagree with K(web, data) = 0.85 and change it to 0.60. The substrate's behavior changes accordingly. The knowledge is not buried in code.
 
-**Operator reports are projections, not primary views.** Under the field functional, a report is a derived projection of the field state: which locals are resolved, which are high-tension, which couplings are active. The report does not define the field — it reads from it. This means reports can be regenerated at any historical pearl timestamp from the preserved field history, and multiple report formats (wicket-level, local-level, coupling-level, fiber-level) are projections of the same underlying structure.
+**Multi-domain attack chains are emergent, not programmed.** This is the practical consequence most worth noting. The web-to-database chain in the DVWA validation was not written anywhere as a rule. It emerged because K(web, data) = 0.85 makes the database local gravitationally interesting when SQL injection is confirmed. The same mechanism applies to any chain encoded in the coupling table. Chains not in the table do not emerge. This makes the substrate's reasoning transparent: if you want to understand why SKG selected an instrument, look at the coupling energy contributions to Φ_fiber.
 
-**Memory curvature is formally grounded.** The current pearl manifold boost (previously capped at 2.0, raised to 10.0 with multiplicative application when strong) is no longer an ad hoc additive term. It is an approximation of the memory curvature term ∂²L/∂F_ν∂time: the rate at which the field functional changes with respect to fiber tension over time. Strong memory curvature means the field has been repeatedly informative in this region — gravity should follow it.
+### 10.2 What remains incomplete and what that means
 
-### 8.2 What Remains Incomplete
+**Multi-expression fiber objects.** The pearl manifold computes per-expression reinforced neighborhoods. It does not compute fibers that span expression boundaries. A target observed by three expressions over multiple cycles produces pearls in all three namespaces; the current substrate treats them as independent pearl clusters. The cross-expression fiber object F = (m, Λ, ρ, τ, coherence, tension) with |Λ| > 1 would aggregate them. Cluster-level gravity G_cluster(C) would use it. Neither is implemented. The approximation (per-expression boost, per-expression Φ_fiber) is functional but misses cross-expression memory curvature.
 
-The fiber-driven gravity formulation in this paper is partially implemented. The full set of gaps:
+**Coupling constants are hand-tuned on two engagements.** K values encode expert judgment about structural dependencies. They are not derived from engagement data. A Bayesian update over engagement outcomes — observing which expression realizations are empirically followed by which other expression realizations — would produce data-driven K values and reduce the hand-tuning burden. This is the correct path. It requires more engagement data than currently exists.
 
-**Field Local objects are implicit.** Locals are currently the grouping of observations by workload_id × domain that the kernel computes on demand. They are not first-class persistent objects with their own identity, energy, and coupling state. Making them first-class requires an architectural change to the kernel that this paper does not perform.
+**The empirical evaluation is thin.** Three targets, one operator, one lab environment. The coupling constants may be correct for this environment and incorrect for others. The decoherence thresholds (C ≥ 0.7, n ≥ 2) were sufficient here and have not been tested in noisy or adversarially instrumented environments. The calibration corrections (−28.9% for web_collector) are specific to this engagement's target set. These limitations are not failures of the framework; they are the current boundary of what has been validated.
 
-**Fiber tension is approximated by wavelength_boost.** The formal fiber tension computation requires explicit F = (m, Λ, ρ, τ, coherence, tension) objects. The current implementation approximates this through reinforced neighborhood counting. The approximation is adequate for the wavelength_boost multiplier but does not support the full cluster-level gravity computation.
+**The metacognition expression is not yet active as a feedback mechanism.** MC wickets are defined. The substrate does not yet autonomously propose catalog extension when MC-03 fires. This is the most interesting incomplete feature: a substrate that can observe its own coverage gaps and propose extensions would remove a significant class of human intervention from the operational loop.
 
-**Coupling law K(F_i, F_j) is intra-target only for credentials.** The credential reuse instrument implements E_cred = |untested credential × service| pairs as coupling energy. Inter-target coupling through the gravity web is implemented through prior propagation. The full intra-target coupling law (credential-to-SSH, SQL injection-to-database, host-access-to-container-escape) is partially formalized in the exploit dispatch mapping but not systematically computed as a field quantity.
+### 10.3 Publication posture
 
-**The decoherence criterion is heuristic.** The conditions C ≥ 0.7, φ_contradiction < 0.15, φ_decoherence < 0.20, n ≥ 2 are calibrated to operational data from the Work 3 engagement. They have not been validated across diverse engagement environments. The claim that they correspond to a local minimum of L(F) is structural — it holds by construction — but the threshold values are empirical.
+This is worth putting on arXiv as a preprint. The ideas are in the literature; others can engage with them. It is not ready for a top-tier peer-reviewed security conference. The evaluation is too thin, there is no comparison baseline, and the coupling constants need cross-engagement validation before the empirical claims can be made strongly.
 
-These gaps are stated precisely because the contribution of this paper is the formal framework, not a finished implementation. The framework provides the correct targets for the implementation to grow toward.
+The right venue for a full paper submission is New Security Paradigms Workshop (NSPW) or a formal methods in security workshop. NSPW explicitly values unconventional frameworks and does not demand large-scale empirical evaluations. The field functional formalization and decoherence criterion have enough formal content to be interesting there without requiring 50 targets.
 
-### 8.3 What Is Not Changed
+The dual-use question should be addressed in any published version. This paper describes a system that autonomously realizes exploitation chains. The description is accurate. Acknowledging that explicitly, and situating the work in the context of authorized red team automation and defensive security research, is the correct posture.
 
-The stable results of Work 3 are unchanged:
+### 10.4 Open questions
 
-- Tri-state encoding Σ ∈ {R, B, U} with formal semantics
-- Projection operator π and its operational properties
-- Sheaf structure and global realizability via H¹
-- The Work 3 selection mechanism Φ(I, t) as a flat-space limit of Φ_fiber
-- The gravity web and prior propagation
-- The empirical results (10 paths realized on a live network)
+**Is the coupling table learnable from engagement history?** The current K values are assertions. The substrate records which expression realizations occur in which sequences. A retrospective analysis over multiple engagements could estimate K empirically as the conditional probability P(Δ_b realization | Δ_a realization, same target). This would replace expert opinion with data, at the cost of requiring diverse engagement data to estimate reliably.
 
-The field functional extends these results. It does not contradict them.
+**Does the decoherence criterion admit a decision-theoretic derivation?** The four conditions are structural constraints calibrated on operational data. Can they be derived from a decision rule — minimum description length for the measurement history, or a hypothesis test for stability of the collapsed state? A principled derivation would replace the empirical thresholds with something that generalizes to sensor configurations not represented in the current engagement data.
 
-### 8.4 Open Questions
+**Is the Kuramoto continuous limit recoverable?** Work 3 identified the Kuramoto connection as structural: the gravity web bond strengths correspond to Kuramoto coupling constants, and the tri-state encoding maps to oscillator phases. Whether the discrete fiber-driven selection mechanism converges to the Kuramoto differential equations as the discretization step goes to zero is open. If the limit holds, it would provide a continuous-time analysis framework for the gravity field's convergence properties.
 
-**Is the field functional bounded below?** L(F) ≥ 0 when all locals are resolved (E_self = 0, E_couple = 0) and no folds are active. Is there a non-trivial lower bound in the presence of coupling? The coupling energy E_couple(L_i, L_j) = K(L_i, L_j) × (E_local(L_j) + U_m(L_j)) vanishes when L_j is fully resolved regardless of K. So L(F) = 0 is achievable only when all locals are resolved. When cyclic dependencies exist in the coupling structure (L_i couples to L_j, L_j couples back), the minimum of L may be non-zero. This is the field-functional analog of the H¹ obstruction from Work 3.
-
-**Does the decoherence criterion admit a decision-theoretic derivation?** The four conditions are stated as structural constraints. Can they be derived from a decision rule — e.g., minimum description length for the measurement history, or a hypothesis test for stability of the collapsed state under perturbation? This would replace the empirical thresholds with principled statistics.
-
-**Is the Kuramoto oscillator model recovered as a continuous limit of fiber-driven gravity?** Work 3 identified the connection to prior work [2] as structural: the gravity web bond strengths correspond to Kuramoto coupling constants, and the phase encoding (φ = 0 for realized, φ = π for blocked, φ = π/2 for unknown) connects to the oscillator dynamics. Under the field functional, the fiber tension is the energy that drives phase evolution. Whether a formal limit exists — in which the discrete fiber-driven selection mechanism converges to the Kuramoto differential equations as the discretization step goes to zero — is open.
+**What is the right granularity for domain expressions?** Current expressions are coarse-grained by technology category (host, web, data). Finer expressions (Apache vs. Nginx within "web") would increase coupling precision at the cost of expression proliferation. The right granularity is an empirical question requiring cross-engagement data.
 
 ---
 
-## 9. Conclusion
+## 11. Conclusion
 
-We have defined a unified field functional L(F) over five canonical field objects and shown that the formal quantities of Work 3 — tri-state encoding, field energy, projection operator, gravity selection — are derived projections under this functional. The wicket count is the flat-space, zero-coupling, coherence-homogeneous limit of L(F) (Propositions 1–2).
+SKG is a domain-agnostic substrate. Web, host, data, and the other ten registered expressions are not components of it. They are expressions of it — bindings between the abstract field machinery and a particular observation space.
 
-Fiber-driven gravity replaces the Work 3 instrument selection mechanism with a gradient formulation that adds coupling opportunity and decoherence load to the wicket tension term (Proposition 3). The Work 3 mechanism is recovered as a special case. The new terms improve routing in the presence of realized inter-local couplings and accumulated decoherence.
+The formal statement: a domain expression is a four-tuple Δ = (Ω, Ι, Α, Π). The substrate processes field objects produced by any expression through identical mechanisms. The coupling table K(Δ_a, Δ_b) is where expert knowledge about structural dependencies between observation spaces enters the system. Cross-domain attack chains emerge from coupling energy, not from explicit rules.
 
-The decoherence criterion formalizes when a state is protected: four simultaneous conditions on coherence, contradiction, decoherence, and basis count that correspond to stability of a local minimum of L(F) under instrument perturbation (Proposition 4).
+The field functional L(F) = Σ E_self + Σ E_couple + D(F) + κ(F) is the energy function over the union of all active expression locals. Fiber-driven gravity Φ_fiber follows its gradient across all registered instruments from all expressions simultaneously. The decoherence criterion is a domain-agnostic stability theorem for field locals: four simultaneous conditions corresponding to a stable local minimum of L(F) under single-instrument perturbation.
 
-The pearl manifold is formally identified as memory curvature in the gravity landscape: the curvature induced by prior field transformations, represented as a multiplicative boost to instrument selection potential when prior sweeps were strongly informative.
+The empirical validation demonstrates the mechanism on three targets: the gravity field crossed expression boundaries twice autonomously (web to data, host to exploit), driven by coupling energy. The EternalBlue coupling chain was traversed in one nmap execution. These results are preliminary and should be read as proof-of-mechanism, not as a comprehensive evaluation.
 
-The framework is empirically validated against a live lab network. The EternalBlue path traversal — from host reachability through SMB exposure to confirmed vulnerability, culminating in an autonomous exploit proposal at confidence 0.95 — demonstrates coupling-driven gravity routing operating as specified. The three coupling-arc failures that previously blocked this path were identified as structurally identical under the field functional: the framework's coupling structure made explicit what a flat wicket model would present as three unrelated bugs.
-
-Several gaps remain: explicit field local objects, full fiber tension computation, systematic intra-target coupling law, and empirically grounded decoherence thresholds. These are the current boundary of a growing system, stated precisely. The contribution is the correct formal targets for that growth.
+The architecture's practical consequence: domain expressions are additive. New observation capabilities extend SKG by implementing one toolchain. The substrate does not change. Thirteen expressions are registered. The substrate would behave identically if there were thirty.
 
 ---
 
@@ -530,3 +524,5 @@ Several gaps remain: explicit field local objects, full fiber tension computatio
 [7] Shannon, C.E. (1948). A Mathematical Theory of Communication. Bell System Technical Journal, 27(3), 379–423.
 
 [8] MacKay, D.J.C. (2003). Information Theory, Inference, and Learning Algorithms. Cambridge University Press.
+
+[9] Pearl, J. (1988). Probabilistic Reasoning in Intelligent Systems. Morgan Kaufmann.

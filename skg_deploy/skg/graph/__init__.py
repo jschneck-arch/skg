@@ -445,10 +445,10 @@ class WorkloadGraph:
 
             # Find workloads for target_domain on same target
             for wl_key, priors_list in self._workload_index().items():
-                # Match workloads on the same target IP in the target domain
-                if target_ip not in wl_key:
-                    continue
-                if not (wl_key.startswith(tgt_d) or f"::{target_ip}" in wl_key):
+                # Match only workloads in the target domain on the same target IP.
+                # Strict prefix check prevents all web→X couplings from accumulating
+                # on every same-IP workload via the IP substring match.
+                if not wl_key.startswith(tgt_d + "::"):
                     continue
                 if wl_key == source_workload:
                     continue

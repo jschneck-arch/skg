@@ -1,4 +1,5 @@
 {
+  "domain": "ad_lateral",
   "version": "1.0.0",
   "description": "AD lateral movement attack preconditions catalog. Covers Kerberoasting, AS-REP roasting, delegation abuse, ACL abuse, DCSync, password in description, and AdminSDHolder abuse. Evidence sources: BloodHound (v4/v5), ldapdomaindump, raw LDAP, manual JSON.",
   "wickets": {

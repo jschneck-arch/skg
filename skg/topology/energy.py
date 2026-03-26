@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from skg.core.paths import DISCOVERY_DIR, SKG_STATE_DIR
 from skg.identity import parse_workload_ref
 from skg.kernel.pearls import Pearl, PearlLedger
 
@@ -110,14 +111,14 @@ def _surface_score(path: str) -> tuple[int, int, float]:
 
 
 def _select_surface_path() -> str | None:
-    surfaces = glob("/var/lib/skg/discovery/surface_*.json")
+    surfaces = glob(str(DISCOVERY_DIR / "surface_*.json"))
     if not surfaces:
         return None
     return max(surfaces, key=_surface_score)
 
 
 def _default_pearls_path() -> Path:
-    return Path("/var/lib/skg/pearls.jsonl")
+    return SKG_STATE_DIR / "pearls.jsonl"
 
 
 def field_spheres_for_domains(domains: set[str] | list[str] | tuple[str, ...]) -> list[str]:
@@ -1196,12 +1197,17 @@ def compute_field_fibers() -> list[FiberCluster]:
     participating across multiple domains and relation types.
     """
     try:
-        from skg.core import daemon as daemon_mod
-    except Exception:
+        from skg.core import daemon_registry as _reg
+        all_targets_index = _reg._all_targets_index
+        identity_world    = _reg._identity_world
+    except Exception as exc:
+        log.warning("[topology] compute_field_fibers: daemon_registry unavailable (%s) — fiber layer disabled", exc)
         return []
-    all_targets_index = getattr(daemon_mod, "_all_targets_index", None)
-    identity_world = getattr(daemon_mod, "_identity_world", None)
     if not callable(all_targets_index) or not callable(identity_world):
+        log.warning(
+            "[topology] compute_field_fibers: daemon not yet started — "
+            "_all_targets_index/_identity_world not registered; fiber layer disabled"
+        )
         return []
 
     fibers_by_anchor: dict[str, list[Fiber]] = {}

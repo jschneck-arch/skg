@@ -1,0 +1,223 @@
+ ---
+  SKG Comprehensive State Report — 2026-03-25
+
+  ---
+  What Works (Solid Foundation)
+
+  Core Theory Engine
+  - KernelStateEngine + SupportEngine — aggregation math is correct, decay classes work,
+   tri-state collapse (realized/blocked/unknown/indeterminate_h₁) is sound
+  - FieldLocal + field_functional() — complete implementation of L(F), Proposition 1
+  (boundedness) verified against real data
+  - Decoherence criterion (§5) — all four conditions implemented, thresholds match Paper
+   4 Table 2 exactly
+  - H¹ sheaf obstruction classification — correctly distinguishes "unknown" from
+  "structurally blocked"
+  - Fold detection — contextual, structural, temporal, projection-gap folds all working
+
+  Gravity Field
+  - Entropy-reduction instrument selection is correct — proved on live targets
+  (EternalBlue autonomously selected)
+  - Pearl manifold memory boosts are wired and functional
+  - Proposal generation (RC scripts) works for SSH/Linux paths
+  - Instrument shifting on failure works
+  - EternalBlue path (HO-01→HO-19→HO-25) realized with n=2 criterion satisfied —
+  evidence artifacts present and verified
+
+  Infrastructure
+  - 12/13 toolchains structurally complete (ai-toolchain missing only VERSION file)
+  - Engagement DB schema is sound; DP-01..DP-12 integrity checks detect violations
+  - Paper 4 empirical evidence section is fully supported by artifacts in
+  artifacts/cycle_evidence/ and evidence/figures/
+  - skg_paper_evidence.py reports all claims verified
+  - DVWA SQLi+CMDI+XSS confirmed, 124+ proposals across 3 cycles documented
+
+  ---
+  Critical Breaks (Numbered from your own review docs)
+
+  1. skg target remove is a stub (bin/skg:1779-1782)
+  Two print statements, zero logic. Deleted targets persist in pearls.jsonl with full
+  entropy scores and continue driving gravity cycles. This is the most disruptive
+  operational bug — gravity wastes cycles scanning nonexistent hosts indefinitely.
+
+  2. MSF session detection is broken cross-process (gravity_field.py:1658-1671)
+  _exec_post_exploitation spawns a new msfconsole subprocess to check for sessions. The
+  exploit that was triggered runs in a completely separate msfconsole process. Two
+  independent processes have disjoint session spaces. msf_sensor.py already has
+  _drain_sessions() using pymetasploit3 RPC — the correct path — but it's never called
+  here.
+
+  3. Windows post-exploitation sends Linux bash commands (gravity_field.py:1637-1656)
+  The post-exploitation command string is pure bash: whoami && id, sudo -l, find / -perm
+   -4000, cat /etc/passwd, mysql -u root. None of these exist on Windows. The dc01
+  engagement confirmed every post-exploitation step was manually bridged.
+
+  4. Credential harvest never writes to CredentialStore (gravity_field.py → exploit
+  chain)
+  _exec_post_exploitation parses /etc/shadow and env secrets but never calls
+  CredentialStore().add(...). The cred_reuse instrument is correctly wired in the
+  gravity loop but is starved — it can only reuse credentials manually placed there.
+
+  5. MSF sensor → wrong wicket domain (msf_sensor.py:404)
+  When a Meterpreter session opens, the sensor emits CE-01 ("container privileged" — a
+  container escape wicket). A session on a bare-metal/VM target should realize HO-10
+  (elevated privileges) and HO-05/HO-03 (initial access). Every session gets filed as a
+  container escape precondition; host_winrm_initial_access_v1 never gets its wickets
+  confirmed through the session sensor.
+
+  6. Engage report deduplication missing (engagement_dataset.py:807-811)
+  SELECT ... FROM projections WHERE classification='realized' has no GROUP BY
+  (workload_id, attack_path_id). Projection files without an id field get a fresh uuid4
+  at ingest, so the same realized path from two runs gets two rows. Reports show N
+  copies of the same path per target.
+
+  ---
+  High Gaps (Not Bugs — Missing Capabilities)
+
+  7. Async exploit execution spawns and forgets (gravity_field.py:5419-5434)
+  Sync auxiliary proposals feed evidence back automatically (output → wicket events).
+  Async exploit proposals — the ones that actually matter — get Popen'd with
+  start_new_session=True and nothing else. No session polling, no post-exploitation, no
+  wicket events. The only evidentially-complete path is auxiliary observation-class
+  proposals.
+
+  8. No Windows toolchain
+  skg-host-toolchain is SSH-centric. DEFAULT_ATTACK_PATH is host_ssh_initial_access_v1.
+  skg collect --target <ip> --method winrm hits the timeout (now fixed to 120s) but
+  produces no output because there's no WinRM adapter that maps commands to wicket
+  events. Everything Windows required manual NDJSON authoring.
+
+  9. EXPLOIT_MAP missing Windows lateral paths (exploit_dispatch.py)
+  Present: host_winrm_initial_access_v1, host_network_exploit_v1 (EternalBlue).
+  Missing: RDP, SMB/PsExec, WMI, Pass-the-Hash, token impersonation, DCSync.
+  ad_dcsync_v1 exists in the catalog but requires SESSION: {session_id} with no
+  mechanism to bind a session ID automatically.
+
+  10. Kuramoto graph propagation never called (skg/graph/__init__.py)
+  skg/graph/__init__.py has a complete, mathematically correct Kuramoto prior
+  propagation implementation. It is never imported in gravity_field.py. The network-wide
+   intelligence that Paper 4 describes — priors elevating on neighboring targets after a
+   host is compromised — is completely inactive. Cross-target contagion runs nowhere.
+
+  11. LLM pool wired only to catalog drafting (gravity_field.py →
+  _get_resonance_engine())
+  _get_resonance_engine() is called only from _create_toolchain_proposals_from_folds() —
+   for generating new catalogs from fold observations. It is never called to interpret
+  realized paths, prioritize competing proposals, parse ambiguous MSF output, or
+  generate engagement narrative. The llm_pool.py multi-backend infrastructure
+  (Ollama/Anthropic/HuggingFace) exists and runs; it just isn't connected to any
+  reasoning decision point.
+
+  12. skg engage clean / skg engage fix missing
+  DP-03 (NULL workload_id), DP-04 (evidence_rank out of bounds), DP-05 (orphaned
+  projections) are detected but there's no repair command. Violations accumulate across
+  engagements with no recovery path.
+
+  ---
+  Medium Issues
+
+  ┌─────┬──────────────────────────────────┬─────────────────────────────────────────┐
+  │  #  │             Location             │                  Issue                  │
+  ├─────┼──────────────────────────────────┼─────────────────────────────────────────┤
+  │     │                                  │ LHOST = "172.17.0.1" hardcoded — Docker │
+  │ 13  │ gravity_field.py:2543            │  bridge IP, wrong when interface        │
+  │     │                                  │ changes                                 │
+  ├─────┼──────────────────────────────────┼─────────────────────────────────────────┤
+  │     │                                  │ time.sleep(20) before post-exploitation │
+  │ 14  │ gravity_field.py:2737            │  — both too short (AMSI) and too long   │
+  │     │                                  │ (fast exploits); should poll via RPC    │
+  ├─────┼──────────────────────────────────┼─────────────────────────────────────────┤
+  │     │                                  │ ingest_projections dedup uses uuid4     │
+  │ 15  │ engagement_dataset.py:247-254    │ key, should be (workload_id,            │
+  │     │                                  │ attack_path_id) unique constraint       │
+  ├─────┼──────────────────────────────────┼─────────────────────────────────────────┤
+  │     │                                  │ Dead code after return result —         │
+  │ 16  │ gravity_field.py:2754-2787       │ unreachable RC builder block from old   │
+  │     │                                  │ refactor                                │
+  ├─────┼──────────────────────────────────┼─────────────────────────────────────────┤
+  │ 17  │ skg_deploy/skg/graph/__init__.py │ Deploy tree diverged from live; no sync │
+  │     │                                  │  enforcement mechanism                  │
+  └─────┴──────────────────────────────────┴─────────────────────────────────────────┘
+
+  ---
+  Paper 4 — What It Needs to Be Complete and Credible
+
+  Your own assessment (skg_assessment_20260324.md §274) states it directly:
+
+  ▎ Paper 4 claims SKG runs "full-cycle engagement." That claim requires at least one
+  complete unassisted loop: nmap → wickets → proposal → execute → session detected →
+  post-exploitation → evidence back into DB → projection updated → report showing
+  realized.
+
+  The loop currently breaks at: proposal executed → session detected. Everything after
+  that (post-exploitation, evidence ingestion, state update) is manual.
+
+  Minimum required for paper validity:
+
+  ┌──────────┬─────────────────────────────────────────────┬────────────────────────┐
+  │ Priority │                     Fix                     │    What it unlocks     │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │ Fix _exec_post_exploitation to use          │ Session detection      │
+  │ P0       │ msf_sensor._drain_sessions() (pymetasploit3 │ works; loop can close  │
+  │          │  RPC) instead of subprocess                 │                        │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │ P0       │ Fix msf_sensor.py:404 — CE-01 → HO-10/HO-05 │ Session evidence goes  │
+  │          │                                             │ into correct wickets   │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │ Wire credential harvesting →                │ cred_reuse instrument  │
+  │ P0       │ CredentialStore.add()                       │ actually works with    │
+  │          │                                             │ runtime creds          │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │ Windows post-exploitation RC with           │ Windows engagement     │
+  │ P1       │ meterpreter commands (getuid, hashdump,     │ loop can close         │
+  │          │ arp, route)                                 │                        │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │ Fix skg target remove (prune pearls.jsonl,  │ Gravity no longer      │
+  │ P1       │ proposals, optionally NDJSON)               │ wastes cycles on ghost │
+  │          │                                             │  targets               │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │ P1       │ Fix engage report dedup (GROUP BY           │ Report is credible; no │
+  │          │ workload_id, attack_path_id)                │  inflated counts       │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │                                             │ Paper 4 claim about    │
+  │ P2       │ Wire skg.graph.propagate_priors() into      │ cross-target network   │
+  │          │ gravity loop                                │ intelligence becomes   │
+  │          │                                             │ real                   │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │ Connect LLM pool to                         │ Resonance narrative    │
+  │ P2       │ generate_engagement_report()                │ layer actually writes  │
+  │          │                                             │ into the report        │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │          │                                             │ Data quality           │
+  │ P3       │ skg engage clean command                    │ violations don't       │
+  │          │                                             │ accumulate             │
+  ├──────────┼─────────────────────────────────────────────┼────────────────────────┤
+  │ P3       │ Replace 20s sleep with pymetasploit3        │ Race condition         │
+  │          │ session poll loop                           │ eliminated             │
+  └──────────┴─────────────────────────────────────────────┴────────────────────────┘
+
+  ---
+  Overall Assessment
+
+  The theory is sound and the math is real. The field functional, decoherence criterion,
+   tri-state collapse, gravity scheduling, and sheaf obstruction classification are all
+  correctly implemented and empirically validated on live targets. Paper 4's claims
+  about what the model does are defensible.
+
+  The operational system is a proposal generator, not an engagement engine. The feedback
+   loop from execution to evidence to state is broken at the session boundary. Every
+  engagement after "proposal executed" requires a human to carry the evidence across the
+   gap. The EternalBlue path realization (the paper's main empirical claim) was valid —
+  but the Windows Server 2022 engagement that followed exposed six independent failures
+  in the close loop.
+
+  What this means for the paper: The formal contributions (field functional, fiber
+  gravity, decoherence criterion, wicket graph) are solid and publishable. The empirical
+   validation section accurately describes what was actually observed. The gap is in the
+   "autonomous full-cycle" framing — that claim currently requires either: (a) fixing
+  the P0 session detection items above, or (b) scoping the paper's claims precisely to
+  "autonomous path selection and proposal generation" rather than "autonomous full
+  engagement."
+
+  The P0 fixes are targeted code changes — not architectural rewrites. The core
+  architecture that makes SKG interesting is all there.

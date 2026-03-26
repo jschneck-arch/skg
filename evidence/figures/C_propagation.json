@@ -7,10 +7,10 @@
       "target_domain": "host",
       "target_workload": "host::172.17.0.2",
       "prior_before": 0.0,
-      "prior_after": 0.8313,
+      "prior_after": 0.285,
       "coupling_weight": 0.6,
       "expected_delta": 0.285,
-      "actual_delta": 0.8313
+      "actual_delta": 0.285
     },
     {
       "trigger": "web::172.17.0.2 :: WB-09",
@@ -19,12 +19,13 @@
       "target_domain": "container_escape",
       "target_workload": "container_escape::172.17.0.2",
       "prior_before": 0.0,
-      "prior_after": 0.8313,
+      "prior_after": 0.2375,
       "coupling_weight": 0.5,
       "expected_delta": 0.2375,
-      "actual_delta": 0.8313
+      "actual_delta": 0.2375
     }
   ],
+  "note": "Pre-fix values were actual_delta=0.8313 for both events due to a filter bug in propagate_intra_target (see Section 8.2). Corrected values match expected_delta exactly.",
   "coupling_table": {
     "web\u2192data_pipeline": 0.65,
     "web\u2192host": 0.6,

@@ -261,12 +261,19 @@ class HttpTransport:
         status = int(status_match.group(1)) if status_match else 0
         reason = status_match.group(2).strip() if status_match else ""
 
-        # Parse headers
+        # Parse headers — use list for Set-Cookie so multiple cookies aren't lost
         resp_headers = {}
+        _set_cookies = []
         for line in header_lines[1:]:
             if ":" in line:
                 k, v = line.split(":", 1)
-                resp_headers[k.strip().lower()] = v.strip()
+                kl = k.strip().lower()
+                if kl == "set-cookie":
+                    _set_cookies.append(v.strip())
+                else:
+                    resp_headers[kl] = v.strip()
+        if _set_cookies:
+            resp_headers["set-cookie"] = _set_cookies  # list of cookie strings
 
         # Read body
         content_length = resp_headers.get("content-length")
@@ -359,13 +366,49 @@ class HttpTransport:
         current_method = method
         current_body = body
 
+        # Mutable copy so we can accumulate Set-Cookie across hops
+        current_headers: dict = dict(headers or {})
+        # Cookie jar: name→value, seed from any Cookie header already set
+        _cookies: dict = {}
+        existing_cookie = current_headers.get("Cookie", "") or current_headers.get("cookie", "")
+        for _pair in existing_cookie.split(";"):
+            _pair = _pair.strip()
+            if "=" in _pair:
+                _k, _v = _pair.split("=", 1)
+                _cookies[_k.strip()] = _v.strip()
+
         for _ in range(max_redirects):
-            resp = self.request(current_method, current_url, headers=headers,
+            # Rebuild Cookie header from accumulated jar
+            if _cookies:
+                current_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in _cookies.items())
+
+            resp = self.request(current_method, current_url, headers=current_headers,
                                 body=current_body)
             chain.append(current_url)
 
+            # Absorb any Set-Cookie headers so subsequent hops stay authenticated.
+            # set-cookie is stored as a list (multiple cookies per response).
+            _sc_raw = resp.headers.get("set-cookie", [])
+            if isinstance(_sc_raw, str):
+                _sc_raw = [_sc_raw]
+            for _cookie_hdr in _sc_raw:
+                _first = _cookie_hdr.split(";")[0].strip()
+                if "=" in _first:
+                    _ck, _cv = _first.split("=", 1)
+                    _cookies[_ck.strip()] = _cv.strip()
+
             if resp.error or resp.status not in (301, 302, 303, 307, 308):
                 resp.redirect_chain = chain
+                # Expose all cookies accumulated across the redirect chain
+                # so callers (e.g. Session._merge_cookies) can see them.
+                if _cookies:
+                    existing_sc = resp.headers.get("set-cookie", [])
+                    if isinstance(existing_sc, str):
+                        existing_sc = [existing_sc]
+                    merged = list(existing_sc)
+                    for _ck, _cv in _cookies.items():
+                        merged.append(f"{_ck}={_cv}; path=/")
+                    resp.headers["set-cookie"] = merged
                 return resp
 
             location = resp.header("location")

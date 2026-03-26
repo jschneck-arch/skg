@@ -42,6 +42,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -775,23 +776,64 @@ def _redact_url(url: str) -> str:
 
 # ── State persistence ─────────────────────────────────────────────────────
 
-STATE_DIR = Path("/var/lib/skg/data_state")
+def _candidate_state_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _add(path: Path | None) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(path)
+
+    env_dir = os.getenv("SKG_DATA_STATE_DIR")
+    if env_dir:
+        _add(Path(env_dir))
+
+    state_root = os.getenv("SKG_STATE_DIR")
+    if state_root:
+        _add(Path(state_root) / "data_state")
+
+    try:
+        from skg.core.paths import SKG_STATE_DIR as _SKG_STATE_DIR
+        _add(_SKG_STATE_DIR / "data_state")
+    except Exception:
+        pass
+
+    _add(Path("/var/lib/skg/data_state"))
+    _add(Path(tempfile.gettempdir()) / "skg" / "data_state")
+    return candidates
+
+
+def _state_file(workload_id: str, state_dir: Path) -> Path:
+    safe_name = workload_id.replace("/", "_").replace("::", "_")
+    return state_dir / f"{safe_name}.json"
 
 
 def load_state(workload_id: str) -> dict:
-    state_file = STATE_DIR / f"{workload_id.replace('/', '_').replace('::', '_')}.json"
-    if state_file.exists():
+    for state_dir in _candidate_state_dirs():
+        state_file = _state_file(workload_id, state_dir)
+        if not state_file.exists():
+            continue
         try:
             return json.loads(state_file.read_text())
         except Exception:
-            pass
+            continue
     return {}
 
 
 def save_state(workload_id: str, state: dict) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_file = STATE_DIR / f"{workload_id.replace('/', '_').replace('::', '_')}.json"
-    state_file.write_text(json.dumps(state, indent=2))
+    payload = json.dumps(state, indent=2)
+    for state_dir in _candidate_state_dirs():
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            _state_file(workload_id, state_dir).write_text(payload)
+            return
+        except OSError:
+            continue
 
 
 # ── Main profiling entry point ────────────────────────────────────────────

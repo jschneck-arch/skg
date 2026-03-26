@@ -59,90 +59,122 @@ def _run(ssh, cmd: str, timeout: int = 10) -> str:
 
 
 
+def _parse_apache_version(version_str: str):
+    """Return (major, minor, patch) tuple from 'Apache/2.x.y ...' or None."""
+    m = re.search(r"Apache/(\d+)\.(\d+)\.(\d+)", version_str or "")
+    if m:
+        return tuple(int(x) for x in m.groups())
+    return None
+
+
+def _parse_apr_version(version_str: str):
+    """Return (major, minor, patch) from 'APR 1.x.y' or dpkg '1:1.x.y-...' or None."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str or "")
+    if m:
+        return tuple(int(x) for x in m.groups())
+    return None
+
+
 def check_w_01(collection, out, attack_path_id, run_id, workload_id):
-    """Check W-01: Target system or service responds to network probes; collect"""
-    # Evidence hint: TCP connect or ICMP probe confirms reachability; confirm via port scan or HTTP HEAD request
-    # TODO: parse collection data for this condition
-    # Collection keys available: ['nvd_feed::cve_2007_4723', 'nvd_feed::cve_2009_1955', 'nvd_feed::cve_2009_2699']
-    evidence = collection.get("target_reachable_and_responsive", "")
-    if evidence:
-        status = "unknown"  # Replace with: "realized" or "blocked"
-    else:
-        status = "unknown"
+    """W-01: Target is reachable — SSH connection itself is proof."""
+    # If we reached this function, SSH connected successfully → target is reachable.
+    http_banner = collection.get("http_service_banner", "")
+    has_http = bool(http_banner and not http_banner.startswith("ERROR"))
+    status = "realized"  # SSH connection is direct reachability evidence
+    detail = f"SSH connected; http_banner={'present' if has_http else 'absent'}"
     emit(out, "W-01", status,
-         evidence_rank=2, evidence_source_kind="ssh_collection",
-         pointer="TCP connect or ICMP probe confirms reach",
-         confidence=0.5,
+         evidence_rank=1, evidence_source_kind="ssh_collection",
+         pointer="SSH connection success implies network reachability",
+         confidence=0.95,
          attack_path_id=attack_path_id, run_id=run_id, workload_id=workload_id,
-         extra_payload={"detail": evidence[:200] if evidence else "not collected"})
+         extra_payload={"detail": detail})
+
 
 def check_w_02(collection, out, attack_path_id, run_id, workload_id):
-    """Check W-02: Target service is listening on a reachable port and acceptin"""
-    # Evidence hint: Service banner grab or HTTP 200/401 response confirms service is listening
-    # TODO: parse collection data for this condition
-    # Collection keys available: ['nvd_feed::cve_2007_4723', 'nvd_feed::cve_2009_1955', 'nvd_feed::cve_2009_2699']
-    evidence = collection.get("target_service_exposed", "")
-    if evidence:
-        status = "unknown"  # Replace with: "realized" or "blocked"
-    else:
-        status = "unknown"
+    """W-02: HTTP service is exposed and responding."""
+    http_banner = collection.get("http_service_banner", "")
+    # HTTP response codes (200, 301, 302, 401, 403, 404, 500) all confirm service is up
+    has_http = bool(http_banner and not http_banner.startswith("ERROR") and (
+        "HTTP/" in http_banner or "Server:" in http_banner
+    ))
+    status    = "realized" if has_http else "unknown"
+    detail    = (http_banner[:200] if http_banner else "not collected")
     emit(out, "W-02", status,
          evidence_rank=2, evidence_source_kind="ssh_collection",
-         pointer="Service banner grab or HTTP 200/401 resp",
-         confidence=0.5,
+         pointer="HTTP banner grab via localhost curl",
+         confidence=0.90 if has_http else 0.5,
          attack_path_id=attack_path_id, run_id=run_id, workload_id=workload_id,
-         extra_payload={"detail": evidence[:200] if evidence else "not collected"})
+         extra_payload={"detail": detail})
+
 
 def check_w_03(collection, out, attack_path_id, run_id, workload_id):
-    """Check W-03: ScriptAlias directory in NCSA and Apache httpd allowed attac"""
-    # Evidence hint: Network-accessible service probe; confirm reachability via TCP connect or banner grab
-    # TODO: parse collection data for this condition
-    # Collection keys available: ['nvd_feed::cve_2007_4723', 'nvd_feed::cve_2009_1955', 'nvd_feed::cve_2009_2699']
-    evidence = collection.get("apache_high_vuln_present", "")
-    if evidence:
-        status = "unknown"  # Replace with: "realized" or "blocked"
+    """W-03: CVE-2007-4723 — Apache < 2.2.6 mod_proxy ScriptAlias bypass."""
+    ver_str = collection.get("apache_version", "")
+    ver     = _parse_apache_version(ver_str)
+    if ver is None:
+        status, confidence = "unknown", 0.5
+        detail = f"apache_version not parsed: {ver_str[:100]}"
+    elif ver < (2, 2, 6):
+        status, confidence = "realized", 0.90
+        detail = f"Apache {'.'.join(str(x) for x in ver)} < 2.2.6 (CVE-2007-4723)"
     else:
-        status = "unknown"
+        status, confidence = "blocked", 0.90
+        detail = f"Apache {'.'.join(str(x) for x in ver)} >= 2.2.6 — patched"
     emit(out, "W-03", status,
-         evidence_rank=2, evidence_source_kind="ssh_collection",
-         pointer="Network-accessible service probe; confir",
-         confidence=0.5,
+         evidence_rank=3, evidence_source_kind="ssh_collection",
+         pointer="apache2 -v / httpd -v version check",
+         confidence=confidence,
          attack_path_id=attack_path_id, run_id=run_id, workload_id=workload_id,
-         extra_payload={"detail": evidence[:200] if evidence else "not collected"})
+         extra_payload={"detail": detail, "apache_version": ver_str[:100]})
+
 
 def check_w_04(collection, out, attack_path_id, run_id, workload_id):
-    """Check W-04: The expat XML parser in the apr_xml_* interface in xml/apr_x"""
-    # Evidence hint: Network-accessible service probe; confirm reachability via TCP connect or banner grab
-    # TODO: parse collection data for this condition
-    # Collection keys available: ['nvd_feed::cve_2007_4723', 'nvd_feed::cve_2009_1955', 'nvd_feed::cve_2009_2699']
-    evidence = collection.get("cve_2009_1955_denial_of_service_possible", "")
-    if evidence:
-        status = "unknown"  # Replace with: "realized" or "blocked"
+    """W-04: CVE-2009-1955 — APR < 1.3.3 expat XML parser DoS."""
+    apr_str = collection.get("apr_version", "")
+    ver     = _parse_apr_version(apr_str)
+    if ver is None:
+        status, confidence = "unknown", 0.5
+        detail = f"APR version not parsed: {apr_str[:100]}"
+    elif ver < (1, 3, 3):
+        status, confidence = "realized", 0.85
+        detail = f"APR {'.'.join(str(x) for x in ver)} < 1.3.3 (CVE-2009-1955)"
     else:
-        status = "unknown"
+        status, confidence = "blocked", 0.85
+        detail = f"APR {'.'.join(str(x) for x in ver)} >= 1.3.3 — patched"
     emit(out, "W-04", status,
-         evidence_rank=2, evidence_source_kind="ssh_collection",
-         pointer="Network-accessible service probe; confir",
-         confidence=0.5,
+         evidence_rank=3, evidence_source_kind="ssh_collection",
+         pointer="apr-1-config --version / dpkg -l libapr1",
+         confidence=confidence,
          attack_path_id=attack_path_id, run_id=run_id, workload_id=workload_id,
-         extra_payload={"detail": evidence[:200] if evidence else "not collected"})
+         extra_payload={"detail": detail, "apr_version": apr_str[:100]})
+
 
 def check_w_05(collection, out, attack_path_id, run_id, workload_id):
-    """Check W-05: The Solaris pollset feature in the Event Port backend in pol"""
-    # Evidence hint: Network-accessible service probe; confirm reachability via TCP connect or banner grab
-    # TODO: parse collection data for this condition
-    # Collection keys available: ['nvd_feed::cve_2007_4723', 'nvd_feed::cve_2009_1955', 'nvd_feed::cve_2009_2699']
-    evidence = collection.get("cve_2009_2699_denial_of_service_possible", "")
-    if evidence:
-        status = "unknown"  # Replace with: "realized" or "blocked"
+    """W-05: CVE-2009-2699 — APR Solaris pollset event-port DoS (Solaris only)."""
+    os_info = collection.get("os_release", "")
+    apr_str = collection.get("apr_version", "")
+    # CVE-2009-2699 is Solaris-specific (Event Port backend)
+    is_solaris = "solaris" in os_info.lower() or "sunos" in os_info.lower()
+    if not is_solaris:
+        status, confidence = "blocked", 0.95
+        detail = f"Not Solaris (os_release={os_info[:60]}); CVE-2009-2699 not applicable"
     else:
-        status = "unknown"
+        ver = _parse_apr_version(apr_str)
+        if ver is None:
+            status, confidence = "unknown", 0.5
+            detail = f"Solaris detected but APR version unknown: {apr_str[:60]}"
+        elif ver < (1, 3, 3):
+            status, confidence = "realized", 0.85
+            detail = f"Solaris + APR {'.'.join(str(x) for x in ver)} < 1.3.3 (CVE-2009-2699)"
+        else:
+            status, confidence = "blocked", 0.85
+            detail = f"Solaris but APR {'.'.join(str(x) for x in ver)} >= 1.3.3 — patched"
     emit(out, "W-05", status,
-         evidence_rank=2, evidence_source_kind="ssh_collection",
-         pointer="Network-accessible service probe; confir",
-         confidence=0.5,
+         evidence_rank=3, evidence_source_kind="ssh_collection",
+         pointer="uname -s / os_release check for Solaris + APR version",
+         confidence=confidence,
          attack_path_id=attack_path_id, run_id=run_id, workload_id=workload_id,
-         extra_payload={"detail": evidence[:200] if evidence else "not collected"})
+         extra_payload={"detail": detail})
 
 
 def run_checks(collection, out, attack_path_id, run_id, workload_id):
@@ -177,9 +209,18 @@ def main():
     ssh.connect(**connect_kw)
 
     collection = {}
-    collection["nvd_feed__cve_2007_4"] = _run(ssh, 'nvd_feed::CVE-2007-4723')
-    collection["nvd_feed__cve_2009_1"] = _run(ssh, 'nvd_feed::CVE-2009-1955')
-    collection["nvd_feed__cve_2009_2"] = _run(ssh, 'nvd_feed::CVE-2009-2699')
+    collection["http_service_banner"] = _run(
+        ssh, "curl -s --max-time 5 -I http://127.0.0.1/ 2>&1 | head -8 || echo 'no_curl'"
+    )
+    collection["apache_version"] = _run(
+        ssh, "apache2 -v 2>/dev/null || httpd -v 2>/dev/null || apache2ctl -v 2>/dev/null || echo 'not_found'"
+    )
+    collection["apr_version"] = _run(
+        ssh, "apr-1-config --version 2>/dev/null || "
+             "dpkg -l libapr1 2>/dev/null | awk '/^ii/{print $3}' || "
+             "rpm -q apr --queryformat '%{VERSION}' 2>/dev/null || echo 'not_found'"
+    )
+    collection["os_release"] = _run(ssh, "uname -s -r 2>/dev/null || echo 'unknown'")
 
     run_id = a.run_id or str(uuid.uuid4())
     wid = a.workload_id or a.host

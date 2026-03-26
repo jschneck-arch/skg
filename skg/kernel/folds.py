@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from skg.core.paths import SKG_STATE_DIR
 from skg.intel.gap_detector import detect_from_events, detect_from_web_fingerprints
 from skg.identity import parse_workload_ref
 
@@ -524,7 +525,7 @@ class FoldDetector:
                             "wicket_id":    wicket_id,
                         }
 
-        pearls_file = Path("/var/lib/skg/pearls.jsonl")
+        pearls_file = SKG_STATE_DIR / "pearls.jsonl"
         if pearls_file.exists():
             for line in pearls_file.read_text(errors="replace").splitlines()[-500:]:
                 if not line.strip():

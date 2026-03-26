@@ -1,0 +1,136 @@
+contracts:
+  observation_rc:
+    artifact_type: observation_rc
+    filename_extension: ".rc"
+    output_format: text
+    num_predict: 280
+    required_markers:
+      - "setg RHOSTS"
+      - "exit"
+    prompt_notes:
+      - "Write a bounded Metasploit resource script scaffold."
+      - "Do not claim the action succeeded."
+      - "Use comments for unresolved module choices rather than inventing telemetry."
+  msf_rc:
+    artifact_type: msf_rc
+    filename_extension: ".rc"
+    output_format: text
+    num_predict: 320
+    required_markers:
+      - "use "
+      - "exit"
+    prompt_notes:
+      - "Write a valid Metasploit resource script."
+      - "Keep the script reviewable and preserve operator gating."
+      - "Do not claim the action succeeded inside the script body."
+  credential_test_plan:
+    artifact_type: credential_test_plan
+    filename_extension: ".json"
+    output_format: json
+    num_predict: 220
+    required_keys:
+      - "plan_type"
+      - "service_type"
+      - "target_ip"
+      - "port"
+      - "user"
+      - "secret"
+      - "cred_type"
+      - "origin_ip"
+      - "wicket_hint"
+      - "command_hint"
+    required_string_keys:
+      - "plan_type"
+      - "service_type"
+      - "target_ip"
+      - "port"
+      - "user"
+      - "secret"
+      - "cred_type"
+      - "origin_ip"
+      - "wicket_hint"
+      - "command_hint"
+    expected_values:
+      plan_type: "cred_reuse_v1"
+    prompt_notes:
+      - "Represent the credential test plan as structured JSON."
+      - "Preserve instrument details without claiming execution succeeded."
+      - "Keep dispatch information aligned with the credential reuse instrument."
+  wicket_patch:
+    artifact_type: wicket_patch
+    filename_extension: ".json"
+    output_format: json
+    num_predict: 360
+    required_keys:
+      - "patch_type"
+      - "domain"
+      - "reason"
+      - "wickets"
+      - "attack_paths"
+    required_string_keys:
+      - "patch_type"
+      - "domain"
+      - "reason"
+    required_mapping_keys:
+      - "wickets"
+      - "attack_paths"
+    non_empty_mapping_keys:
+      - "wickets"
+      - "attack_paths"
+    expected_values:
+      patch_type: "wicket_patch_v1"
+    mapping_value_string_keys:
+      wickets:
+        - "id"
+        - "label"
+        - "description"
+      attack_paths:
+        - "id"
+        - "operation"
+    mapping_value_list_keys:
+      attack_paths:
+        - "required_wickets"
+    prompt_notes:
+      - "Write a draft wicket patch, not canonical state."
+      - "Prefer reviewable additions over full catalog replacement."
+      - "Keep all unsupported guesses explicitly marked as draft suggestions."
+  catalog_patch:
+    artifact_type: catalog_patch
+    filename_extension: ".json"
+    output_format: json
+    num_predict: 420
+    required_keys:
+      - "patch_type"
+      - "domain"
+      - "description"
+      - "reason"
+      - "wickets"
+      - "attack_paths"
+    required_string_keys:
+      - "patch_type"
+      - "domain"
+      - "description"
+      - "reason"
+    required_mapping_keys:
+      - "wickets"
+      - "attack_paths"
+    non_empty_mapping_keys:
+      - "wickets"
+      - "attack_paths"
+    expected_values:
+      patch_type: "catalog_patch_v1"
+    mapping_value_string_keys:
+      wickets:
+        - "id"
+        - "label"
+        - "description"
+      attack_paths:
+        - "id"
+        - "description"
+    mapping_value_list_keys:
+      attack_paths:
+        - "required_wickets"
+    prompt_notes:
+      - "Write a draft catalog patch for missing coverage."
+      - "Do not mark any wicket as realized or blocked."
+      - "Keep the patch narrow and tied to the supplied folds and attack paths."

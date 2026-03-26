@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# SKG deployment mirror (generated, not source)
+skg_deploy/
+
+# Toolchain backups
+*.backup/
+
+# Archives / tarballs
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.whl
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Editors / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Test artifacts
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets / credentials
+*.pem
+*.key
+id_rsa
+id_ed25519

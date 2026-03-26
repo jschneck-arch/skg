@@ -339,7 +339,38 @@ def draft_catalog(engine: ResonanceEngine,
             },
         }
     else:
-        # Try LLM pool (multi-backend race: first valid catalog wins)
+        # Try direct OllamaBackend first — faster, no pool overhead, and the
+        # test suite mocks this path explicitly.
+        try:
+            from skg.resonance.ollama_backend import OllamaBackend
+            _ollama = OllamaBackend()
+            if _ollama.available():
+                log.info(f"No API key — using direct Ollama ({_ollama.model()})")
+                query   = f"{domain_name}: {description}"
+                context = engine.surface(query, k_each=4)
+                catalog, errors = _ollama.draft_catalog(domain_name, description, {
+                    "wickets":  [r.to_dict() for r, _ in context.get("wickets", [])],
+                    "adapters": [r.to_dict() for r, _ in context.get("adapters", [])],
+                    "domains":  [r.to_dict() for r, _ in context.get("domains", [])],
+                })
+                draft_path = engine.save_draft(domain_name, catalog)
+                return {
+                    "domain":            domain_name,
+                    "catalog":           catalog,
+                    "validation_errors": errors,
+                    "draft_path":        str(draft_path),
+                    "backend":           "ollama",
+                    "model":             _ollama.model(),
+                    "context_used": {
+                        "wickets_surfaced":  len(context["wickets"]),
+                        "adapters_surfaced": len(context["adapters"]),
+                        "domains_surfaced":  len(context["domains"]),
+                    },
+                }
+        except Exception as exc:
+            log.debug(f"[drafter] Ollama direct path failed: {exc}")
+
+        # Fallback: LLM pool (multi-backend race: first valid catalog wins)
         try:
             from skg.resonance.llm_pool import get_pool, OllamaLLMBackend
             pool = get_pool()
@@ -373,8 +404,8 @@ def draft_catalog(engine: ResonanceEngine,
                 try:
                     catalog = json.loads(raw)
                 except json.JSONDecodeError as exc:
-                    log.warning(f"[drafter] pool output not valid JSON ({exc}), retrying")
-                    raise
+                    log.warning(f"[drafter] pool output not valid JSON ({exc}), falling through to next backend")
+                    raise ValueError(f"pool output not valid JSON: {exc}") from exc
 
                 errors = _validate_draft(catalog)
                 draft_path = engine.save_draft(domain_name, catalog)

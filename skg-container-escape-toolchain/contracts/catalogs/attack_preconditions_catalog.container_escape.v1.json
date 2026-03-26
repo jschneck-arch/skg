@@ -1,4 +1,5 @@
 {
+  "domain": "container_escape",
   "version": "1.0.0",
   "description": "Container escape attack preconditions catalog. Wickets are observable conditions required for specific escape paths. Each wicket maps to an evidence source collectable via docker inspect or runtime observation.",
   "wickets": {

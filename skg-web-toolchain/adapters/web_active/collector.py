@@ -118,8 +118,27 @@ class FormParser(html.parser.HTMLParser):
             self._current_form["inputs"].append({
                 "name": a.get("name", ""),
                 "type": "select",
-                "value": "",
+                "value": "",          # filled by first <option> in handle_data
+                "_select": True,      # marker for option processing
             })
+        elif tag == "option" and self._current_form is not None:
+            # First option value becomes the default for its select
+            val = a.get("value", "")
+            for inp in reversed(self._current_form["inputs"]):
+                if inp.get("_select") and not inp["value"]:
+                    inp["value"] = val
+                    break
+        elif tag == "button" and self._current_form is not None:
+            # Include named submit buttons — required by some apps (e.g. bWAPP)
+            btn_name = a.get("name", "")
+            btn_val = a.get("value", "")
+            btn_type = a.get("type", "submit")
+            if btn_name and btn_type == "submit":
+                self._current_form["inputs"].append({
+                    "name": btn_name,
+                    "type": "button",
+                    "value": btn_val,
+                })
         elif tag == "a" and "href" in a:
             self.links.append(a["href"])
 
@@ -371,6 +390,32 @@ SENSITIVE_PATHS = [
     ("/info.php", "phpinfo"),
     ("/elmah.axd", "elmah"),
     ("/trace.axd", "trace"),
+
+    # bWAPP / DVWA / OWASP training app paths
+    ("/commandi.php", "cmdi"),
+    ("/commandi_blind.php", "cmdi_blind"),
+    ("/sqli.php", "sqli"),
+    ("/sqli_blind.php", "sqli_blind"),
+    ("/sqli_3.php", "sqli"),
+    ("/xss_reflected.php", "xss"),
+    ("/xss_stored.php", "xss"),
+    ("/xss_stored_1.php", "xss"),
+    ("/xss_dom.php", "xss"),
+    ("/unrestricted_file_upload.php", "file_upload"),
+    ("/rlfi.php", "lfi"),
+    ("/directory_traversal_1.php", "path_traversal"),
+    ("/xxe.php", "xxe"),
+    ("/csrf.php", "csrf"),
+    ("/ssrf.php", "ssrf"),
+    ("/passwords/", "password_dir"),
+    ("/documents/", "document_dir"),
+
+    # DVWA paths
+    ("/dvwa/", "dvwa"),
+    ("/vulnerabilities/exec/", "dvwa_cmdi"),
+    ("/vulnerabilities/sqli/", "dvwa_sqli"),
+    ("/vulnerabilities/upload/", "dvwa_upload"),
+    ("/vulnerabilities/xss_r/", "dvwa_xss"),
 ]
 
 DIRLIST_PATTERNS = [
@@ -685,8 +730,14 @@ VERBOSE_ERROR_PATTERNS = [
 
 # Common default credential pairs
 DEFAULT_CREDS = [
+    # bWAPP (Buggy Web Application)
+    ("bee",           "bug"),
     # DVWA
     ("admin",         "password"),
+    ("gordonb",       "abc123"),
+    ("1337",          "charley"),
+    ("pablo",         "letmein"),
+    ("smithy",        "password"),
     # Common defaults
     ("admin",         "admin"),
     ("admin",         "admin123"),

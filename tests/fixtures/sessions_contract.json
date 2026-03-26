@@ -1,0 +1,13 @@
+{
+  "table": "sessions",
+  "primary_key": "session_id",
+  "ttl_hours": 24,
+  "required_fields": ["session_id", "user_id", "token", "last_seen"],
+  "bounds": {},
+  "foreign_keys": [
+    {"field": "user_id", "ref_table": "users", "ref_field": "user_id"}
+  ],
+  "expected_count_per_batch": null,
+  "distribution_baselines": {},
+  "timestamp_columns": ["last_seen", "created_at", "updated_at", "ts"]
+}

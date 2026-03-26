@@ -1,0 +1,17 @@
+{
+  "table": "orders",
+  "primary_key": "order_id",
+  "ttl_hours": 48,
+  "required_fields": ["order_id", "user_id", "amount", "created_at"],
+  "bounds": {
+    "amount": {"min": 0.0, "max": 999.99},
+    "status": {"enum": ["pending", "complete", "cancelled", "refund"]}
+  },
+  "foreign_keys": [
+    {"field": "user_id", "ref_table": "users", "ref_field": "user_id"}
+  ],
+  "expected_count_per_batch": null,
+  "distribution_baselines": {
+    "amount": {"mean": 150.0, "std": 100.0, "p50": 99.99, "p95": 500.0}
+  }
+}

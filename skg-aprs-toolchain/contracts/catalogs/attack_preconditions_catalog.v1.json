@@ -1,4 +1,5 @@
 {
+  "domain": "aprs",
   "version": "1.0.0",
   "description": "Log4Shell (Log4j JNDI RCE) attack preconditions catalog. Evidence-ranked conditions required for Log4Shell exploitation across five attack paths.",
   "wickets": {

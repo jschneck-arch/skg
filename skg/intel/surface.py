@@ -82,9 +82,24 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
     results: dict[str, dict] = {}
     if not interp_dir.exists():
         return []
-    for f in sorted(list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson"))):
+    files = list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson"))
+    for f in files:
         try:
-            data = json.loads(f.read_text())
+            text = f.read_text()
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                if f.suffix != ".ndjson":
+                    raise
+                data = None
+                for line in reversed(text.splitlines()):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    break
+                if data is None:
+                    continue
             # Handle both direct payload and wrapped event
             if "payload" in data:
                 payload = data["payload"]
@@ -93,13 +108,22 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
             wid    = payload.get("workload_id", f.stem)
             path_id = payload.get("attack_path_id", "unknown")
             key    = f"{wid}::{path_id}"
-            # Keep latest by filename (sorted above means last wins)
+            mtime = f.stat().st_mtime
+            existing = results.get(key)
+            if existing is not None and mtime <= existing.get("_mtime", 0.0):
+                continue
+            payload = dict(payload)
             payload["_source_file"] = f.name
+            payload["_mtime"] = mtime
             payload["classification"] = _normalize_classification(payload.get("classification", "unknown"))
             results[key] = payload
         except Exception:
             pass
-    return list(results.values())
+    rows = []
+    for payload in results.values():
+        payload.pop("_mtime", None)
+        rows.append(payload)
+    return rows
 
 
 def _infer_domain(payload: dict, filename: str) -> str:
@@ -176,7 +200,7 @@ def surface(interp_dir: Path | None = None,
         if graph:
             try:
                 wid = proj.get("workload_id","")
-                neighbors = [n for n,_ in graph.neighbors(wid, min_weight=0.1)]
+                neighbors = [neighbor_id for neighbor_id, _, _ in graph.neighbors(wid, min_weight=0.1)]
             except Exception:
                 pass
 

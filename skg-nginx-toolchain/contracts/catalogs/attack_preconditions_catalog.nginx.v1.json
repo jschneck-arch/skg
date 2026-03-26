@@ -1,41 +1,128 @@
 {
   "domain": "nginx",
-  "version": "0.1.0",
-  "description": "Path traversal, SSRF via proxy_pass, header injection",
+  "version": "1.0.0",
+  "description": "Attack preconditions covering the full nginx attack surface: version disclosure, path traversal, SSRF via proxy_pass, weak TLS, missing security headers, unrestricted HTTP methods, and configuration exposure.",
   "wickets": {
     "N-01": {
+      "id": "N-01",
       "label": "nginx_reachable",
-      "description": "nginx service is reachable from attacker position",
-      "evidence_hint": "Network connectivity to nginx port confirmed",
-      "default_rank": 4
+      "description": "nginx is listening on a network port and responding to HTTP requests from the attacker's position.",
+      "evidence_hint": "Check ss/netstat for nginx listen sockets on :80/:443/:8080; confirm with HTTP HEAD response containing HTTP/ status line.",
+      "default_rank": 4,
+      "decay_class": "ephemeral"
     },
     "N-02": {
-      "label": "nginx_no_auth",
-      "description": "nginx service accepts unauthenticated connections",
-      "evidence_hint": "Connect without credentials and observe response",
-      "default_rank": 1
+      "id": "N-02",
+      "label": "version_disclosed",
+      "description": "nginx version is exposed in the Server response header or in HTTP error page bodies, enabling targeted exploit selection.",
+      "evidence_hint": "Send HTTP request and inspect Server: header and error response body for 'nginx/X.Y.Z' pattern.",
+      "default_rank": 1,
+      "decay_class": "operational"
     },
     "N-03": {
-      "label": "nginx_default_creds",
-      "description": "nginx service uses default or weak credentials",
-      "evidence_hint": "Attempt authentication with known default credentials",
-      "default_rank": 1
+      "id": "N-03",
+      "label": "directory_listing",
+      "description": "autoindex is enabled for one or more location blocks, causing nginx to render directory listings that may expose sensitive file paths.",
+      "evidence_hint": "Fetch a directory URL and check response body for 'Index of' or 'directory listing'; inspect nginx config for 'autoindex on'.",
+      "default_rank": 1,
+      "decay_class": "operational"
     },
     "N-04": {
-      "label": "nginx_config_exposed",
-      "description": "nginx configuration file is readable",
-      "evidence_hint": "Read nginx config file for auth/binding settings",
-      "default_rank": 3
+      "id": "N-04",
+      "label": "config_readable",
+      "description": "/etc/nginx/nginx.conf or full configuration dump (nginx -T) is readable via SSH, exposing backend topology, auth bypass opportunities, and misconfigurations.",
+      "evidence_hint": "Run 'nginx -T' or read /etc/nginx/nginx.conf; non-empty output with directive syntax confirms readability.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-05": {
+      "id": "N-05",
+      "label": "alias_path_traversal",
+      "description": "An alias directive ends with / but its enclosing location block path does not end with /, creating the classic nginx alias path traversal that allows reading files outside the intended directory.",
+      "evidence_hint": "Inspect nginx config for pattern: location /X { alias /path/; } where /X has no trailing slash. Test with request to /X../etc/passwd.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-06": {
+      "id": "N-06",
+      "label": "proxy_pass_internal",
+      "description": "A proxy_pass directive forwards requests to an internal network address (127.x, 10.x, 172.16-31.x, 192.168.x), creating a Server-Side Request Forgery vector.",
+      "evidence_hint": "Inspect nginx config for proxy_pass directives targeting RFC-1918 or loopback addresses.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-07": {
+      "id": "N-07",
+      "label": "server_tokens_on",
+      "description": "server_tokens is not set to off, causing nginx to include the full version string in the Server header and error pages.",
+      "evidence_hint": "Check nginx config for absence of 'server_tokens off'; confirm version visible in Server header on any response.",
+      "default_rank": 3,
+      "decay_class": "operational"
+    },
+    "N-08": {
+      "id": "N-08",
+      "label": "no_security_headers",
+      "description": "Responses are missing two or more of: X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security. Absence enables clickjacking, MIME-sniffing, and protocol downgrade attacks.",
+      "evidence_hint": "Inspect response headers from HTTP HEAD request for presence of X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security.",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "N-09": {
+      "id": "N-09",
+      "label": "http_methods_unrestricted",
+      "description": "No limit_except directive restricts HTTP methods, allowing PUT, DELETE, and other dangerous verbs to reach upstream application servers or static locations.",
+      "evidence_hint": "Check nginx config for absence of limit_except blocks; probe with HTTP PUT to confirm method is forwarded rather than rejected at the nginx layer.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-10": {
+      "id": "N-10",
+      "label": "weak_tls",
+      "description": "ssl_protocols directive includes SSLv2, SSLv3, or TLSv1 (without .1/.2 suffix), enabling downgrade attacks and use of broken cipher suites.",
+      "evidence_hint": "Inspect nginx config for ssl_protocols directive; check for SSLv2, SSLv3, TLSv1 entries.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-11": {
+      "id": "N-11",
+      "label": "open_redirect",
+      "description": "A return or rewrite directive incorporates a user-controlled request variable (e.g., $arg_*, $http_*) in the redirect target, enabling open redirect exploitation.",
+      "evidence_hint": "Scan nginx config for return or rewrite directives that embed $arg_ or $http_ variables in redirect URIs.",
+      "default_rank": 3,
+      "decay_class": "structural"
+    },
+    "N-12": {
+      "id": "N-12",
+      "label": "client_max_body_size_unlimited",
+      "description": "client_max_body_size is either not set (nginx default 1m applies but is often overridden to 0) or explicitly set to 0 (unlimited), enabling Denial-of-Service via arbitrarily large request bodies.",
+      "evidence_hint": "Search nginx config for 'client_max_body_size'; value of 0 or absence in a context where upstream accepts large bodies indicates risk.",
+      "default_rank": 3,
+      "decay_class": "structural"
     }
   },
   "attack_paths": {
-    "nginx_initial_access_v1": {
-      "label": "Nginx Initial Access",
-      "description": "Exploit nginx service to gain initial access",
-      "required_wickets": [
-        "N-01",
-        "N-02"
-      ],
+    "nginx_info_disclosure_v1": {
+      "label": "Nginx Version Fingerprinting Chain",
+      "description": "nginx is reachable, version is disclosed via Server header or error pages, and server_tokens is not suppressed — attacker can precisely fingerprint the nginx version and select targeted exploits.",
+      "required_wickets": ["N-01", "N-02", "N-07"],
+      "ordered": false
+    },
+    "nginx_path_traversal_v1": {
+      "label": "Nginx Alias Path Traversal",
+      "description": "nginx is reachable, config is readable confirming the alias misconfiguration, and the alias directive has the trailing-slash mismatch that allows path traversal outside the intended directory.",
+      "required_wickets": ["N-01", "N-04", "N-05"],
+      "ordered": false
+    },
+    "nginx_ssrf_v1": {
+      "label": "SSRF via proxy_pass to Internal Service",
+      "description": "nginx is reachable, config is readable exposing the proxy_pass target, and proxy_pass forwards to an internal RFC-1918 or loopback address — attacker can pivot to internal services.",
+      "required_wickets": ["N-01", "N-04", "N-06"],
+      "ordered": false
+    },
+    "nginx_file_upload_dos_v1": {
+      "label": "Unrestricted Upload Denial-of-Service",
+      "description": "nginx is reachable, HTTP methods are unrestricted at the nginx layer (no limit_except), and client_max_body_size is unlimited — attacker can exhaust disk or memory via unbounded POST/PUT.",
+      "required_wickets": ["N-01", "N-09", "N-12"],
       "ordered": false
     }
   }

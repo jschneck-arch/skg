@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "skg"
+version = "0.4.0"
+description = "Spherical Knowledge Graph — domain-agnostic telemetry substrate with information-theoretic gravity"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+
+keywords = [
+    "knowledge-graph", "information-theory", "entropy", "telemetry",
+    "field-theory", "observation", "autonomous-systems"
+]
+
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "pyyaml",
+    "paramiko",
+    "requests",
+    "numpy",
+    # Optional heavyweight deps — install separately as needed:
+    # "faiss-cpu",              # semantic memory (resonance engine)
+    # "sentence-transformers",  # embedding backend for resonance
+    # "pywinrm",                # Windows WinRM collection
+    # "pymetasploit3",          # Metasploit RPC integration
+]
+
+[project.optional-dependencies]
+resonance = ["faiss-cpu", "sentence-transformers"]
+windows   = ["pywinrm"]
+msf       = ["pymetasploit3"]
+all       = ["faiss-cpu", "sentence-transformers", "pywinrm", "pymetasploit3"]
+
+[project.scripts]
+skg = "skg.cli:main"
+
+[project.urls]
+Repository = "https://github.com/jschneck/skg"
+Papers     = "https://github.com/jschneck/skg/tree/main/docs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "bwapp: requires bWAPP Docker lab running (docker-compose -f docker-compose.lab.yml up -d)",
+    "live: requires a live network target",
+    "slow: slow integration tests",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skg*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.json", "*.md"]

@@ -38,7 +38,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from skg.core.paths import (
-    EVENTS_DIR, INTERP_DIR, SKG_STATE_DIR, SKG_HOME,
+    EVENTS_DIR, INTERP_DIR, SKG_CONFIG_DIR, SKG_STATE_DIR, SKG_HOME,
     DISCOVERY_DIR, DELTA_DIR,
 )
 
@@ -244,10 +244,27 @@ def ingest_projections(conn: sqlite3.Connection, interp_dir: Path) -> int:
             data = json.loads(json_file.read_text())
             if "payload" in data:
                 payload = data["payload"]
-                ev_id   = data.get("id", str(uuid.uuid4()))
+                raw_id  = data.get("id")
             else:
                 payload = data
-                ev_id   = str(uuid.uuid4())
+                raw_id  = None
+
+            # Build a deterministic dedup key from (workload_id, attack_path_id).
+            # Files without an explicit id field previously got a fresh uuid4 on
+            # every build, causing the same realized path to appear N times in
+            # the projections table (once per file per build run).
+            workload_id_key   = payload.get("workload_id", "")
+            attack_path_key   = payload.get("attack_path_id", "")
+            if raw_id:
+                ev_id = raw_id
+            elif workload_id_key and attack_path_key:
+                # Stable hash: same (workload_id, attack_path_id) → same id
+                import hashlib as _hl
+                ev_id = _hl.sha1(
+                    f"{workload_id_key}::{attack_path_key}".encode()
+                ).hexdigest()[:32]
+            else:
+                ev_id = str(uuid.uuid4())
 
             if ev_id in seen:
                 continue
@@ -805,8 +822,9 @@ def generate_engagement_report(
 
     # Realized attack paths
     realized_paths = conn.execute("""
-        SELECT attack_path_id, workload_id, score, domain
+        SELECT attack_path_id, workload_id, MAX(score) AS score, domain
         FROM projections WHERE classification = 'realized'
+        GROUP BY workload_id, attack_path_id
         ORDER BY score DESC
     """).fetchall()
 
@@ -819,6 +837,7 @@ def generate_engagement_report(
     h1_paths = conn.execute("""
         SELECT attack_path_id, workload_id
         FROM projections WHERE sheaf_h1 = 1
+        GROUP BY workload_id, attack_path_id
     """).fetchall()
     if h1_paths:
         print(f"\n  H¹ obstructions ({len(h1_paths)} — structural cycle, "
@@ -862,11 +881,103 @@ def generate_engagement_report(
         "high_signal_transitions": [dict(r) for r in high_signal],
     }
 
+    # ── LLM narrative synthesis ───────────────────────────────────────────────
+    # Call the LLM pool (or Ollama backend fallback) to produce a paragraph-level
+    # summary: what was found, what was compromised, what to fix, risk rating.
+    narrative = _generate_llm_narrative(report)
+    if narrative:
+        report["narrative"] = narrative
+        print(f"\n  Engagement Narrative:")
+        for line in narrative.strip().splitlines()[:20]:
+            print(f"    {line}")
+
     if out_path:
         Path(out_path).write_text(json.dumps(report, indent=2))
         print(f"\n  Report written: {out_path}")
 
     return report
+
+
+def _generate_llm_narrative(report: dict) -> str | None:
+    """
+    Call the LLM pool (or Ollama fallback) to generate a natural-language
+    engagement narrative from the structured report data.
+
+    Returns the narrative string, or None if no LLM backend is available.
+    """
+    import sys
+    from pathlib import Path as _P
+
+    # Build a compact summary for the prompt — avoid sending the full report JSON
+    realized = report.get("realized_paths", [])
+    h1 = report.get("h1_obstructions", [])
+    folds = report.get("open_folds", [])
+    domain_summary = report.get("domain_summary", [])
+    integrity = report.get("integrity", {})
+
+    prompt_data = {
+        "realized_paths": [
+            {"path": r.get("attack_path_id"), "target": r.get("workload_id"),
+             "score": r.get("score"), "domain": r.get("domain")}
+            for r in realized[:10]
+        ],
+        "h1_obstructions": [
+            {"path": h.get("attack_path_id"), "target": h.get("workload_id")}
+            for h in h1[:5]
+        ],
+        "open_folds": [
+            {"type": f.get("fold_type"), "n": f.get("n"), "avg_weight": f.get("avg_weight")}
+            for f in folds[:5]
+        ],
+        "domain_observations": [
+            {"domain": d.get("domain"), "obs": d.get("obs"),
+             "realized": d.get("r"), "blocked": d.get("b")}
+            for d in domain_summary[:8]
+        ],
+        "integrity_issues": integrity.get("blocked", []),
+    }
+
+    system_prompt = (
+        "You are an expert security analyst summarizing a red team engagement report. "
+        "Write 3-5 concise paragraphs covering: (1) what attack paths were realized and on "
+        "which targets, (2) what was structurally blocked (H¹ obstructions), (3) key data "
+        "quality issues if any, (4) open uncertainty areas (folds), (5) remediation priority. "
+        "Be factual. Do not invent findings not present in the data."
+    )
+    user_prompt = (
+        "Engagement data:\n" + json.dumps(prompt_data, indent=2)
+    )
+    full_prompt = system_prompt + "\n\n" + user_prompt
+
+    # Try LLM pool first, then Ollama backend fallback
+    try:
+        skg_root = _P(__file__).resolve().parents[2]
+        sys.path.insert(0, str(skg_root))
+        from skg.resonance.llm_pool import LLMPool
+        import yaml as _yaml
+        cfg_candidates = [
+            SKG_CONFIG_DIR / "skg_config.yaml",
+            skg_root / "config" / "skg_config.yaml",
+        ]
+        cfg_path = next((candidate for candidate in cfg_candidates if candidate.exists()), cfg_candidates[0])
+        pool_cfg = {}
+        if cfg_path.exists():
+            pool_cfg = (_yaml.safe_load(cfg_path.read_text()) or {}).get("resonance", {}).get("llm_pool", {})
+        if pool_cfg.get("enabled"):
+            pool = LLMPool(pool_cfg)
+            return pool.generate(full_prompt, max_tokens=512)
+    except Exception:
+        pass
+
+    try:
+        from skg.resonance.ollama_backend import OllamaBackend
+        backend = OllamaBackend()
+        if backend.available():
+            return backend.generate(full_prompt, num_predict=400)
+    except Exception:
+        pass
+
+    return None
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

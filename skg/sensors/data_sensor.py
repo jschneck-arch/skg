@@ -45,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from skg.sensors import BaseSensor, register
-from skg.core.paths import SKG_STATE_DIR, EVENTS_DIR
+from skg.core.paths import EVENTS_DIR, SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
 
 log = logging.getLogger("skg.sensors.data")
 
@@ -86,8 +86,8 @@ class DataSensor(BaseSensor):
             return sources
 
         for candidate in (
-            Path("/etc/skg/data_sources.yaml"),
-            Path(__file__).resolve().parents[2] / "config" / "data_sources.yaml",
+            SKG_CONFIG_DIR / "data_sources.yaml",
+            SKG_HOME / "config" / "data_sources.yaml",
         ):
             if not candidate.exists():
                 continue
@@ -132,7 +132,7 @@ class DataSensor(BaseSensor):
         except ImportError:
             # Try alternative path
             try:
-                sys.path.insert(0, "/opt/skg/skg-data-toolchain")
+                sys.path.insert(0, str(SKG_HOME / "skg-data-toolchain"))
                 from adapters.db_profiler.profile import profile_table
             except ImportError as exc:
                 log.warning(f"[data] db_profiler not found: {exc}")

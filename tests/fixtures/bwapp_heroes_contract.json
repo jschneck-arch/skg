@@ -1,0 +1,10 @@
+{
+  "table": "heroes",
+  "primary_key": "id",
+  "ttl_hours": 720,
+  "required_fields": ["id", "login", "secret"],
+  "bounds": {},
+  "foreign_keys": [],
+  "expected_count_per_batch": null,
+  "distribution_baselines": {}
+}

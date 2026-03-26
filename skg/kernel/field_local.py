@@ -33,27 +33,58 @@ from .support import SupportContribution
 # Paper 4 Table 1: Inter-local coupling constants K(L_i, L_j)
 # ---------------------------------------------------------------------------
 # Key: (domain_i, domain_j) — ordered by structural influence direction.
-# Values calibrated against observed coupling chains in Section 7.
+#
+# Derivation rationale (Paper 4 §3.2 and §7):
+#   K values are not arbitrary tuning parameters. They encode how much of
+#   domain_i's realized structure is load-bearing evidence for domain_j's
+#   unresolved wickets.  The scale is:
+#
+#     K = 0.90–0.95  —  direct structural dependency: domain_j *cannot* be
+#                       realized without domain_i (e.g. cred→SSH auth, SMB→vuln).
+#     K = 0.80–0.89  —  strong implication: domain_j is very likely to be
+#                       reachable once domain_i is confirmed (host→SMB, web→CMDI).
+#     K = 0.65–0.79  —  moderate: domain_j is enabled but not entailed
+#                       (host→data, lateral→host back-coupling).
+#     K = 0.50–0.64  —  weak lateral influence: discovery context only.
+#     K = 0.10       —  default (no coupling data) — effectively decoupled.
+#
+#   Empirical calibration: values were adjusted after the EternalBlue and DVWA
+#   runs (Paper 4 §7) so that the coupling energy term E_couple weighted the
+#   host→smb→vuln chain above the web→data chain — matching observed instrument
+#   selection order.  The credential row at 0.95 reflects that a recovered
+#   credential *is* the precondition for SSH/web auth, so coupling is maximal.
+#
+#   Reverse-direction lookups (domain_j, domain_i) are computed with a 0.8×
+#   discount by coupling_constant() below — structure flows downstream.
 _COUPLING_TABLE: Dict[Tuple[str, str], float] = {
-    ("host", "host"):       0.80,   # L_reachable → L_smb (Paper 4 §7)
-    ("host", "smb"):        0.80,
-    ("smb", "vuln"):        0.90,   # L_smb → L_confirmed_vuln (Paper 4 §7)
-    ("host", "vuln"):       0.85,
-    ("credential", "host"): 0.95,   # K_cred_ssh (Paper 4 §3.2)
+    # ── host / SMB / vuln chain (EternalBlue coupling) ─────────────────────
+    ("host", "host"):       0.80,   # reachability → lateral host coupling
+    ("host", "smb"):        0.80,   # host reachable → SMB visible (§7)
+    ("smb", "vuln"):        0.90,   # SMB exposed → vuln confirmed (§7)
+    ("host", "vuln"):       0.85,   # host reachable → vuln context
+
+    # ── credential coupling (K_cred; §3.2) ─────────────────────────────────
+    ("credential", "host"): 0.95,   # cred → SSH auth: direct precondition
     ("credential", "ssh"):  0.95,
-    ("credential", "web"):  0.80,
-    ("web", "data"):        0.85,   # K_web_sqli_db (Paper 4 §3.2)
-    ("web", "cmdi"):        0.90,   # CMDI → shell coupling (Paper 4 §7)
-    ("cmdi", "shell"):      0.90,
+    ("credential", "web"):  0.80,   # cred → web auth: strong but not entailed
+
+    # ── web / CMDI / data chain (DVWA coupling) ─────────────────────────────
+    ("web", "data"):        0.85,   # SQLi → DB access (K_web_sqli_db; §3.2)
+    ("web", "cmdi"):        0.90,   # CMDI → OS command execution
+    ("cmdi", "shell"):      0.90,   # shell is the direct consequence of CMDI
+
+    # ── host ↔ data / container / lateral ───────────────────────────────────
     ("host", "data"):       0.70,
-    ("container", "host"):  0.85,   # container-to-host escape
-    ("host", "container"):  0.60,
-    ("host", "lateral"):    0.80,   # domain-to-lateral movement
-    ("lateral", "host"):    0.70,
-    ("data", "lateral"):    0.65,
-    ("web", "lateral"):     0.55,
-    ("host", "binary"):     0.60,
-    ("binary", "host"):     0.60,
+    ("container", "host"):  0.85,   # container escape → host access
+    ("host", "container"):  0.60,   # host presence → container discovery
+    ("host", "lateral"):    0.80,   # host foothold → lateral movement
+    ("lateral", "host"):    0.70,   # lateral pivot lands on new host
+    ("data", "lateral"):    0.65,   # exfil path → lateral data pivot
+    ("web", "lateral"):     0.55,   # weak: web vuln enables lateral in some chains
+
+    # ── binary / host ────────────────────────────────────────────────────────
+    ("host", "binary"):     0.60,   # binary analysis follows host access
+    ("binary", "host"):     0.60,   # binary vuln enables host escalation
 }
 
 # Decoherence criterion thresholds (Paper 4 Section 5)

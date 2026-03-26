@@ -38,10 +38,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from skg.core.paths import DISCOVERY_DIR, EVENTS_DIR, SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
+
 log = logging.getLogger("skg.gravity.cred_reuse")
 
 # Credential store location
-CRED_STORE_PATH = Path("/var/lib/skg/credentials.jsonl")
+CRED_STORE_PATH = SKG_STATE_DIR / "credentials.jsonl"
 
 # Service types that accept password credentials
 SSH_WICKETS = {"HO-01", "HO-02", "HO-03"}
@@ -63,6 +65,17 @@ _ENV_CRED_RE = re.compile(
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _config_file(name: str) -> Path:
+    candidates = [
+        SKG_CONFIG_DIR / name,
+        SKG_HOME / "config" / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 # ── Credential Store ────────────────────────────────────────────────────────
@@ -501,7 +514,7 @@ def run_reuse_sweep(
 
     # Refresh store from recent events
     extract_from_events(events_dir, store)
-    extract_from_targets_yaml(Path("/etc/skg/targets.yaml"), store)
+    extract_from_targets_yaml(_config_file("targets.yaml"), store)
 
     untested = store.untested_for(target_ip)
     if not untested:
@@ -615,7 +628,7 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
     try:
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-        from skg.forge.proposals import create_action
+        from skg.assistant.action_proposals import create_action_proposal
 
         if service_type == "ssh":
             wicket_hint = "HO-03"
@@ -632,7 +645,26 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
             )
             instrument = "http"
 
-        create_action(
+        command_hint = (
+            f"skg exploit cred-reuse --target {target_ip} "
+            f"--user {user} --service {service_type}"
+        )
+        create_action_proposal(
+            contract_name="credential_test_plan",
+            artifact_content={
+                "plan_type": "cred_reuse_v1",
+                "service_type": service_type,
+                "target_ip": target_ip,
+                "port": str(port),
+                "user": user,
+                "secret": secret,
+                "cred_type": cred_type,
+                "origin_ip": origin_ip,
+                "wicket_hint": wicket_hint,
+                "command_hint": command_hint,
+            },
+            filename_hint=f"cred_reuse_{service_type}_{target_ip.replace('.', '_')}_{port}.json",
+            out_dir=None,
             domain="cred_reuse",
             description=description,
             attack_surface=f"{target_ip}:{port}",
@@ -651,12 +683,11 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
                 "confidence":   0.75,
                 "dispatch": {
                     "kind":         "cred_reuse",
-                    "command_hint": (
-                        f"skg exploit cred-reuse --target {target_ip} "
-                        f"--user {user} --service {service_type}"
-                    ),
+                    "command_hint": command_hint,
                 },
             },
+            notes=["Credential reuse instrument plan generated for operator review."],
+            metadata={"source": "skg-gravity.cred_reuse._emit_cred_proposal"},
         )
     except Exception as exc:
         log.warning(f"[cred_reuse] proposal creation failed: {exc}")
@@ -716,15 +747,15 @@ def main() -> None:
 
     # extract
     ep = sub.add_parser("extract", help="extract credentials from event files")
-    ep.add_argument("--events-dir", default="/var/lib/skg/events")
-    ep.add_argument("--targets-yaml", default="/etc/skg/targets.yaml")
+    ep.add_argument("--events-dir", default=str(EVENTS_DIR))
+    ep.add_argument("--targets-yaml", default=str(_config_file("targets.yaml")))
 
     # sweep
     sp2 = sub.add_parser("sweep", help="test credentials against a target")
     sp2.add_argument("--target", required=True)
     sp2.add_argument("--surface", default=None, help="surface JSON file for target")
-    sp2.add_argument("--events-dir", default="/var/lib/skg/events")
-    sp2.add_argument("--out-dir", default="/var/lib/skg/discovery")
+    sp2.add_argument("--events-dir", default=str(EVENTS_DIR))
+    sp2.add_argument("--out-dir", default=str(DISCOVERY_DIR))
     sp2.add_argument("--authorized", action="store_true",
                      help="Run tests directly (authorized engagement)")
 

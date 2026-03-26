@@ -640,7 +640,7 @@ def main():
     try:
         if args.key:
             client.connect(args.host, port=args.port, username=args.user,
-                           key_filename=args.key, timeout=args.timeout)
+                           key_filename=str(Path(args.key).expanduser().resolve()), timeout=args.timeout)
             auth_type = "key"
         elif args.password:
             client.connect(args.host, port=args.port, username=args.user,
@@ -744,7 +744,7 @@ def main():
     try:
         if args.key:
             client.connect(args.host, port=args.port, username=args.user,
-                           key_filename=args.key, timeout=args.timeout)
+                           key_filename=str(Path(args.key).expanduser().resolve()), timeout=args.timeout)
             auth_type = "key"
         elif args.password:
             client.connect(args.host, port=args.port, username=args.user,

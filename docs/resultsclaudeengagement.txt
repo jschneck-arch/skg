@@ -1,0 +1,50 @@
+● Excellent engagement results. Here's the complete status:
+
+  ---
+  Engagement Complete: 192.168.254.5 (archbox-self / bWAPP)
+
+  WB Wicket Results (24 WB tracked)
+
+  ┌───────────┬───────┬─────────────────────────────────────────────────────────────┐
+  │  Status   │ Count │                         Key Wickets                         │
+  ├───────────┼───────┼─────────────────────────────────────────────────────────────┤
+  │ ✓         │ 15    │ WB-01 through WB-24 (see below)                             │
+  │ REALIZED  │       │                                                             │
+  ├───────────┼───────┼─────────────────────────────────────────────────────────────┤
+  │ ✗ BLOCKED │ 3     │ WB-03 (CSRF blocked), WB-04 (reflected param), WB-18        │
+  │           │       │ (HTTPS-only)                                                │
+  ├───────────┼───────┼─────────────────────────────────────────────────────────────┤
+  │ ? UNKNOWN │ 6     │ WB-13, 15, 16, 20, 21, 23 — require further instrumentation │
+  └───────────┴───────┴─────────────────────────────────────────────────────────────┘
+
+  Key WB realizations:
+  - WB-14 (CMDI): Full RCE confirmed — uid=33(www-data) via /commandi.php
+  - WB-10 (Blind CMDI): 3037ms vs 29ms baseline → confirmed
+  - WB-09 (SQLi): Error-based injection on /sqli_3.php
+  - WB-08 (Weak creds): bee:bug authenticated, A.I.M.:bug same hash (SHA1)
+  - WB-11 (XSS): Reflected XSS confirmed by scanner
+  - WB-12 (File upload): No type checks — .php accepted, write blocked by fs perms
+  (root:root 755)
+  - WB-22 (SSTI): Template expression evaluated
+  - WB-24 (Info disclosure): Paths /admin/, /documents/, /passwords/ disclosed
+
+  Critical Post-Exploitation Findings
+
+  Container:  bwapp (172.28.0.30/24)
+  Shell:      www-data (uid=33) — ESTAB rev shell 172.28.0.1:7777 ← 172.28.0.30
+  MySQL:      root:'' (no auth) — DB dumped: users/blog/heroes/movies/visitors
+  Creds:      bee:bug, A.I.M.:bug (SHA1 6885858486f31043 cracked = "bug")
+  Escape:     NOT viable — no CAP_SYS_ADMIN, no Docker socket, no host fs mount
+  Bind mounts: /var/lib/mysql → host nvme0n1p2 (MySQL data dir only)
+
+  Field State
+
+  - 108 REALIZED (15 WB + 87 CVE + 6 custom), 3 BLOCKED, 19 UNKNOWN
+  - Energy E = 210.9 (residual from 6 unknown WB + decayed observations)
+  - Next gravity cycle would target WB-13 (path traversal), WB-15 (XXE), WB-23 (stored
+  SQLi)
+
+✻ Churned for 37m 58s · 2 shells still running
+
+────────────────────────────────────────────────────────────────────────────────────────
+❯ 

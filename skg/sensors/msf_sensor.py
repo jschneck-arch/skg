@@ -20,7 +20,7 @@ Wicket mapping:
   open port (portscan output)           → HO-01, HO-02
   SSH banner / version                  → HO-02
   valid credential                      → HO-03
-  active session                        → CE-01 (code exec achieved)
+  active session                        → HO-10 (initial access / code exec achieved)
   admin/root session                    → HO-14 (privesc realized)
   SMB signing disabled                  → AD-16
   Kerberos enumeration result           → AD-01
@@ -51,11 +51,35 @@ from pathlib import Path
 from typing import Any
 
 from skg.sensors import BaseSensor, envelope, precondition_payload, register
-from skg.core.paths import SKG_STATE_DIR
+from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
 
 log = logging.getLogger("skg.sensors.msf")
 
 MSF_STATE_FILE = SKG_STATE_DIR / "msf_sensor.state.json"
+
+
+def _targets_config_path() -> Path:
+    candidates = [
+        SKG_CONFIG_DIR / "targets.yaml",
+        SKG_HOME / "config" / "targets.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _workload_target_candidates(workload_id: str) -> set[str]:
+    text = str(workload_id or "").strip()
+    if not text:
+        return set()
+    candidates = {text}
+    if "::" in text:
+        candidates.add(text.split("::")[-1].strip())
+    ip_match = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
+    if ip_match:
+        candidates.add(ip_match.group(0))
+    return {candidate for candidate in candidates if candidate}
 
 # ── Output parsers ────────────────────────────────────────────────────────────
 
@@ -168,8 +192,8 @@ def _parse_console_output(output: str, workload_id: str,
         if m:
             sid, host = m.group(1), m.group(2)
             wid = f"msf::sess::{host}"
-            events.append(_ev("CE-01", "container_privileged",
-                               "container_escape", wid, True, 8,
+            events.append(_ev("HO-10", "elevated_privileges",
+                               "host", wid, True, 8,
                                f"MSF session {sid} on {host}",
                                f"msf://session/{sid}",
                                confidence=1.0))
@@ -400,9 +424,9 @@ class MsfSensor(BaseSensor):
                                sess.get("tunnel_peer", "unknown").split(":")[0])
                 wid  = f"msf::sess::{host}"
 
-                # Any session = code execution
-                events.append(_ev("CE-01", "container_privileged",
-                                   "container_escape", wid, True, 8,
+                # Any session = initial access / code execution on host
+                events.append(_ev("HO-10", "elevated_privileges",
+                                   "host", wid, True, 8,
                                    f"MSF session {sid} active on {host} "
                                    f"via {sess.get('via_exploit','?')}",
                                    f"msf://session/{sid}",
@@ -512,16 +536,41 @@ class MsfSensor(BaseSensor):
 
     def _resolve_targets(self, workload_ids: list[str]) -> list[str]:
         """Map workload_ids to IP addresses from targets.yaml."""
-        targets_file = Path("/etc/skg/targets.yaml")
+        requested = set()
+        for workload_id in workload_ids or []:
+            requested.update(_workload_target_candidates(workload_id))
+        if not requested:
+            return []
+
+        resolved: list[str] = []
+        for candidate in sorted(requested):
+            if "::" not in candidate:
+                resolved.append(candidate)
+
+        targets_file = _targets_config_path()
         if not targets_file.exists():
-            return []
+            return list(dict.fromkeys(resolved))
         try:
-            import re
-            content = targets_file.read_text()
-            hosts = re.findall(r'host:\s*([\d\.]+)', content)
-            return list(set(hosts))
+            import yaml
+
+            data = yaml.safe_load(targets_file.read_text()) or {}
+            targets = data if isinstance(data, list) else data.get("targets", [])
+            for target in targets:
+                host = str(target.get("host") or target.get("ip") or "").strip()
+                if not host:
+                    continue
+                target_keys = {
+                    host,
+                    str(target.get("ip") or "").strip(),
+                    str(target.get("host") or "").strip(),
+                    str(target.get("workload_id") or "").strip(),
+                }
+                target_url = str(target.get("url") or "")
+                if target_keys & requested or any(token and token in target_url for token in requested):
+                    resolved.append(host)
         except Exception:
-            return []
+            pass
+        return list(dict.fromkeys(resolved))
 
     def run(self) -> list[str]:
         if not self.password:

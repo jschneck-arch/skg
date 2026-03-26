@@ -1,0 +1,13 @@
+{
+  "table": "users",
+  "primary_key": "id",
+  "ttl_hours": 168,
+  "required_fields": ["id", "login", "password", "email"],
+  "bounds": {
+    "activated": {"enum": [0, 1]}
+  },
+  "foreign_keys": [],
+  "expected_count_per_batch": null,
+  "distribution_baselines": {},
+  "timestamp_columns": ["reset_time", "created_at", "updated_at"]
+}

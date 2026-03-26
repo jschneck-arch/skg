@@ -60,15 +60,24 @@ class WebSession:
 
     def _merge_cookies(self, resp):
         """Extract Set-Cookie headers and merge into session."""
-        raw = resp.raw_headers
+        # Prefer the structured list from resp.headers (handles multi-cookie responses)
+        sc = resp.headers.get("set-cookie", []) if hasattr(resp, "headers") else []
+        if isinstance(sc, str):
+            sc = [sc]
+        for cookie_hdr in sc:
+            nv = cookie_hdr.split(";")[0].strip()
+            if "=" in nv:
+                name, val = nv.split("=", 1)
+                self.cookies[name.strip()] = val.strip()
+        # Fallback: raw_headers string (for responses without structured headers)
+        raw = getattr(resp, "raw_headers", "") or ""
         for line in raw.splitlines():
             if line.lower().startswith("set-cookie:"):
                 cookie_part = line.split(":", 1)[1].strip()
-                # Get just name=value before any ;
                 nv = cookie_part.split(";")[0].strip()
                 if "=" in nv:
                     name, val = nv.split("=", 1)
-                    self.cookies[name.strip()] = val.strip()
+                    self.cookies.setdefault(name.strip(), val.strip())
 
     def _cookie_header(self) -> str:
         """Format cookies for Cookie header."""
@@ -178,27 +187,55 @@ class WebSession:
         if not pass_field:
             pass_field = "password"
 
-        # Step 2: POST login
+        # Step 2: POST login — include ALL non-password form fields so apps
+        # that require submit button values or select fields (e.g. bWAPP's
+        # security_level + form=submit) don't silently drop the login.
         login_data = {
             user_field: username,
             pass_field: password,
         }
+        parsed_form = parse_html(resp.text)
+        for form in parsed_form.forms:
+            for inp in form["inputs"]:
+                n = inp.get("name", "")
+                t = inp.get("type", "text")
+                v = inp.get("value", "") or inp.get("default", "")
+                if not n:
+                    continue
+                if n in (user_field, pass_field):
+                    continue
+                if t == "password":
+                    continue
+                # Include select defaults, hidden fields, submit buttons
+                login_data[n] = v
 
         # Add CSRF token
         if csrf_name and csrf_value:
             login_data[csrf_name] = csrf_value
 
-        # Add common submit button names
-        login_data["Login"] = "Login"
-
         resp = self.post(login_path, login_data)
         if resp.error:
             return False
 
-        # Step 3: Verify — check for auth success indicators
+        # Step 3: Verify — check for auth success indicators.
+        # Also check if we were redirected away from the login URL (e.g.
+        # bWAPP → portal.php, DVWA → index.php) which strongly implies success.
+        final_url = getattr(resp, "url", "") or ""
+        login_base = login_path.rstrip("/").split("?")[0]
+        redirected_away = (
+            final_url and
+            login_base and
+            login_base not in final_url
+        )
+        if redirected_away:
+            self.authenticated = True
+            self.auth_user = username
+            return True
+
         auth_indicators = [
             "logout", "sign out", "log out", "dashboard",
             "welcome", "my account", "profile", "home",
+            "portal", "logged in",
         ]
         auth_failure_indicators = [
             "login failed", "invalid", "incorrect", "wrong password",
@@ -242,14 +279,21 @@ class WebSession:
 # ── Authenticated crawling ───────────────────────────────────────────────
 
 def crawl_authenticated(session: WebSession, base_url: str,
-                        max_pages: int = 50) -> dict:
+                        max_pages: int = 50,
+                        seed_paths: list = None) -> dict:
     """
     Crawl the authenticated surface.
     Returns dict of discovered pages, forms, and parameters.
+    seed_paths: additional URL paths to probe directly (e.g. known vuln-app pages)
     """
     base = base_url.rstrip("/")
     visited = set()
+    # Start with root + any seeded paths that may not be reachable via links
     to_visit = [base + "/"]
+    for sp in (seed_paths or []):
+        candidate = base + sp if sp.startswith("/") else sp
+        if candidate not in to_visit:
+            to_visit.append(candidate)
     all_forms = []
     all_links = []
     all_params = set()
@@ -585,9 +629,18 @@ def auth_scan(target: str, out_path: str, attack_path_id: str,
         print("[!] Not authenticated, cannot proceed")
         return
 
-    # Crawl authenticated surface
+    # Crawl authenticated surface — seed with known vuln-app paths so we
+    # reach /commandi.php, /sqli.php etc. even if portal.php uses JS nav.
+    _seed_paths = [
+        "/commandi.php", "/commandi_blind.php",
+        "/sqli.php", "/sqli_blind.php", "/sqli_3.php",
+        "/xss_reflected.php", "/xss_stored.php", "/xss_dom.php",
+        "/unrestricted_file_upload.php", "/rlfi.php",
+        "/directory_traversal_1.php", "/xxe.php",
+        "/vulnerabilities/exec/", "/vulnerabilities/sqli/",
+    ]
     print("\n[SKG-AUTH] Crawling authenticated surface...")
-    crawl_result = crawl_authenticated(session, target)
+    crawl_result = crawl_authenticated(session, target, seed_paths=_seed_paths)
     print(f"  Pages:  {len(crawl_result['pages_visited'])}")
     print(f"  Forms:  {len(crawl_result['forms'])}")
     print(f"  Links:  {len(crawl_result['links'])}")

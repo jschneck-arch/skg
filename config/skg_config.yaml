@@ -113,11 +113,15 @@ resonance:
       next_observation: "Recommend the next bounded observation using folds, measured support, reinforced wickets, and timeline change without assigning new state."
       engagement_note: "Draft a concise operator engagement note that preserves uncertainty, current measured state, and immediate next steps."
       fold_cluster_summary: "Summarize clustered fold and growth pressure as one structural deficit, not a list of separate alerts."
+      what_if: "Evaluate the proposed action as a counterfactual over current SKG state. Predict only likely effects on uncertainty, folds, proposals, graph pressure, or observation priority, and never treat the action as already executed."
 
   web:
-    timeout_s: 15
+    timeout_s: 30
     collect_interval_s: 600
     max_probe_paths: 60
+    # Tor SOCKS5 proxy for .onion targets
+    tor_proxy: "socks5://127.0.0.1:9050"
+    tor_timeout_s: 60
 
   data:
     collect_interval_s: 300

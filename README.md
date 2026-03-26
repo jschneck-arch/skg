@@ -1,16 +1,16 @@
 # SKG — Spherical Knowledge Graph
 
-**Telemetry-driven observational substrate for autonomous red teaming.**
+**Domain-agnostic telemetry substrate. Observations are primary objects; structure, paths, and proposals are derived projections over a measured field.**
 
-SKG treats security state as a physical field. It measures attack surface through instruments, maintains a tri-state knowledge graph across all observations, and uses information-theoretic gravity to direct its own observation — automatically selecting the next instrument, target, and action based on entropy reduction potential across the field.
+SKG treats any observable state space as a physical field. Instruments collect telemetry from live targets; every observation is projected onto a tri-state knowledge graph (realized / blocked / unknown) with full provenance, confidence, and temporal tracking. Information-theoretic gravity directs the next observation — selecting the highest-entropy region of the field and the instrument with greatest entropy-reduction potential.
 
-The system is field-first: observations are primary objects. Attack paths, wickets, and proposals are derived projections over the measured field. The gravity mechanism follows the gradient of a unified field functional rather than counting unknown nodes.
+The system is field-first: no policy, no scripted attack tree, no hard-coded path. What the field measures depends entirely on the domain catalogs loaded. The EternalBlue / MS17-010 path realized in the empirical validation is one instance of that mechanism — not the purpose of the system.
 
 ---
 
 ## What it does
 
-1. **Measures** — domain-specific toolchains (web, host, SSH, nginx, AD/lateral, container escape, data, AI, binary, supply chain, IoT firmware) collect telemetry from live targets over SSH, HTTP, and local probes.
+1. **Measures** — domain-specific toolchains collect telemetry from live targets over SSH, HTTP, and local probes. The daemon currently runs APRS, host, data, AD/lateral, and container-escape domains directly; additional toolchains such as web, nginx, binary, AI, supply-chain, and IoT are available as auxiliary or forge-installed coverage.
 
 2. **Maintains state** — every observation is projected onto a tri-state knowledge graph (realized / blocked / unknown) with full provenance, confidence, and temporal tracking. No measurement is destroyed; contradictions are preserved.
 
@@ -87,6 +87,9 @@ docs/                formal papers (Work 3, Work 4) and architecture documents
 | `skg-iot_firmware-toolchain` | Firmware extraction and probe |
 | `skg-aprs-toolchain` | APRS/radio surface |
 
+Daemon-native today: `skg-aprs-toolchain`, `skg-host-toolchain`, `skg-data-toolchain`, `skg-ad-lateral-toolchain`, and `skg-container-escape-toolchain`.
+Other toolchains in the repo are auxiliary, forge-installed, or operator-invoked rather than uniformly registered in the daemon domain registry.
+
 ---
 
 ## Operator surface
@@ -103,30 +106,45 @@ Dark-theme operator UI served at `http://localhost:5055/ui`:
 
 ## Quickstart
 
+**Option A — replay pre-recorded events (no live target needed)**
+
 ```bash
-# Install (Arch Linux)
-./setup_arch.sh
-
-# Configure targets
-$EDITOR /etc/skg/targets.yaml
-
-# Run discovery
-python3 skg-discovery/discovery.py --out-dir /var/lib/skg/discovery
-
-# Start daemon
-python3 -m skg.core.daemon
-
-# CLI
-skg status
-skg gravity run --cycles 3 --authorized
-skg proposals list
-skg proposals accept <id>
-skg proposals trigger <id>   # runs the MSF RC script
-
-# Resonance / catalog drafting (requires Ollama or ANTHROPIC_API_KEY)
-skg resonance status
-skg resonance draft <domain> "<description>"
+pip install -e .           # or: ./setup_arch.sh on Arch Linux
+skg check                  # validate tools and configuration
+skg replay artifacts/cycle_evidence/   # replay EternalBlue validation run
 ```
+
+`skg replay` projects real recorded observation events through the kernel
+and shows the resulting field state — the same output you get from a live run.
+
+**Option B — lab targets via Docker**
+
+```bash
+docker-compose -f docker-compose.lab.yml up -d   # start Metasploitable 2 + DVWA
+skg check
+skg start                           # start daemon (UI at http://localhost:5055/ui)
+skg target add-subnet 172.28.0.0/24 # discover containers
+skg gravity --cycles 3              # autonomous field dynamics
+skg proposals list                  # view generated proposals
+skg proposals trigger <id>          # execute (requires msfconsole)
+```
+
+**Option C — your own lab**
+
+```bash
+./setup_arch.sh            # Arch Linux full bootstrap (root required)
+# or: pip install -e .     # minimal Python-only install
+
+$EDITOR /etc/skg/targets.yaml   # declare targets and credentials
+skg check                       # validate
+skg start                       # start daemon
+skg target add <ip>             # add a target to the field
+skg gravity --cycles 3          # run field dynamics
+skg proposals list
+skg proposals trigger <id>
+```
+
+See [`ENGAGEMENT.md`](ENGAGEMENT.md) for the complete engagement playbook.
 
 ---
 
@@ -139,6 +157,19 @@ skg resonance draft <domain> "<description>"
 | `/etc/skg/skg.env` | Secrets: `ANTHROPIC_API_KEY`, `NIST_NVD_API_KEY`, `BH_PASSWORD` |
 
 For LLM-backed catalog and adapter generation: set `ANTHROPIC_API_KEY` in `/etc/skg/skg.env` (uses Claude Sonnet 4.6) or run `ollama pull llama3.2:3b` for local inference.
+
+**Checking your setup:**
+```bash
+skg check    # prints a status table: Python, packages, tools, state dir, LLM backends, daemon
+```
+
+---
+
+## Engagement guide
+
+Full step-by-step engagement playbook: [`ENGAGEMENT.md`](ENGAGEMENT.md)
+
+Covers: target declaration, discovery, gravity cycles, SSH/web/nmap collection, exploit proposals, session handling, lateral movement surface, and the EternalBlue coupling-arc demonstration.
 
 ---
 

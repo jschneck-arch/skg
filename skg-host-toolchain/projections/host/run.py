@@ -49,11 +49,21 @@ def iso_now() -> str:
 
 
 def _target_for_events(events, workload_id: str | None = None) -> str:
-    if workload_id:
-        return workload_id.split("::")[-1]
+    # Always prefer target_ip from events — that's the key used in obs.targets
+    # and obs.support_mapping by event_to_observation(). workload_id may differ
+    # (e.g. "dc01-win2022" vs "192.168.122.143").
     for ev in reversed(events):
         payload = ev.get("payload", {})
-        target = payload.get("target_ip") or payload.get("workload_id")
+        target = payload.get("target_ip")
+        if target:
+            return target
+    # Fall back: workload_id arg (may be "ns::ip" — take the ip part)
+    if workload_id:
+        return workload_id.split("::")[-1]
+    # Last resort: workload_id field from events
+    for ev in reversed(events):
+        payload = ev.get("payload", {})
+        target = payload.get("workload_id", "").split("::")[-1]
         if target:
             return target
     return "unknown"

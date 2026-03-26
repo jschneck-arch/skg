@@ -1,0 +1,80 @@
+domains:
+  - name: aprs
+    daemon_native: true
+    dir: skg-aprs-toolchain
+    cli: skg.py
+    project_sub: [project, aprs]
+    interp_type: interp.attack_path.realizability
+    default_path: log4j_jndi_rce_v1
+    description: APRS and radio telemetry substrate
+
+  - name: container_escape
+    daemon_native: true
+    dir: skg-container-escape-toolchain
+    cli: skg_escape.py
+    project_sub: [project]
+    interp_type: interp.container_escape.realizability
+    default_path: container_escape_privileged_v1
+    description: Container escape and kubelet exposure
+
+  - name: ad_lateral
+    daemon_native: true
+    dir: skg-ad-lateral-toolchain
+    cli: skg_lateral.py
+    project_sub: [project]
+    interp_type: interp.ad_lateral.realizability
+    default_path: ad_kerberoast_v1
+    description: Active Directory and lateral movement
+
+  - name: host
+    daemon_native: true
+    dir: skg-host-toolchain
+    cli: skg_host.py
+    project_sub: [project]
+    interp_type: interp.host.realizability
+    default_path: host_ssh_initial_access_v1
+    description: Host reachability and SSH-based collection
+
+  - name: data
+    daemon_native: true
+    dir: skg-data-toolchain
+    cli: skg_data.py
+    project_sub: [project]
+    interp_type: interp.data.pipeline
+    default_path: data_completeness_failure_v1
+    description: Database and data pipeline telemetry
+
+  - name: web
+    daemon_native: false
+    dir: skg-web-toolchain
+    description: Auxiliary or forge-installed web coverage
+
+  - name: nginx
+    daemon_native: false
+    dir: skg-nginx-toolchain
+    description: Auxiliary nginx configuration and fingerprinting
+
+  - name: binary
+    daemon_native: false
+    dir: skg-binary-toolchain
+    description: Binary analysis and SUID coverage
+
+  - name: ai_target
+    daemon_native: false
+    dir: skg-ai-toolchain
+    description: AI/LLM service exposure coverage
+
+  - name: supply_chain
+    daemon_native: false
+    dir: skg-supply-chain-toolchain
+    description: Supply chain and SBOM coverage
+
+  - name: iot_firmware
+    daemon_native: false
+    dir: skg-iot_firmware-toolchain
+    description: IoT and firmware coverage
+
+  - name: metacognition
+    daemon_native: false
+    dir: skg-metacognition-toolchain
+    description: Metacognitive and cognitive probe coverage
