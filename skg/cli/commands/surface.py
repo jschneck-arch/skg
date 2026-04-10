@@ -6,10 +6,11 @@ from skg.cli.utils import (
     _choose_fold_rows, _rank_surface_targets, _print_what_matters_now,
     _choose_fold_summary, _load_folds_offline,
     _load_recall_summary, _iso_now, _interp_payload, _projection_rank,
-    _load_module_from_file,
+    _load_module_from_file, _surface_subject_rows, _subject_matches_filter, _fold_identity_key,
     DISCOVERY_DIR, SKG_HOME, SKG_STATE_DIR, INTERP_DIR, EVENTS_DIR,
 )
 import os
+from skg.identity import parse_workload_ref
 
 
 def _print_folds_offline():
@@ -22,9 +23,9 @@ def _print_folds_offline():
     for fold_file in sorted(folds_dir.glob("folds_*.json")):
         try:
             folds = json.loads(fold_file.read_text())
-            ip = fold_file.stem.replace("folds_", "").replace("_", ".")
             for fold in folds:
-                print(f"  {ip:18s} {fold.get('id','?')[:12]:12s} [{fold.get('fold_type','?'):12s}] "
+                label = _fold_identity_key(fold) or fold_file.stem.replace("folds_", "").replace("_", ".")
+                print(f"  {label:18s} {fold.get('id','?')[:12]:12s} [{fold.get('fold_type','?'):12s}] "
                       f"p={fold.get('discovery_probability',0):.2f}  "
                       f"{fold.get('detail','')[:70]}")
                 total += 1
@@ -36,26 +37,40 @@ def _print_folds_offline():
         print(f"\n  Total: {total} folds")
 
 
-def _resolve_fold_offline(target_ip: str, fold_id: str):
-    fold_file = DISCOVERY_DIR / "folds" / f"folds_{target_ip.replace('.', '_')}.json"
-    if not fold_file.exists():
+def _resolve_fold_offline(subject_key: str, fold_id: str):
+    folds_dir = DISCOVERY_DIR / "folds"
+    if not folds_dir.exists():
         return None
-    folds = json.loads(fold_file.read_text())
-    matches = [f for f in folds if f.get("id", "") == fold_id or f.get("id", "").startswith(fold_id)]
-    if len(matches) > 1 and fold_id not in {f.get("id", "") for f in matches}:
-        return {"error": f"ambiguous fold id prefix for {target_ip}"}
-    if not matches:
-        return {"error": f"fold {fold_id} not found for {target_ip}"}
-    target_full_id = matches[0].get("id", "")
-    remaining = [f for f in folds if f.get("id", "") != target_full_id]
-    fold_file.write_text(json.dumps(remaining, indent=2))
-    remaining_weight = round(sum(float(f.get("gravity_weight", 0.0)) for f in remaining), 4)
-    return {
-        "ok": True,
-        "resolved": target_full_id,
-        "remaining_folds": len(remaining),
-        "remaining_gravity_weight": remaining_weight,
-    }
+    for fold_file in sorted(folds_dir.glob("folds_*.json")):
+        folds = json.loads(fold_file.read_text())
+        matching_scope = [
+            f for f in folds
+            if _subject_matches_filter(
+                subject_key,
+                identity_key=_fold_identity_key(f),
+                workload_id=str(f.get("workload_id") or ""),
+                manifestation_key=str(f.get("location") or ""),
+                extra=[f.get("target_ip")],
+            )
+        ]
+        if not matching_scope:
+            continue
+        matches = [f for f in matching_scope if f.get("id", "") == fold_id or f.get("id", "").startswith(fold_id)]
+        if len(matches) > 1 and fold_id not in {f.get("id", "") for f in matches}:
+            return {"error": f"ambiguous fold id prefix for {subject_key}"}
+        if not matches:
+            return {"error": f"fold {fold_id} not found for {subject_key}"}
+        target_full_id = matches[0].get("id", "")
+        remaining = [f for f in folds if f.get("id", "") != target_full_id]
+        fold_file.write_text(json.dumps(remaining, indent=2))
+        remaining_weight = round(sum(float(f.get("gravity_weight", 0.0)) for f in remaining), 4)
+        return {
+            "ok": True,
+            "resolved": target_full_id,
+            "remaining_folds": len(remaining),
+            "remaining_gravity_weight": remaining_weight,
+        }
+    return None
 
 
 def cmd_surface(a):
@@ -76,45 +91,55 @@ def cmd_surface(a):
     except Exception:
         surface = json.loads(Path(surface_path).read_text())
 
+    try:
+        from skg.intel.surface import surface as build_measured_surface
+        measured_surface = build_measured_surface(interp_dir=INTERP_DIR)
+    except Exception:
+        measured_surface = {"workloads": [], "view_nodes": [], "summary": {}}
+    rows = _surface_subject_rows(measured_surface=measured_surface, target_surface=surface)
+
     print(f"\n{'='*70}")
     print(f"  SKG ATTACK SURFACE")
     print(f"{'='*70}\n")
 
-    for t in surface.get("targets", []):
-        ip = t["ip"]
-        ws = t.get("wicket_states", {})
-        domains = ", ".join(t.get("domains", []))
-        services = ", ".join(f"{s['port']}/{s['service']}" for s in t.get("services", []))
+    for row in rows:
+        label = row.get("identity_key") or row.get("ip") or "unknown"
+        domains = ", ".join(row.get("domains", []))
+        services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in row.get("services", []))
 
-        if not ws and not t.get("services"):
+        if not row.get("unknown_count") and not row.get("services") and not row.get("manifestations"):
             continue
 
-        display_kind = t.get("kind") or t.get("os", "?")
-        print(f"  {ip}  [{display_kind:8s}]  {services}")
+        display_kind = row.get("kind") or row.get("os", "?")
+        print(f"  {label}  [{display_kind:8s}]  {services}")
         print(f"  {'':18s}  domains: {domains}")
-
-        if ws:
-            realized = [k for k, v in ws.items() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized")]
-            blocked = [k for k, v in ws.items() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked")]
-            unknown = [k for k, v in ws.items() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown")]
-            print(f"  {'':18s}  realized: {len(realized)}  blocked: {len(blocked)}  unknown: {len(unknown)}")
-
-            if realized:
-                print(f"  {'':18s}  ✓ {', '.join(sorted(realized)[:10])}")
+        if row.get("manifestations"):
+            print(f"  {'':18s}  manifests: {', '.join(row.get('manifestations', [])[:6])}")
+        print(
+            f"  {'':18s}  realized: {int(row.get('realized_count', 0))}  "
+            f"blocked: {int(row.get('blocked_count', 0))}  unknown: {int(row.get('unknown_count', 0))}"
+        )
+        if row.get("realized_sample"):
+            print(f"  {'':18s}  ✓ {', '.join(sorted(row.get('realized_sample', []))[:10])}")
         print()
 
-    # Show projection results if we have interp files
-    interp_files = (
-        glob.glob(str(SKG_STATE_DIR / "interp" / "*_interp.ndjson")) +
-        glob.glob(str(SKG_STATE_DIR / "interp" / "*.json")) +
-        glob.glob(str(DISCOVERY_DIR / "*interp*.ndjson")) +
-        glob.glob("/tmp/*interp*.ndjson")
+    # Show projection results from the canonical interp directory only.
+    # DISCOVERY_DIR and /tmp are excluded: they may contain stale or unrelated
+    # artifacts that should not pollute the operator surface view (MED-17 fix).
+    interp_files = sorted(
+        set(
+            glob.glob(str(SKG_STATE_DIR / "interp" / "*_interp.ndjson")) +
+            glob.glob(str(SKG_STATE_DIR / "interp" / "*.json"))
+        ),
+        key=os.path.getmtime,
+        reverse=True,
     )
-    interp_files = sorted(set(interp_files), key=os.path.getmtime, reverse=True)
     if interp_files:
         print(f"  {'─'*66}")
         print(f"  Attack Path Projections:")
-        best_by_apid = {}
+        # Key by (workload_id, attack_path_id) so different targets with the same
+        # path ID each get their own row (MED-17 fix).
+        best_by_subject_apid: dict[tuple[str, str], tuple[int, dict]] = {}
         for ef in interp_files:
             try:
                 recs = []
@@ -128,19 +153,22 @@ def cmd_surface(a):
                     apid = payload.get("attack_path_id", "")
                     if not apid:
                         continue
-                    current = best_by_apid.get(apid)
+                    subject = payload.get("workload_id") or payload.get("target_ip") or ""
+                    key = (subject, apid)
                     rank = _projection_rank(payload)
+                    current = best_by_subject_apid.get(key)
                     if current is None or rank > current[0]:
-                        best_by_apid[apid] = (rank, payload)
+                        best_by_subject_apid[key] = (rank, payload)
             except Exception:
                 continue
-        for apid, (_, payload) in best_by_apid.items():
+        for (subject, apid), (_, payload) in best_by_subject_apid.items():
             cls = payload.get("classification", "?")
             score = payload.get("aprs", payload.get("lateral_score",
                     payload.get("escape_score", payload.get("host_score",
                     payload.get("web_score", payload.get("ai_score", 0))))))
             marker = "✓" if cls == "realized" else "~" if cls == "indeterminate" else "✗"
-            print(f"    {marker} {apid:45s} {cls:15s} {score:.0%}")
+            subject_label = f" [{subject}]" if subject else ""
+            print(f"    {marker} {apid:40s}{subject_label:20s} {cls:15s} {score:.0%}")
     print()
 
 
@@ -220,7 +248,7 @@ def cmd_web_view(a):
                         detail = payload.get("detail", "")
                         # Extract IP from workload_id or filename
                         wid = payload.get("workload_id", "")
-                        ip = wid.split("::")[-1].split(":")[0] if "::" in wid else ""
+                        ip = parse_workload_ref(wid).get("identity_key", "")
                         if ip and detail:
                             cred_key = detail.split(":")[-1].strip() if ":" in detail else detail
                             cred_map.setdefault(cred_key, []).append(ip)
@@ -292,7 +320,7 @@ def cmd_folds(a):
     Each fold adds to E. Gravity pulls harder toward targets with high fold
     weight. Resolve folds to reduce E and improve field coverage.
     """
-    subcmd = getattr(a, "folds_cmd", "list")
+    subcmd = getattr(a, "folds_cmd", None) or "list"
 
     if subcmd == "list":
         result = _api("GET", "/folds")
@@ -309,10 +337,10 @@ def cmd_folds(a):
             print(f"    {ft:14s}: {count}")
         print()
         if folds:
-            print(f"  {'Target':18s} {'ID':12s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
+            print(f"  {'Node':18s} {'ID':12s} {'Type':12s} {'p':>5s} {'Φ':>5s}  Detail")
             print(f"  {'-'*18} {'-'*12} {'-'*12} {'-'*5} {'-'*5}  {'-'*50}")
             for fold in folds[:20]:
-                print(f"  {fold.get('target_ip','?'):18s} "
+                print(f"  {(_fold_identity_key(fold) or fold.get('target_ip','?')):18s} "
                       f"{fold.get('id','?')[:12]:12s} "
                       f"{fold.get('fold_type','?'):12s} "
                       f"{fold.get('discovery_probability',0):5.2f} "
@@ -333,16 +361,16 @@ def cmd_folds(a):
         print(f"  Action: {result.get('action','')}")
         print()
         for fold in folds:
-            print(f"  {fold.get('target_ip','?'):18s}  {fold.get('id','?')[:12]:12s} Φ={fold.get('gravity_weight',0):.2f}")
+            print(f"  {(_fold_identity_key(fold) or fold.get('target_ip','?')):18s}  {fold.get('id','?')[:12]:12s} Φ={fold.get('gravity_weight',0):.2f}")
             print(f"    {fold.get('detail','')[:100]}")
             print()
 
     elif subcmd == "resolve":
         if not a.fold_id or not a.target:
-            print("  Usage: skg folds resolve <fold_id> --target <ip>")
+            print("  Usage: skg folds resolve <fold_id> --target <identity>")
             return
         result = _api("POST", f"/folds/resolve/{a.fold_id}",
-                      params={"target_ip": a.target})
+                      params={"identity_key": a.target, "target_ip": a.target})
         if result and result.get("ok"):
             print(f"  Fold {a.fold_id} resolved.")
             print(f"  Remaining folds: {result.get('remaining_folds', '?')}")

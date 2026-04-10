@@ -1,0 +1,15 @@
+name: host
+status: active
+runtime: domain-pack
+version: 1.0.0
+compatibility:
+  protocol: "1.0"
+components:
+  adapters: adapters
+  projectors: projectors
+  policies: policies
+contracts:
+  catalogs: ontology/catalogs
+metadata:
+  description: "Canonical host domain pack (Phase 6A)"
+  default_path: host_ssh_initial_access_v1

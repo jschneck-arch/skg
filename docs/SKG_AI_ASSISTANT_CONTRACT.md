@@ -4,6 +4,8 @@ Purpose: define the role of AI in SKG without allowing it to become the substrat
 
 AI is an instrument and operator assistant.
 AI is not the source of measured state.
+AI is a cross-cutting SKG layer, not a gravity-only feature.
+SKG directs AI work and provides the context AI is allowed to see.
 
 ## AI Is Allowed To
 
@@ -15,6 +17,9 @@ AI is not the source of measured state.
 - compare current state to remembered state
 - assist with reporting
 - help identify candidate next measurements
+- synthesize mutation artifacts such as `.rc` scripts, UI patches, code changes, and toolchain scaffolds
+- return reconciliation claims when remembered structure and fresh observation appear to diverge
+- relay raw evidence only when the artifact remains unaltered and chain of custody is preserved
 
 ## AI Is Not Allowed To
 
@@ -24,6 +29,9 @@ AI is not the source of measured state.
 - silently transform unsupported inference into measured state
 - replace instrument evidence
 - rewrite the append-only observational record
+- decide final action for SKG
+- narrow the admissible instrument set to a single forced choice
+- write live state without observation passing through the normal support and collapse path
 
 ## AI Inputs
 
@@ -37,17 +45,51 @@ AI should work from SKG objects, not free-floating narrative whenever possible:
 - recall summaries
 - operator constraints
 
+SKG may query AI from any layer:
+
+- substrate interpretation
+- gravity and field selection
+- forge and proposal drafting
+- state reconciliation
+- mutation and toolchain synthesis
+- operator UI and reporting
+
 ## AI Outputs
 
 AI outputs should be treated as one of:
 
-- explanation
-- draft
-- suggestion
-- orchestration hint
-- human-readable rendering
+- `derived_advice`
+- `mutation_artifact`
+- `reconciliation_claim`
+- `observed_evidence` only when custody is complete
 
 They are not canonical state.
+
+## Observation Boundary
+
+Only `observed_evidence` may enter the observation plane.
+
+If AI relays evidence into SKG, the record must carry a complete custody chain:
+
+- artifact path or artifact reference
+- artifact hash
+- source command, pointer, or URI
+- collection timestamp
+
+If that custody chain is incomplete, the output remains advisory and must not be admitted as observation.
+
+AI summaries, hypotheses, explanations, or reconciliation claims are never observational truth by themselves.
+
+## Authority Rule
+
+The authority chain is:
+
+- SKG asks the question
+- AI returns structured help
+- SKG decides what to do
+- observation updates state
+
+Pearls and AI memory work the same way: they shape attention and priority, but they do not dictate present-tense state.
 
 ## Operator Relationship
 
@@ -65,6 +107,7 @@ It cannot replace:
 - the operator’s judgment
 - the substrate’s measurement boundary
 - the instrument layer
+- SKG’s decision authority
 
 ## Red-Team Use
 
@@ -88,11 +131,3 @@ If an AI claim cannot be traced back to:
 - or an operator instruction
 
 then it does not belong in SKG state.
-
-## Immediate Next Step
-
-The next step after this contract is to define:
-
-- which operator actions the AI may trigger directly
-- which require explicit operator approval
-- how AI should read and present pearl/fold/proposal memory during an engagement

@@ -1,0 +1,64 @@
+attack_paths:
+  ad_privilege_relationship_mapping_v1:
+    description: Directory privilege relationships are present and mappable from inventory snapshots.
+    required_wickets:
+      - AD-PR-01
+      - AD-PR-02
+    references:
+      - https://attack.mitre.org/techniques/T1069/002/
+  ad_human_admin_assignment_v1:
+    description: Enabled human principals are assigned directly to privileged AD groups.
+    required_wickets:
+      - AD-PR-01
+      - AD-PR-03
+    references:
+      - https://attack.mitre.org/techniques/T1098/
+  ad_password_hint_exposure_v1:
+    description: Credential-hint text appears in AD account descriptions, including enabled non-machine accounts.
+    required_wickets:
+      - AD-CH-01
+      - AD-CH-02
+    references:
+      - https://attack.mitre.org/techniques/T1552/004/
+  ad_weak_password_policy_v1:
+    description: Observed AD domain password policy allows minimum length below the configured threshold.
+    required_wickets:
+      - AD-WP-01
+      - AD-WP-02
+    references:
+      - https://attack.mitre.org/techniques/T1110/
+  ad_asrep_exposure_baseline_v1:
+    description: Observed AD user inventory indicates whether enabled users with pre-authentication disabled are present.
+    required_wickets:
+      - AD-AS-01
+      - AD-AS-02
+    references:
+      - https://attack.mitre.org/techniques/T1558/004/
+  ad_kerberoast_exposure_baseline_v1:
+    description: Observed AD user inventory indicates whether enabled SPN-linked accounts exist and permit RC4-oriented Kerberoast baseline exposure.
+    required_wickets:
+      - AD-KR-01
+      - AD-KR-02
+    references:
+      - https://attack.mitre.org/techniques/T1558/003/
+  ad_laps_coverage_baseline_v1:
+    description: Observed AD computer inventory indicates whether enabled non-DC hosts lack LAPS baseline coverage.
+    required_wickets:
+      - AD-LP-01
+      - AD-LP-02
+    references:
+      - https://attack.mitre.org/techniques/T1078/
+  ad_delegation_posture_baseline_v1:
+    description: Observed canonical delegation sidecar indicates whether AD-06 unconstrained non-DC delegation posture and AD-08 protocol-transition constrained delegation posture are present.
+    required_wickets:
+      - AD-06
+      - AD-08
+    references:
+      - https://attack.mitre.org/techniques/T1558/
+  ad_privileged_session_tiering_baseline_v1:
+    description: Observed canonical AD-22 sidecar indicates whether privileged sessions occur on non-tier-0 systems.
+    required_wickets:
+      - AD-TI-01
+      - AD-22
+    references:
+      - https://attack.mitre.org/techniques/T1078/

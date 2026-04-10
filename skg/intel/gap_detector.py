@@ -35,10 +35,11 @@ import json
 import logging
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import EVENTS_DIR, SKG_STATE_DIR
+from skg_core.config.paths import EVENTS_DIR, SKG_STATE_DIR
 
 log = logging.getLogger("skg.intel.gaps")
 
@@ -387,18 +388,69 @@ def _collection_hints(service: str) -> list[str]:
     return hints.get(service, defaults)
 
 
+def _normalize_known_gaps(data: Any) -> dict[str, dict]:
+    if not isinstance(data, dict):
+        return {}
+
+    normalized: dict[str, dict] = {}
+    now = datetime.now(timezone.utc).isoformat()
+
+    for service, raw_entry in data.items():
+        if not isinstance(raw_entry, dict):
+            continue
+
+        entry = dict(raw_entry)
+        targets: dict[str, dict] = {}
+
+        raw_targets = entry.get("targets")
+        if isinstance(raw_targets, dict):
+            for wid, target_entry in raw_targets.items():
+                wid_text = str(wid or "").strip()
+                if not wid_text:
+                    continue
+                target_dict = dict(target_entry) if isinstance(target_entry, dict) else {}
+                target_dict.setdefault("first_seen", entry.get("first_seen") or now)
+                target_dict["last_seen"] = target_dict.get("last_seen") or target_dict.get("first_seen") or now
+                targets[wid_text] = target_dict
+
+        for wid in entry.get("hosts", []) or []:
+            wid_text = str(wid or "").strip()
+            if not wid_text:
+                continue
+            targets.setdefault(
+                wid_text,
+                {
+                    "first_seen": entry.get("first_seen") or now,
+                    "last_seen": entry.get("last_seen") or entry.get("first_seen") or now,
+                },
+            )
+
+        normalized[service] = {
+            "first_seen": entry.get("first_seen") or now,
+            "last_seen": entry.get("last_seen") or entry.get("first_seen") or now,
+            "cooldown_until": entry.get("cooldown_until"),
+            "hosts": sorted(targets),
+            "targets": targets,
+        }
+
+    return normalized
+
+
 def load_known_gaps() -> dict:
     if GAP_STATE_FILE.exists():
         try:
-            return json.loads(GAP_STATE_FILE.read_text())
-        except Exception:
-            pass
+            return _normalize_known_gaps(json.loads(GAP_STATE_FILE.read_text()))
+        except Exception as exc:
+            log.warning(f"[gaps] failed to parse state file {GAP_STATE_FILE}: {exc}")
     return {}
 
 
 def save_known_gaps(gaps: dict):
     GAP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    GAP_STATE_FILE.write_text(json.dumps(gaps, indent=2))
+    normalized = _normalize_known_gaps(gaps)
+    tmp_path = GAP_STATE_FILE.with_suffix(GAP_STATE_FILE.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(normalized, indent=2))
+    tmp_path.replace(GAP_STATE_FILE)
 
 
 def detect_new_gaps(events_dir: Path | None = None) -> list[dict]:
@@ -419,15 +471,37 @@ def detect_new_gaps(events_dir: Path | None = None) -> list[dict]:
     new_gaps = []
     for gap in all_gaps:
         svc = gap["service"]
-        if svc not in known:
-            new_gaps.append(gap)
-            known[svc] = {
-                "first_seen": __import__("datetime").datetime.now(
-                    __import__("datetime").timezone.utc).isoformat(),
-                "hosts": gap["hosts"],
-            }
-        else:
-            # Update host list
-            known[svc]["hosts"] = list(set(known[svc].get("hosts",[]) + gap["hosts"]))
+        entry = known.setdefault(
+            svc,
+            {
+                "first_seen": datetime.now(timezone.utc).isoformat(),
+                "last_seen": datetime.now(timezone.utc).isoformat(),
+                "cooldown_until": None,
+                "hosts": [],
+                "targets": {},
+            },
+        )
+        targets = entry.setdefault("targets", {})
+        gap_hosts = [str(host) for host in gap.get("hosts", []) if str(host).strip()]
+        new_hosts = []
+
+        for host in gap_hosts:
+            if host not in targets:
+                new_hosts.append(host)
+                targets[host] = {
+                    "first_seen": datetime.now(timezone.utc).isoformat(),
+                    "last_seen": datetime.now(timezone.utc).isoformat(),
+                }
+            else:
+                targets[host]["last_seen"] = datetime.now(timezone.utc).isoformat()
+
+        if gap_hosts:
+            entry["last_seen"] = datetime.now(timezone.utc).isoformat()
+            entry["hosts"] = sorted(targets)
+
+        if new_hosts:
+            new_gap = dict(gap)
+            new_gap["hosts"] = new_hosts
+            new_gaps.append(new_gap)
     save_known_gaps(known)
     return new_gaps

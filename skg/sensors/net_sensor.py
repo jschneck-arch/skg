@@ -44,8 +44,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.sensors import BaseSensor, envelope, precondition_payload, register
-from skg.core.paths import SKG_STATE_DIR
+from skg.sensors import BaseSensor, register
+from skg_core.config.paths import SKG_STATE_DIR
+try:
+    from skg_protocol.events import (
+        build_event_envelope as envelope,
+        build_precondition_payload as precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope, precondition_payload
 
 log = logging.getLogger("skg.sensors.net")
 

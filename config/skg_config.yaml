@@ -53,6 +53,13 @@ sensors:
     # neo4j_password: "${NEO4J_PASSWORD}"
 
 resonance:
+  embedding:
+    # Local-only mode: avoid sentence-transformers remote model fetches.
+    # Uses the built-in TF-IDF embedder for resonance memory search.
+    offline: true
+    # Optional: also force TF-IDF even if offline is false.
+    prefer_tfidf: true
+
   ollama:
     url: "http://localhost:11434"
     model: "tinyllama:latest"
@@ -100,6 +107,82 @@ resonance:
       #   max_new_tokens: 512
       #   temperature: 0.1
       #   timeout_s: 120
+
+  # ── Layered local assistant (router + memory + tiered models) ─────────────
+  # fast_model: planner + general low-latency prompts
+  # code_model: code-heavy prompts
+  # deep_model: longer analysis prompts
+  orchestrator:
+    fast_model: "hermes3:3b"
+    code_model: "qwen2.5-coder:1.5b"
+    deep_model: "gemma4:e2b-it-q4_K_M"
+    fast_fallback_models:
+      - "gemma3:1b"
+    code_fallback_models:
+      - "gemma3:1b"
+    deep_fallback_models:
+      - "gpt-oss:20b"
+      - "gemma3:1b"
+    fast_num_predict: 192
+    code_num_predict: 256
+    deep_num_predict: 512
+    rag_k_each: 3
+    max_context_lines: 12
+    deep_char_threshold: 320
+    deep_token_threshold: 60
+
+  # ── Layered MCP threading (SKG as source-of-truth) ───────────────────────
+  # Runs memory + instrument + capability threads in parallel, then reasons.
+  mcp_threading:
+    enabled: true
+    k_each: 3
+    adapter_k: 8
+    max_workers: 4
+    capability_scan: true
+    max_help_cmds: 6
+    max_man_cmds: 4
+    max_context_lines: 12
+    selector_top_n: 3
+    selector_min_score: 0.05
+    advisory_only: true
+
+  # ── SphereGPU v0 (virtual local accelerator) ───────────────────────────────
+  # Spherical scheduler over local models; does not require cloud APIs.
+  sphere_gpu:
+    enabled: true
+    virtual_cores: 4
+    shell_inner_max: 2
+    shell_mid_max: 1
+    shell_outer_max: 1
+    cache_size: 96
+    default_k_each: 3
+    mid_r_threshold: 0.34
+    outer_r_threshold: 0.67
+    uncertainty_escalation_phi: 0.72
+    persist_state: true
+    # state_path: "/var/lib/skg/resonance/sphere_gpu_state.json"
+    persist_response_chars: 8000
+    enable_resource_guard: true
+    load_guard_warn_ratio: 1.2
+    load_guard_hard_ratio: 1.8
+    mem_guard_warn_ratio: 0.12
+    mem_guard_hard_ratio: 0.08
+    swap_guard_warn_ratio: 0.30
+    swap_guard_hard_ratio: 0.55
+    enable_auto_local_corpus: true
+    auto_local_index_interval_s: 1800
+    auto_local_max_help_cmds: 12
+    auto_local_max_man_cmds: 8
+    auto_local_max_code_files: 220
+    auto_local_chunk_chars: 900
+    auto_local_max_pearl_records: 500
+    auto_local_include_pearls: true
+    enable_micro_local_corpus: true
+    micro_local_ttl_s: 900
+    micro_local_max_help_cmds: 2
+    micro_local_max_man_cmds: 2
+    micro_local_max_code_files: 3
+    micro_local_chunk_chars: 700
 
   assistant:
     enabled: true

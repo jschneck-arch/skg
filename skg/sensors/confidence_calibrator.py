@@ -30,9 +30,9 @@ The fix:
   The calibrated confidence is then:
     calibrated_conf = hand_conf * precision_factor
 
-  This is written to /var/lib/skg/calibration.json and loaded on
-  daemon startup. The SensorLoop uses it to adjust emitted confidence
-  values before they enter the evidence pipeline.
+  This is written under SKG_STATE_DIR as calibration.json and loaded by
+  the runtime confidence context before observations enter the evidence
+  pipeline.
 
 Why this matters for the paper:
   The paper claims SKG avoids false certainty. If the confidence values
@@ -58,14 +58,16 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from skg_core.config.paths import SKG_STATE_DIR
+
 log = logging.getLogger("skg.sensors.calibrator")
 
-CALIBRATION_PATH = Path("/var/lib/skg/calibration.json")
+CALIBRATION_PATH = SKG_STATE_DIR / "calibration.json"
 
 # Minimum observations before calibration is trusted
 MIN_OBSERVATIONS = 5
@@ -249,7 +251,8 @@ class ConfidenceCalibrator:
     def fit_from_engagement_db(self, db_path: Path) -> dict:
         """
         Compute calibration from a built engagement SQLite database.
-        Uses the transitions table.
+        Uses observations.source_id joined to transition outcomes by
+        (workload_id, wicket_id, run_id).
         """
         import sqlite3
         if not db_path.exists():
@@ -258,7 +261,12 @@ class ConfidenceCalibrator:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
 
-        # Get all surface_expansion and evidence_decay transitions
+        obs_rows = conn.execute("""
+            SELECT workload_id, wicket_id, run_id, source_id, confidence, ts
+            FROM observations
+            WHERE source_id != ''
+            ORDER BY workload_id, wicket_id, run_id, ts
+        """).fetchall()
         rows = conn.execute("""
             SELECT workload_id, wicket_id, meaning, signal_weight,
                    to_state, run_id, ts
@@ -268,6 +276,18 @@ class ConfidenceCalibrator:
         """).fetchall()
         conn.close()
 
+        obs_index: dict[tuple[str, str, str], dict[str, float | str]] = {}
+        for row in obs_rows:
+            key = (row["workload_id"], row["wicket_id"], row["run_id"])
+            confidence = float(row["confidence"] or 0.0)
+            existing = obs_index.get(key)
+            if existing is None or confidence >= float(existing.get("confidence", 0.0)):
+                obs_index[key] = {
+                    "source_id": row["source_id"] or "unknown",
+                    "confidence": confidence,
+                    "ts": row["ts"] or "",
+                }
+
         chains: dict[str, list] = defaultdict(list)
         for row in rows:
             chains[f"{row['workload_id']}::{row['wicket_id']}"].append(dict(row))
@@ -276,10 +296,14 @@ class ConfidenceCalibrator:
             for i, t in enumerate(chain):
                 if t["meaning"] != "surface_expansion":
                     continue
-                source_id = "db_engagment"  # no source_id in transitions table
+                obs = obs_index.get(
+                    (t["workload_id"], t["wicket_id"], t.get("run_id", "")),
+                    {},
+                )
+                source_id = str(obs.get("source_id") or "unknown")
                 stats = self._get_or_create(source_id, "unknown→realized")
                 stats.count   += 1
-                stats.conf_sum += float(t.get("signal_weight", 0.5))
+                stats.conf_sum += float(obs.get("confidence", 0.5))
                 stats.mean_conf = stats.conf_sum / stats.count
                 look_ahead = chain[i+1 : i+1+REVERSAL_WINDOW_STEPS]
                 if any(lt["meaning"] == "evidence_decay" for lt in look_ahead):
@@ -324,7 +348,9 @@ class ConfidenceCalibrator:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "sensors":      self.summary(),
         }
-        target.write_text(json.dumps(data, indent=2))
+        tmp_target = target.with_suffix(target.suffix + ".tmp")
+        tmp_target.write_text(json.dumps(data, indent=2))
+        tmp_target.replace(target)
         log.info(f"[calibrator] Saved {len(self._stats)} calibration records "
                  f"→ {target}")
 

@@ -10,9 +10,10 @@ from skg.cli.utils import (
     _active_identity_properties, _print_substrate_self_audit,
     _build_substrate_self_audit, _load_folds_offline,
     _load_module_from_file, _choose_fold_rows, _iso_now,
+    _surface_subject_rows, _subject_matches_filter, _fold_identity_key,
     DISCOVERY_DIR, SKG_HOME, SKG_STATE_DIR, EVENTS_DIR, INTERP_DIR,
 )
-from skg.core.paths import CVE_DIR
+from skg_services.gravity.path_policy import CVE_DIR
 
 
 def cmd_report(a):
@@ -32,27 +33,45 @@ def cmd_report(a):
     except Exception:
         surface = json.loads(Path(surface_path).read_text())
 
+    try:
+        from skg.intel.surface import surface as build_measured_surface
+        measured_surface = build_measured_surface(interp_dir=INTERP_DIR)
+    except Exception:
+        measured_surface = {"workloads": [], "view_nodes": [], "summary": {}}
+
     target_filter = getattr(a, "target", None)
     at_ts = _parse_report_timestamp(getattr(a, "at", None))
     diff_ts = _parse_report_timestamp(getattr(a, "diff_against", None))
-    targets = surface.get("targets", [])
+    targets = _surface_subject_rows(measured_surface=measured_surface, target_surface=surface)
     if target_filter:
         targets = [
             t for t in targets
-            if t.get("ip") == target_filter or t.get("hostname") == target_filter
+            if _subject_matches_filter(
+                target_filter,
+                identity_key=t.get("identity_key", ""),
+                target=t,
+                extra=t.get("manifestations", []),
+            )
         ]
         if not targets:
-            print(f"  Target not found in surface: {target_filter}")
+            print(f"  Node not found in surface: {target_filter}")
             return
 
-    fold_result = _api("GET", "/folds") or {"folds": []}
+    _folds_raw = _api("GET", "/folds")
+    if _folds_raw is None:
+        print("  Warning: SKG daemon not running — fold/proposal data unavailable (offline mode)")
+    fold_result = _folds_raw or {"folds": []}
     all_folds = _choose_fold_rows(fold_result)
     if target_filter:
         filtered = []
         for f in all_folds:
-            target_ip = f.get("target_ip")
-            location = str(f.get("location", ""))
-            if target_ip == target_filter or target_filter in location:
+            if _subject_matches_filter(
+                target_filter,
+                identity_key=_fold_identity_key(f),
+                workload_id=str(f.get("workload_id") or ""),
+                manifestation_key=str(f.get("location") or ""),
+                extra=[f.get("target_ip"), (f.get("why") or {}).get("workload_id")],
+            ):
                 filtered.append(f)
         all_folds = filtered
 
@@ -62,7 +81,13 @@ def cmd_report(a):
     if target_filter:
         proposals = [
             p for p in proposals
-            if target_filter in json.dumps(p)
+            if _subject_matches_filter(
+                target_filter,
+                identity_key=str(p.get("identity_key") or ""),
+                target={"host": (p.get("hosts") or [None])[0]},
+                workload_id=str((p.get("action") or {}).get("workload_id") or ""),
+                extra=list(p.get("hosts") or []),
+            )
         ]
 
     pearls = []
@@ -75,7 +100,16 @@ def cmd_report(a):
                 pearl = json.loads(line)
             except Exception:
                 continue
-            if target_filter and pearl.get("energy_snapshot", {}).get("target_ip") != target_filter:
+            if target_filter and not _subject_matches_filter(
+                target_filter,
+                identity_key=str((pearl.get("target_snapshot") or {}).get("identity_key") or ""),
+                target=pearl.get("target_snapshot") or {},
+                workload_id=str(pearl.get("workload_id") or ""),
+                extra=[
+                    pearl.get("target_ip"),
+                    (pearl.get("energy_snapshot", {}) or {}).get("target_ip"),
+                ],
+            ):
                 continue
             pearls.append(pearl)
 
@@ -131,39 +165,57 @@ def cmd_report(a):
                 events_dir=SKG_STATE_DIR / "events",
                 cve_dir=CVE_DIR,
             )
-            kernel_states_by_target[target_filter] = kernel_engine.states_with_detail(target_filter)
+            scoped_identity = targets[0].get("identity_key", target_filter) if targets else target_filter
+            kernel_states_by_target[scoped_identity] = kernel_engine.states_with_detail(scoped_identity)
         except Exception:
             kernel_states_by_target = {}
 
     for t in targets:
-        ws = kernel_states_by_target.get(t.get("ip")) or t.get("wicket_states", {})
+        ws = kernel_states_by_target.get(t.get("identity_key")) or {}
         realized = [k for k, v in ws.items() if v == "realized" or (isinstance(v, dict) and v.get("status") == "realized")]
         blocked = [k for k, v in ws.items() if v == "blocked" or (isinstance(v, dict) and v.get("status") == "blocked")]
         unknown = [k for k, v in ws.items() if v == "unknown" or (isinstance(v, dict) and v.get("status") == "unknown")]
-        unresolved_rows = [v for v in ws.values() if isinstance(v, dict) and v.get("status") == "unknown"]
-        compatibility_values = [float(v.get("compatibility_score", 0.0) or 0.0) for v in unresolved_rows]
-        decoherence_values = [float(v.get("decoherence", 0.0) or 0.0) for v in unresolved_rows]
-        unresolved_reasons: dict[str, int] = {}
-        for row in unresolved_rows:
-            reason = str(row.get("unresolved_reason") or "unmeasured")
-            unresolved_reasons[reason] = unresolved_reasons.get(reason, 0) + 1
+        if ws:
+            unresolved_rows = [v for v in ws.values() if isinstance(v, dict) and v.get("status") == "unknown"]
+            compatibility_values = [float(v.get("compatibility_score", 0.0) or 0.0) for v in unresolved_rows]
+            decoherence_values = [float(v.get("decoherence", 0.0) or 0.0) for v in unresolved_rows]
+            unresolved_reasons: dict[str, int] = {}
+            for row in unresolved_rows:
+                reason = str(row.get("unresolved_reason") or "unmeasured")
+                unresolved_reasons[reason] = unresolved_reasons.get(reason, 0) + 1
+            realized_count = len(realized)
+            blocked_count = len(blocked)
+            unknown_count = len(unknown)
+            compatibility_score_mean = round(sum(compatibility_values) / len(compatibility_values), 3) if compatibility_values else 0.0
+            decoherence_total = round(sum(decoherence_values), 3)
+            realized_sample = sorted(realized)[:15]
+        else:
+            unresolved_reasons = dict(t.get("unresolved_reasons", {}) or {})
+            realized_count = int(t.get("realized_count", 0) or 0)
+            blocked_count = int(t.get("blocked_count", 0) or 0)
+            unknown_count = int(t.get("unknown_count", 0) or 0)
+            compatibility_score_mean = float(t.get("compatibility_score_mean", 0.0) or 0.0)
+            decoherence_total = float(t.get("decoherence_total", 0.0) or 0.0)
+            realized_sample = list(t.get("realized_sample", []) or [])[:15]
         report["targets"].append({
+            "identity_key": t.get("identity_key"),
             "ip": t.get("ip"),
             "kind": t.get("kind") or t.get("os"),
             "domains": t.get("domains", []),
             "services": t.get("services", []),
-            "realized_count": len(realized),
-            "blocked_count": len(blocked),
-            "unknown_count": len(unknown),
+            "manifestations": t.get("manifestations", []),
+            "realized_count": realized_count,
+            "blocked_count": blocked_count,
+            "unknown_count": unknown_count,
             "unresolved_reasons": unresolved_reasons,
-            "compatibility_score_mean": round(sum(compatibility_values) / len(compatibility_values), 3) if compatibility_values else 0.0,
-            "decoherence_total": round(sum(decoherence_values), 3),
-            "realized_sample": sorted(realized)[:15],
+            "compatibility_score_mean": compatibility_score_mean,
+            "decoherence_total": decoherence_total,
+            "realized_sample": realized_sample,
         })
-        report["summary"]["total_unknown"] += len(unknown)
-        report["summary"]["total_realized"] += len(realized)
-        report["summary"]["total_blocked"] += len(blocked)
-        if unknown:
+        report["summary"]["total_unknown"] += unknown_count
+        report["summary"]["total_realized"] += realized_count
+        report["summary"]["total_blocked"] += blocked_count
+        if unknown_count:
             report["summary"]["targets_with_unknowns"] += 1
 
     if target_filter and report["targets"]:
@@ -201,13 +253,13 @@ def cmd_report(a):
     print(f"  Generated : {report['generated_at']}")
     print(f"  Surface   : {report['surface']}")
     if target_filter:
-        print(f"  Target    : {target_filter}")
+        print(f"  Node      : {target_filter}")
         if at_ts:
             print(f"  As-Of     : {at_ts.isoformat()}")
             if not historical_snapshot:
-                print("  Note      : no pearl-backed target snapshot exists for that time yet; showing current surface with historical scope only")
+                print("  Note      : no pearl-backed node snapshot exists for that time yet; showing current surface with historical scope only")
     else:
-        print(f"  Targets   : {report['summary']['target_count']} total, {report['summary']['targets_with_unknowns']} with unresolved state")
+        print(f"  Nodes     : {report['summary']['target_count']} total, {report['summary']['targets_with_unknowns']} with unresolved state")
         print(f"  State     : {report['summary']['total_realized']} realized, {report['summary']['total_blocked']} blocked, {report['summary']['total_unknown']} unknown")
     print()
 
@@ -238,7 +290,8 @@ def cmd_report(a):
         for t in ranked_targets[:5]:
             services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in t.get("services", [])[:8]) or "none"
             domains = ", ".join(t.get("domains", [])) or "none"
-            print(f"    {t['ip']:18s} [{(t.get('kind') or '?'):12s}] {t['unknown_count']}U {t['blocked_count']}B {t['realized_count']}R")
+            label = t.get("identity_key") or t.get("ip") or "unknown"
+            print(f"    {label:18s} [{(t.get('kind') or '?'):12s}] {t['unknown_count']}U {t['blocked_count']}B {t['realized_count']}R")
             print(f"      services: {services}")
             print(f"      domains : {domains}")
         print()
@@ -246,9 +299,12 @@ def cmd_report(a):
     for t in ranked_targets if target_filter else ranked_targets[:3]:
         services = ", ".join(f"{s.get('port')}/{s.get('service')}" for s in t.get("services", [])[:12])
         domains = ", ".join(t.get("domains", []))
-        print(f"  {t['ip']}  [{(t.get('kind') or '?'):12s}]")
+        label = t.get("identity_key") or t.get("ip") or "unknown"
+        print(f"  {label}  [{(t.get('kind') or '?'):12s}]")
         print(f"    services : {services}")
         print(f"    domains  : {domains}")
+        if t.get("manifestations"):
+            print(f"    manifests: {', '.join(t.get('manifestations', [])[:6])}")
         print(f"    state    : {t['realized_count']} realized, {t['blocked_count']} blocked, {t['unknown_count']} unknown")
         if t.get("unknown_count"):
             reasons = t.get("unresolved_reasons", {}) or {}
@@ -296,7 +352,7 @@ def cmd_report(a):
 
     print(f"  Folds      : {report['folds']['count']}")
     for fold in report["folds"]["high_weight"][:5]:
-        print(f"    {fold.get('target_ip','?')} [{fold.get('fold_type','?')}] Φ={float(fold.get('gravity_weight',0.0)):.2f} {fold.get('detail','')[:80]}")
+        print(f"    {_fold_identity_key(fold) or fold.get('target_ip','?')} [{fold.get('fold_type','?')}] Φ={float(fold.get('gravity_weight',0.0)):.2f} {fold.get('detail','')[:80]}")
     print()
 
     print(f"  Proposals  : {report['proposals']['count']} total, {report['proposals']['pending']} pending")
@@ -353,6 +409,7 @@ def cmd_report(a):
                     "target_filter": report["target_filter"],
                     "targets": [
                         {
+                            "identity_key": t.get("identity_key"),
                             "ip": t.get("ip"),
                             "kind": t.get("kind"),
                             "domains": t.get("domains", []),
@@ -371,7 +428,7 @@ def cmd_report(a):
                     ],
                     "folds": [
                         {
-                            "target": f.get("target_ip"),
+                            "target": _fold_identity_key(f) or f.get("target_ip"),
                             "type": f.get("fold_type"),
                             "weight": float(f.get("gravity_weight", 0.0)),
                             "detail": (f.get("detail", "")[:160]),
@@ -444,14 +501,15 @@ def cmd_calibrate(a):
 
       calibrated_conf = raw_conf * precision / assumed_reliability
 
-    Saved to /var/lib/skg/calibration.json and loaded at daemon startup.
+    Saved under the configured state root and loaded by the runtime
+    sensor confidence context.
 
     This closes the confidence calibration gap: the system's certainty
     claims become empirically grounded rather than hand-tuned.
     """
     sys.path.insert(0, str(SKG_HOME))
     from skg.sensors.confidence_calibrator import (
-        ConfidenceCalibrator, calibrate_from_engagement,
+        calibrate_from_engagement,
     )
 
     db_path = Path(a.db)
@@ -469,7 +527,7 @@ def cmd_calibrate(a):
     if save:
         from skg.sensors.confidence_calibrator import CALIBRATION_PATH
         print(f"\n  Saved → {CALIBRATION_PATH}")
-        print(f"  Reload: systemctl restart skg  (or skg start)")
+        print("  Runtime sensors reload this file automatically on the next calibration-aware emit.")
     else:
         print(f"\n  (Report only — not saved. Remove --report to save.)")
 
@@ -495,7 +553,11 @@ def cmd_engage(a):
         generate_engagement_report,
     )
 
-    subcmd = getattr(a, "engage_cmd", "report")
+    subcmd = getattr(a, "engage_cmd", None)
+
+    if not subcmd:
+        print("  Usage: skg engage [build|analyze|report|clean]")
+        return
 
     if subcmd == "build":
         db = getattr(a, "out", str(SKG_STATE_DIR / "engagement.db"))
@@ -550,9 +612,15 @@ def cmd_engage(a):
             )
             clamped = r.rowcount
 
-            # DP-05: remove projections referencing workloads with no observations
+            # DP-05: remove projections with no matching identity in observations.
+            # Uses node_key (stable identity) first so that different workload_id
+            # manifestations of the same host are not incorrectly deleted.
             r = conn.execute("""
-                DELETE FROM projections WHERE workload_id NOT IN (
+                DELETE FROM projections
+                WHERE node_key NOT IN (
+                    SELECT DISTINCT node_key FROM observations WHERE node_key != ''
+                )
+                AND workload_id NOT IN (
                     SELECT DISTINCT workload_id FROM observations
                 )
             """)

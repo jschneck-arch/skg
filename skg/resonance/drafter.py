@@ -43,28 +43,50 @@ The output must be valid JSON only — no markdown, no explanation, no preamble.
 Follow the schema exactly."""
 
 
+def _extract_record(entry) -> dict:
+    """
+    Normalise a surface entry to a plain record dict.
+
+    engine.surface() returns [{"record": ..., "score": ...}] dicts.
+    Older callers may pass (record, score) tuples.  Both shapes are handled
+    here so prompt builders are insulated from the engine contract shape.
+    """
+    if isinstance(entry, dict):
+        return entry.get("record") or entry
+    # tuple / 2-element sequence
+    try:
+        rec, _score = entry
+        return rec if isinstance(rec, dict) else vars(rec)
+    except Exception:
+        return {}
+
+
 def _build_user_prompt(domain_name: str, description: str,
                        context: dict) -> str:
     similar_wickets = []
-    for rec, score in context.get("wickets", []):
+    for entry in context.get("wickets", []):
+        rec = _extract_record(entry)
         similar_wickets.append(
-            f"  [{rec['domain']}::{rec['wicket_id']}] {rec['label']}\n"
-            f"    {rec['description']}\n"
-            f"    Evidence: {rec['evidence_hint']}"
+            f"  [{rec.get('domain', '?')}::{rec.get('wicket_id', '?')}] {rec.get('label', '')}\n"
+            f"    {rec.get('description', '')}\n"
+            f"    Evidence: {rec.get('evidence_hint', '')}"
         )
 
     similar_adapters = []
-    for rec, score in context.get("adapters", []):
+    for entry in context.get("adapters", []):
+        rec = _extract_record(entry)
         sources = "; ".join(rec.get("evidence_sources", []))
         similar_adapters.append(
-            f"  [{rec['domain']}::{rec['adapter_name']}] {sources}"
+            f"  [{rec.get('domain', '?')}::{rec.get('adapter_name', '?')}] {sources}"
         )
 
     similar_domains = []
-    for rec, score in context.get("domains", []):
+    for entry in context.get("domains", []):
+        rec = _extract_record(entry)
         similar_domains.append(
-            f"  {rec['domain']}: {rec['description']} "
-            f"({rec['wicket_count']} wickets, paths: {', '.join(rec['attack_paths'][:3])})"
+            f"  {rec.get('domain', '?')}: {rec.get('description', '')} "
+            f"({rec.get('wicket_count', 0)} wickets, "
+            f"paths: {', '.join(rec.get('attack_paths', [])[:3])})"
         )
 
     wicket_context  = "\n".join(similar_wickets)  if similar_wickets  else "  (none)"
@@ -349,9 +371,9 @@ def draft_catalog(engine: ResonanceEngine,
                 query   = f"{domain_name}: {description}"
                 context = engine.surface(query, k_each=4)
                 catalog, errors = _ollama.draft_catalog(domain_name, description, {
-                    "wickets":  [r.to_dict() for r, _ in context.get("wickets", [])],
-                    "adapters": [r.to_dict() for r, _ in context.get("adapters", [])],
-                    "domains":  [r.to_dict() for r, _ in context.get("domains", [])],
+                    "wickets":  [_extract_record(e) for e in context.get("wickets", [])],
+                    "adapters": [_extract_record(e) for e in context.get("adapters", [])],
+                    "domains":  [_extract_record(e) for e in context.get("domains", [])],
                 })
                 draft_path = engine.save_draft(domain_name, catalog)
                 return {
@@ -382,9 +404,9 @@ def draft_catalog(engine: ResonanceEngine,
                 # Build the ollama-style prompt and dispatch to the pool
                 from skg.resonance.ollama_backend import _build_prompt
                 prompt = _build_prompt(domain_name, description, {
-                    "wickets":  [r.to_dict() for r, _ in context.get("wickets", [])],
-                    "adapters": [r.to_dict() for r, _ in context.get("adapters", [])],
-                    "domains":  [r.to_dict() for r, _ in context.get("domains", [])],
+                    "wickets":  [_extract_record(e) for e in context.get("wickets", [])],
+                    "adapters": [_extract_record(e) for e in context.get("adapters", [])],
+                    "domains":  [_extract_record(e) for e in context.get("domains", [])],
                 })
 
                 import json, re as _re
@@ -425,12 +447,14 @@ def draft_catalog(engine: ResonanceEngine,
         except Exception as exc:
             log.warning(f"LLM pool catalog draft failed: {exc}")
 
-        # Final fallback: prompt mode — build context, write prompt file
+        # Final fallback: no backend available
         raise ValueError(
-            "No API key and Ollama unavailable. Options:\n"
-            "  1. Start ollama: ollama serve && ollama pull llama3.2:3b\n"
-            "  2. Use prompt mode: skg resonance draft-prompt\n"
-            "     then paste into claude.ai and: skg resonance draft-accept"
+            "No API key and no Ollama backend available.\n"
+            "Options:\n"
+            "  1. Set ANTHROPIC_API_KEY and retry.\n"
+            "  2. Start Ollama: ollama serve && ollama pull llama3.2:3b\n"
+            "  3. Call draft_prompt() / draft_accept() directly from Python "
+            "to use the file-based prompt workflow."
         )
 
 

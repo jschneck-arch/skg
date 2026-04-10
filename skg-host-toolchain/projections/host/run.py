@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from skg.kernel.adapters import event_to_observation
 from skg.kernel.state import CollapseThresholds, StateEngine
 from skg.kernel.support import SupportEngine
+from skg.identity import canonical_observation_subject
 
 
 def get_version() -> str:
@@ -49,21 +50,18 @@ def iso_now() -> str:
 
 
 def _target_for_events(events, workload_id: str | None = None) -> str:
-    # Always prefer target_ip from events — that's the key used in obs.targets
-    # and obs.support_mapping by event_to_observation(). workload_id may differ
-    # (e.g. "dc01-win2022" vs "192.168.122.143").
     for ev in reversed(events):
         payload = ev.get("payload", {})
-        target = payload.get("target_ip")
+        target = canonical_observation_subject(payload).get("subject_key", "")
         if target:
             return target
-    # Fall back: workload_id arg (may be "ns::ip" — take the ip part)
     if workload_id:
-        return workload_id.split("::")[-1]
-    # Last resort: workload_id field from events
+        target = canonical_observation_subject(workload_id=workload_id).get("subject_key", "")
+        if target:
+            return target
     for ev in reversed(events):
         payload = ev.get("payload", {})
-        target = payload.get("workload_id", "").split("::")[-1]
+        target = canonical_observation_subject(payload).get("subject_key", "")
         if target:
             return target
     return "unknown"
@@ -118,7 +116,7 @@ def compute_host_score(events, catalog: dict, attack_path_id: str,
     sheaf_data = {}
     try:
         import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
         from skg.topology.sheaf import classify_with_sheaf
         classification, sheaf_data = classify_with_sheaf(
             classification, catalog, attack_path_id,

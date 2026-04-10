@@ -1,0 +1,11 @@
+source_kind: ad.delegation.snapshot
+source_id: adapter.ad_delegation_posture
+pointer_prefix: ad://
+schema: skg.ad.delegation_input.v1
+wickets:
+  AD-06:
+    evidence_rank: 2
+    confidence: 0.93
+  AD-08:
+    evidence_rank: 2
+    confidence: 0.91

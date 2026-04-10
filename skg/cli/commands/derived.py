@@ -72,20 +72,18 @@ def _cmd_derived_archive(a):
 
 
 def _rebuild_interp_from_events() -> tuple[int, list[str]]:
-    sys.path.insert(0, str(SKG_HOME))
-    from skg.sensors.projector import project_events_dir
+    """
+    Project all events into interp files.
+    Source: canonical events directory (append-only substrate).
+    """
+    from skg_services.gravity.projector_runtime import project_events_dir
 
+    source_dir = EVENTS_DIR
+    if not source_dir.exists():
+        return 0, []
     outputs = []
-    seen = set()
-    for source_dir in (SKG_STATE_DIR / "events", DISCOVERY_DIR):
-        if not source_dir.exists():
-            continue
-        for out in project_events_dir(source_dir, SKG_STATE_DIR / "interp"):
-            out_str = str(out)
-            if out_str in seen:
-                continue
-            seen.add(out_str)
-            outputs.append(out_str)
+    for out in project_events_dir(source_dir, SKG_STATE_DIR / "interp"):
+        outputs.append(str(out))
     return len(outputs), outputs
 
 
@@ -107,7 +105,7 @@ def _rebuild_fold_state() -> tuple[int, list[str]]:
 
     refreshed_by_ip = {}
     for fold in FoldDetector().detect_all(
-        events_dir=DISCOVERY_DIR,
+        events_dir=EVENTS_DIR,
         cve_dir=CVE_DIR,
         toolchain_dir=SKG_HOME,
     ):

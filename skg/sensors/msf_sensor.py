@@ -50,8 +50,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.sensors import BaseSensor, envelope, precondition_payload, register
-from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
+from skg.identity import parse_workload_ref
+from skg.sensors import BaseSensor, register
+from skg_core.config.paths import SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
+try:
+    from skg_protocol.events import (
+        build_event_envelope as envelope,
+        build_precondition_payload as precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope, precondition_payload
 
 log = logging.getLogger("skg.sensors.msf")
 
@@ -74,8 +82,12 @@ def _workload_target_candidates(workload_id: str) -> set[str]:
     if not text:
         return set()
     candidates = {text}
-    if "::" in text:
-        candidates.add(text.split("::")[-1].strip())
+    parsed = parse_workload_ref(text)
+    candidates.update({
+        str(parsed.get("identity_key", "") or "").strip(),
+        str(parsed.get("host", "") or "").strip(),
+        str(parsed.get("manifestation_key", "") or "").strip(),
+    })
     ip_match = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
     if ip_match:
         candidates.add(ip_match.group(0))
@@ -420,6 +432,8 @@ class MsfSensor(BaseSensor):
             log.info(f"[msf] sessions: {len(sessions)}")
             for sid, sess in sessions.items():
                 key = f"sess:{sid}"
+                if key in seen:
+                    continue
                 host = sess.get("target_host",
                                sess.get("tunnel_peer", "unknown").split(":")[0])
                 wid  = f"msf::sess::{host}"

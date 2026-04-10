@@ -95,7 +95,10 @@ def test_valid_llm_response_creates_proposal(tmp_path):
 
     assert len(results) == 1
     p = results[0]
-    assert p["proposal_kind"] == "cognitive_action"
+    # Emitted as field_action so the shared trigger path can execute it;
+    # the cognitive_action origin is preserved in the "source" field.
+    assert p["proposal_kind"] == "field_action"
+    assert p["source"]        == "cognitive_action"
     assert p["instrument"]    == "skg-host-toolchain"
     assert p["target"]        == "192.168.1.5"
     assert p["wicket_id"]     == "SMB-01"

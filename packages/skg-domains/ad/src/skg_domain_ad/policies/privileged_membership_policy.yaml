@@ -1,0 +1,13 @@
+source_kind: ad.inventory.snapshot
+source_id: adapter.ad_privileged_membership
+pointer_prefix: ad://
+wickets:
+  AD-PR-01:
+    evidence_rank: 2
+    confidence: 0.93
+  AD-PR-02:
+    evidence_rank: 2
+    confidence: 0.9
+  AD-PR-03:
+    evidence_rank: 2
+    confidence: 0.88

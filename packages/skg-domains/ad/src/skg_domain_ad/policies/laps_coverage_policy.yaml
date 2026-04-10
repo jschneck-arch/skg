@@ -1,0 +1,10 @@
+source_kind: ad.inventory.snapshot
+source_id: adapter.ad_laps_coverage
+pointer_prefix: ad://
+wickets:
+  AD-LP-01:
+    evidence_rank: 3
+    confidence: 0.9
+  AD-LP-02:
+    evidence_rank: 3
+    confidence: 0.88

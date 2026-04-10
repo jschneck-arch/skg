@@ -67,10 +67,11 @@ def compute_metacognition_score(
 
     required = cap_path["required_wickets"]
 
-    # Highest-priority state wins per wicket: blocked > realized > unknown
-    _PRIORITY = {"blocked": 2, "realized": 1, "unknown": 0}
+    # Resolve per wicket by recency: the newest event for each wicket wins.
+    # Earlier fixed-priority (blocked > realized) semantics prevented newer
+    # realized evidence from superseding older blocked evidence (MED-42 fix).
     latest: dict[str, str] = {}
-    latest_priority: dict[str, int] = {}
+    latest_ts: dict[str, str] = {}
     latest_confidence: dict[str, float] = {}
     latest_notes: dict[str, str] = {}
 
@@ -82,10 +83,14 @@ def compute_metacognition_score(
         if wid not in required:
             continue
         status = payload.get("status", "unknown")
-        priority = _PRIORITY.get(status, 0)
-        if priority > latest_priority.get(wid, -1):
+        ts = (
+            ev.get("ts")
+            or ev.get("provenance", {}).get("collected_at", "")
+            or ""
+        )
+        if ts > latest_ts.get(wid, ""):
             latest[wid] = status
-            latest_priority[wid] = priority
+            latest_ts[wid] = ts
             prov = ev.get("provenance", {}).get("evidence", {})
             latest_confidence[wid] = float(prov.get("confidence", 0.5))
             latest_notes[wid] = payload.get("notes", "")

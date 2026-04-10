@@ -29,9 +29,18 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from skg.sensors import BaseSensor, register, envelope, emit_events
+from skg.sensors import BaseSensor, register
 from skg.sensors.adapter_runner import run_usb_drop
-from skg.core.paths import SKG_STATE_DIR
+from skg_core.config.paths import SKG_STATE_DIR
+try:
+    from skg_protocol.events import build_event_envelope as envelope
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope
+
+try:
+    from skg_services.gravity.event_writer import emit_events
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import emit_events
 
 log = logging.getLogger("skg.sensors.usb")
 
@@ -108,7 +117,14 @@ class UsbSensor(BaseSensor):
 
                 if self._ctx and wicket_id:
                     evidence_text = f"{wicket_id}: {payload.get('detail', '')}"
-                    conf = self._ctx.calibrate(base_conf, evidence_text, wicket_id, domain, workload_id)
+                    conf = self._ctx.calibrate(
+                        base_conf,
+                        evidence_text,
+                        wicket_id,
+                        domain,
+                        workload_id,
+                        source_id=ev.get("source", {}).get("source_id", ""),
+                    )
                     ev["provenance"]["evidence"]["confidence"] = conf
                     self._ctx.record(
                         evidence_text=evidence_text,

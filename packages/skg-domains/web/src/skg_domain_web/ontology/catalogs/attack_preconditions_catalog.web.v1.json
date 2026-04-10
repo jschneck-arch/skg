@@ -1,0 +1,75 @@
+{
+  "domain": "web",
+  "version": "1.0.0",
+  "description": "Pilot canonical subset migrated from legacy web catalog",
+  "wickets": {
+    "WB-01": {
+      "label": "web_reachable",
+      "description": "Web target reachable",
+      "evidence_hint": "HTTP GET root returns any status",
+      "default_rank": 3,
+      "decay_class": "ephemeral"
+    },
+    "WB-05": {
+      "label": "admin_interface_exposed",
+      "description": "Admin interface accessible without auth",
+      "evidence_hint": "HTTP 200 on /admin, /manager/html, /wp-admin",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-07": {
+      "label": "debug_endpoint_exposed",
+      "description": "Debug/actuator endpoint exposed",
+      "evidence_hint": "HTTP 200 on /actuator/env, /metrics",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-08": {
+      "label": "git_exposure",
+      "description": ".git directory accessible",
+      "evidence_hint": "HTTP 200 on /.git/HEAD",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-09": {
+      "label": "env_file_exposed",
+      "description": ".env or config file with credentials accessible",
+      "evidence_hint": "HTTP 200 on /.env with KEY=value content",
+      "default_rank": 1,
+      "decay_class": "ephemeral"
+    },
+    "WB-10": {
+      "label": "default_credentials",
+      "description": "Application uses default credentials",
+      "evidence_hint": "Auth succeeds with admin:admin",
+      "default_rank": 1,
+      "decay_class": "operational"
+    }
+  },
+  "attack_paths": {
+    "web_initial_access_v1": {
+      "label": "Web Initial Access",
+      "description": "Exploit exposed admin/auth surface",
+      "required_wickets": ["WB-01", "WB-05"],
+      "ordered": false
+    },
+    "web_credential_exposure_v1": {
+      "label": "Web Credential Exposure",
+      "description": "Extract credentials from exposed config",
+      "required_wickets": ["WB-01", "WB-09"],
+      "ordered": false
+    },
+    "web_sqli_to_shell_v1": {
+      "label": "Web SQLi to Shell",
+      "description": "SQL injection confirmed and escalate via default credential abuse",
+      "required_wickets": ["WB-01", "WB-09", "WB-10"],
+      "ordered": false
+    },
+    "web_full_chain_v1": {
+      "label": "Web Full Chain (SQLi)",
+      "description": "Alias for web_sqli_to_shell_v1 full exploitation chain",
+      "required_wickets": ["WB-01", "WB-09", "WB-10"],
+      "ordered": false
+    }
+  }
+}

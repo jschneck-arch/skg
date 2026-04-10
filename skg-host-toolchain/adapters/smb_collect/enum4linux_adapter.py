@@ -63,6 +63,7 @@ def _parse_enum4linux_output(output: str, target_ip: str, out_dir: Path) -> list
             "payload": {
                 "wicket_id": wicket_id,
                 "target_ip": target_ip,
+                "identity_key": target_ip,
                 "workload_id": f"{domain}::{target_ip}",
                 "domain": domain,
                 "status": status,

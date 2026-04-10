@@ -12,7 +12,7 @@ Designed for laptop use:
   - Writes lock file to prevent concurrent runs
 
 Invoked by: systemd timer skg-train.timer
-Also callable manually: skg train run
+Also callable manually: python -m skg.training.scheduler_main
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timezone, date
 from pathlib import Path
 
-from skg.core.paths import SKG_STATE_DIR
+from skg_core.config.paths import SKG_STATE_DIR
 from skg.training.corpus import corpus_status, MIN_EXAMPLES_FOR_RUN
 
 log = logging.getLogger("skg.training.scheduler")
@@ -178,7 +178,7 @@ def should_run(force: bool = False, skip_battery_check: bool = False, skip_load_
 def run(force: bool = False, dry_run: bool = False) -> dict:
     """
     Main scheduler entry point.
-    Called by systemd timer or `skg train run`.
+    Called by systemd timer or python -m skg.training.scheduler_main.
 
     Returns result dict.
     """

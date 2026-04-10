@@ -27,51 +27,39 @@ Wickets emitted:
 from __future__ import annotations
 
 import json
-import os
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+try:
+    from skg_protocol.events import (
+        build_event_envelope as envelope,
+        build_precondition_payload as precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope, precondition_payload
 
 
 def _event(wicket_id: str, label: str, workload_id: str, realized: bool,
            detail: str, target_ip: str, confidence: float = 0.85) -> dict:
-    return {
-        "id": str(uuid.uuid4()),
-        "ts": _iso_now(),
-        "type": "obs.attack.precondition",
-        "source": {
-            "source_id": f"process_probe/{wicket_id}",
-            "toolchain": "skg-host-toolchain",
-            "version": "1.0.0",
-        },
-        "payload": {
-            "wicket_id": wicket_id,
-            "node_id": wicket_id,
-            "label": label,
-            "domain": "host",
-            "workload_id": workload_id,
-            "realized": realized,
-            "status": "realized" if realized else "blocked",
-            "detail": detail,
-            "target_ip": target_ip,
-        },
-        "provenance": {
-            "evidence_rank": 5,
-            "evidence": {
-                "source_kind": "process_probe",
-                "pointer": f"process_probe://{target_ip}/{wicket_id}",
-                "collected_at": _iso_now(),
-                "confidence": confidence,
-            },
-        },
-    }
+    payload = precondition_payload(
+        wicket_id=wicket_id,
+        label=label,
+        domain="host",
+        workload_id=workload_id,
+        realized=realized,
+        detail=detail,
+        target_ip=target_ip,
+    )
+    return envelope(
+        "obs.attack.precondition",
+        source_id=f"process_probe/{wicket_id}",
+        toolchain="skg-host-toolchain",
+        payload=payload,
+        evidence_rank=5,
+        source_kind="process_probe",
+        pointer=f"process_probe://{target_ip}/{wicket_id}",
+        confidence=confidence,
+    )
 
 
 # Commands to run remotely (or locally if target_ip is local)
@@ -170,7 +158,7 @@ def probe_process_surface(
         ebpf_unpriv = False
     events.append(_event("PR-03", "unprivileged_ebpf_access", workload_id, ebpf_unpriv,
         f"kernel.unprivileged_bpf_disabled={val}: "
-        "{'Unprivileged eBPF programs allowed (side-channel, memory read)' if ebpf_unpriv else 'eBPF restricted to root'}.",
+        f"{'Unprivileged eBPF programs allowed (side-channel, memory read)' if ebpf_unpriv else 'eBPF restricted to root'}.",
         target_ip, 0.85))
 
     # PR-09: ASLR
@@ -181,7 +169,7 @@ def probe_process_surface(
         aslr_disabled = False
     events.append(_event("PR-09", "aslr_disabled", workload_id, aslr_disabled,
         f"kernel.randomize_va_space={val}. "
-        "{'ASLR off — deterministic memory layout, ROP chains reliable' if aslr_disabled else 'ASLR enabled'}.",
+        f"{'ASLR off — deterministic memory layout, ROP chains reliable' if aslr_disabled else 'ASLR enabled'}.",
         target_ip, 0.90))
 
     # PR-10: kernel module loading
@@ -192,7 +180,7 @@ def probe_process_surface(
         kmod_open = True
     events.append(_event("PR-10", "kmod_loading_unrestricted", workload_id, kmod_open,
         f"kernel.modules_disabled={val}. "
-        "{'Kernel module loading unrestricted — rootkit/LKM implant possible' if kmod_open else 'Module loading locked'}.",
+        f"{'Kernel module loading unrestricted — rootkit/LKM implant possible' if kmod_open else 'Module loading locked'}.",
         target_ip, 0.80))
 
     # PR-04: SUID binaries

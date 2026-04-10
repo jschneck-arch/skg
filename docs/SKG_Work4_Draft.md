@@ -4,6 +4,8 @@
 
 **March 2026**
 
+> Editor note: this draft predates later runtime alignment work. The implementation-aligned version is [`docs/SKG_Work4_Final.md`](./SKG_Work4_Final.md). Since this draft was written, the runtime gained explicit cross-expression fiber clusters in selection, config-backed coupling tables with retrospective learning support, substrate `MC-03` separated from cognitive `CP-01`, and TTL-enforced support expiry.
+
 ---
 
 ## Abstract
@@ -16,7 +18,7 @@ The central contribution is fiber-driven gravity: the gravity field follows the 
 
 We also formalize the decoherence criterion. A state is protected when its support vector satisfies four simultaneous conditions: high coherence, low dissipation, low contradiction, and multi-basis reinforcement. This criterion is not a threshold trick. It derives from the field geometry: a protected state is a local minimum of the field functional that is stable under small perturbations in the instrument schedule.
 
-The paper describes the current runtime implementation status honestly. Fiber-driven gravity is partially implemented: the pearl manifold provides memory curvature, and coupling energy contributes to instrument selection. The full fiber tension term remains an approximation. The decoherence criterion exists as a heuristic. These are not failures. They are the current boundary of a growing system, stated precisely.
+The paper describes one historical runtime snapshot honestly. Since that snapshot, the deployed runtime has moved closer to the full formulation: the canonical field functional now lives in a dedicated module, explicit fiber clusters participate in selection when available, coupling tables are config-backed and retrospectively learnable, substrate coverage-gap signaling is separated from cognitive candidate-generation signaling, and TTL expiry removes stale observations from active support mass. The remaining gaps are now narrower than those described in this draft.
 
 We validate the framework empirically against a live heterogeneous lab network. The central validation case is EternalBlue (CVE-2017-0143 / MS17-010) on a Windows Server 2008 R2 target: the coupling chain from host reachability (HO-01) through SMB exposure (HO-19) to confirmed vulnerability (HO-25) was traversed autonomously by the gravity field in one nmap execution, generating an exploit proposal at confidence 0.95 without human guidance. Three independent coupling-arc failures that previously blocked this path were diagnosed as structurally identical by the field functional framework — each was a severed inter-local coupling, not three unrelated bugs. The framework made the coupling structure explicit; diagnosis followed directly.
 
@@ -138,7 +140,7 @@ G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + Σ_{i<j} K(F_i, F_j) × E_c
 
 The first term sums fiber tensions weighted by how coherent (trustworthy) each fiber is. The second term sums the coupling energy between fibers — when two fibers in the same cluster are structurally related (credential fiber coupled to SSH fiber), their coupling contributes to the cluster's gravity pull.
 
-**Runtime instantiation:** Clusters are not yet explicitly computed in the runtime. They are approximated by the per-target instrument potential computation in gravity_field.py. The full cluster computation is a planned development.
+**Runtime instantiation (historical snapshot).** At the time of this draft, clusters were not yet explicitly computed in the runtime and were approximated by per-target instrument potential in `gravity_field.py`. The current runtime has since moved past this snapshot; see `SKG_Work4_Final.md` for the implementation-aligned status.
 
 ---
 
@@ -462,7 +464,7 @@ The practical effect of adopting the field functional as the primary architectur
 
 ### 7.2 What Remains Incomplete
 
-The fiber-driven gravity formulation in this paper is partially implemented. The full set of gaps:
+At the time of this draft, the fiber-driven gravity formulation was only partially implemented. The full set of gaps for that historical snapshot was:
 
 **Field Local objects are implicit.** Locals are currently the grouping of observations by workload_id × domain that the kernel computes on demand. They are not first-class persistent objects with their own identity, energy, and coupling state. Making them first-class requires an architectural change to the kernel that this paper does not perform.
 

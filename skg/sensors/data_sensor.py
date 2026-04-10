@@ -45,7 +45,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from skg.sensors import BaseSensor, register
-from skg.core.paths import EVENTS_DIR, SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
+from skg_core.config.paths import EVENTS_DIR, SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
 
 log = logging.getLogger("skg.sensors.data")
 
@@ -171,7 +171,7 @@ class DataSensor(BaseSensor):
                 continue
 
             # Write events to EVENTS_DIR
-            out_file = self._events_dir / f"data_{workload_id.replace('::', '_')}_{run_id}.ndjson"
+            out_file = self.events_dir / f"data_{workload_id.replace('::', '_')}_{run_id}.ndjson"
             try:
                 with open(out_file, "w") as fh:
                     for ev in events:
@@ -203,10 +203,11 @@ class DataSensor(BaseSensor):
         Reads 'pipeline_topology' from config if declared, otherwise
         infers bonds from source declarations (same database = same_database bond).
         """
-        if not self._graph:
+        graph = getattr(self, "_graph", None) or getattr(self, "graph", None)
+        if not graph:
             return
 
-        topology = self._cfg.get("pipeline_topology", []) if hasattr(self, "_cfg") else []
+        topology = self.cfg.get("pipeline_topology", []) if self.cfg else []
 
         # Explicit topology declarations
         for bond in topology:
@@ -216,9 +217,11 @@ class DataSensor(BaseSensor):
             if not source_wid or not target_wid:
                 continue
             try:
-                self._graph.add_edge(
+                strength = DATA_BOND_TYPES.get(rel_type, 0.5)
+                graph.add_edge(
                     source_wid, target_wid, rel_type,
-                    metadata={"strength": DATA_BOND_TYPES.get(rel_type, 0.5)},
+                    metadata={"strength": strength},
+                    weight=strength,
                     edge_source="data_sensor",
                 )
                 log.debug(f"[data] bond: {source_wid} →[{rel_type}]→ {target_wid}")
@@ -241,9 +244,10 @@ class DataSensor(BaseSensor):
             for i, wid_a in enumerate(wids):
                 for wid_b in wids[i+1:]:
                     try:
-                        self._graph.add_edge(
+                        graph.add_edge(
                             wid_a, wid_b, "same_database",
                             metadata={"strength": 0.60},
+                            weight=0.60,
                             edge_source="data_sensor_inferred",
                         )
                     except Exception:

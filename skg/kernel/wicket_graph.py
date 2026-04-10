@@ -703,12 +703,17 @@ _PREFIX_DOMAIN: Dict[str, str] = {
     "WB-": "web",
     "AD-": "ad_lateral",
     "CE-": "container_escape",
-    "DA-": "data_pipeline",
-    "BA-": "binary_analysis",
+    "DP-": "data",
+    "DE-": "data",
     "SC-": "supply_chain",
-    "IO-": "iot_firmware",
+    "IF-": "iot_firmware",
     "AI-": "ai_target",
     "AP-": "aprs",
+    "BA-": "binary",
+    "MC-": "metacognition",
+    # Legacy aliases kept for compatibility
+    "DA-": "data",
+    "IO-": "iot_firmware",
 }
 
 def _domain_from_wicket_id(wid: str) -> str:
@@ -746,9 +751,11 @@ def get_wicket_graph(
 
     # Seed from catalogs
     if catalog_paths is None:
-        from skg.core.paths import SKG_HOME
+        from skg_core.config.paths import SKG_HOME
         catalog_paths = sorted(
             SKG_HOME.rglob("attack_preconditions_catalog.*.json")
+        ) + sorted(
+            SKG_HOME.rglob("ai_attack_preconditions_catalog.*.json")
         )
     if catalog_paths:
         graph.seed_from_catalogs(catalog_paths)

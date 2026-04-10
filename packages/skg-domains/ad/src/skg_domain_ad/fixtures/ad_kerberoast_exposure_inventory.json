@@ -1,0 +1,41 @@
+{
+  "users": [
+    {
+      "Properties": {
+        "name": "svc_sql@CONTOSO.LOCAL",
+        "enabled": true,
+        "hasspn": true,
+        "supportedencryptiontypes": 4
+      },
+      "ObjectIdentifier": "S-1-5-21-1234-5678-9012-6101"
+    },
+    {
+      "attributes": {
+        "sAMAccountName": "svc_web",
+        "userAccountControl": 512,
+        "servicePrincipalName": [
+          "HTTP/web.contoso.local"
+        ],
+        "msDS-SupportedEncryptionTypes": 16
+      }
+    },
+    {
+      "Properties": {
+        "name": "WS01$@CONTOSO.LOCAL",
+        "enabled": true,
+        "hasspn": true,
+        "supportedencryptiontypes": 4
+      }
+    },
+    {
+      "attributes": {
+        "sAMAccountName": "disabledsvc",
+        "userAccountControl": 514,
+        "servicePrincipalName": [
+          "MSSQLSvc/db.contoso.local:1433"
+        ],
+        "msDS-SupportedEncryptionTypes": 4
+      }
+    }
+  ]
+}

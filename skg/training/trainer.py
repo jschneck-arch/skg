@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import SKG_STATE_DIR, SKG_HOME
+from skg_core.config.paths import SKG_STATE_DIR, SKG_HOME
 from skg.training.corpus import (
     load_all_examples, split_train_holdout,
     corpus_status, mark_run_complete, MIN_EXAMPLES_FOR_RUN,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME
+from skg_core.config.paths import SKG_CONFIG_DIR, SKG_HOME
 
 
 def load_contracts() -> dict[str, dict[str, Any]]:

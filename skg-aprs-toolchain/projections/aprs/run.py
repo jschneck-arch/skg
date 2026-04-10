@@ -103,7 +103,7 @@ def emit_interp(payload, out_path: Path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--in", dest="infile", required=True)
-    _default_catalog = str(Path(__file__).resolve().parents[2] / "contracts/catalogs/attack_preconditions_catalog.v1.json")
+    _default_catalog = str(Path(__file__).resolve().parents[2] / "contracts/catalogs/attack_preconditions_catalog.aprs.v1.json")
     p.add_argument("--catalog", default=_default_catalog)
     p.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
     p.add_argument("--out", dest="outfile", required=True)

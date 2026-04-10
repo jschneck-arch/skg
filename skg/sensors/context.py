@@ -22,6 +22,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from skg.sensors.confidence_calibrator import CALIBRATION_PATH, load_calibration
+
 if TYPE_CHECKING:
     from skg.graph import WorkloadGraph
     from skg.resonance.observation_memory import ObservationMemory
@@ -56,6 +58,19 @@ class SensorContext:
     ):
         self.graph = graph
         self.obs = obs_memory
+        self._calibration = None
+        self._calibration_mtime = 0.0
+        self._refresh_calibration(force=True)
+
+    def _refresh_calibration(self, force: bool = False) -> None:
+        try:
+            current_mtime = CALIBRATION_PATH.stat().st_mtime if CALIBRATION_PATH.exists() else 0.0
+        except OSError:
+            current_mtime = 0.0
+        if not force and current_mtime == self._calibration_mtime:
+            return
+        self._calibration = load_calibration(CALIBRATION_PATH)
+        self._calibration_mtime = current_mtime
 
     def calibrate(
         self,
@@ -66,6 +81,7 @@ class SensorContext:
         workload_id: str = "",
         k: int = 8,
         node_id: str | None = None,
+        source_id: str = "",
     ) -> float:
         """
         Blend base_confidence with history and graph priors.
@@ -74,6 +90,14 @@ class SensorContext:
         Backward compatible with wicket_id while supporting node_id.
         """
         condition_id = _safe_condition_id(wicket_id=wicket_id, node_id=node_id)
+        self._refresh_calibration()
+
+        sensor_confidence = base_confidence
+        if self._calibration is not None and source_id:
+            try:
+                sensor_confidence = self._calibration.apply(source_id, base_confidence)
+            except Exception as exc:
+                log.debug(f"Calibration apply failed: {exc}")
 
         history_rate = None
         graph_prior = 0.0
@@ -99,23 +123,23 @@ class SensorContext:
 
         # Blend
         if history_rate is None and graph_prior == 0.0:
-            return base_confidence
+            return sensor_confidence
 
         hw = HISTORY_WEIGHT if history_rate is not None else 0.0
         gw = GRAPH_WEIGHT if graph_prior > 0.0 else 0.0
         bw = 1.0 - hw - gw
 
-        result = (base_confidence * bw)
+        result = (sensor_confidence * bw)
         if history_rate is not None:
             result += history_rate * hw
         result += graph_prior * gw
 
         adjusted = round(min(1.0, max(0.0, result)), 4)
 
-        if adjusted != base_confidence:
+        if adjusted != sensor_confidence:
             log.debug(
                 f"[ctx] {workload_id}/{condition_id}: "
-                f"base={base_confidence:.3f} hist={history_rate} "
+                f"base={base_confidence:.3f} sensor={sensor_confidence:.3f} hist={history_rate} "
                 f"prior={graph_prior:.3f} → {adjusted:.3f}"
             )
 

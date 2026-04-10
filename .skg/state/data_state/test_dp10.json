@@ -1,0 +1,5 @@
+{
+  "schema_fingerprint": {
+    "users": "created_at,email,last_login,role,user_id,username"
+  }
+}

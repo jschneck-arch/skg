@@ -37,15 +37,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from skg.core.paths import (
-    EVENTS_DIR, INTERP_DIR, SKG_CONFIG_DIR, SKG_STATE_DIR, SKG_HOME,
-    DISCOVERY_DIR, DELTA_DIR,
-)
+from skg_core.config.paths import EVENTS_DIR, INTERP_DIR, SKG_CONFIG_DIR, SKG_STATE_DIR, SKG_HOME, DISCOVERY_DIR, DELTA_DIR
 
 # ── Schema ────────────────────────────────────────────────────────────────
 
 SCHEMA = """
 -- Raw observation events (obs.attack.precondition)
+-- node_key is the stable identity anchor (identity_key from canonical_observation_subject).
+-- target_ip is retained as the routable network address (additional context only).
 CREATE TABLE IF NOT EXISTS observations (
     id              TEXT PRIMARY KEY,
     ts              TEXT NOT NULL,
@@ -55,6 +54,7 @@ CREATE TABLE IF NOT EXISTS observations (
     wicket_id       TEXT NOT NULL,
     status          TEXT NOT NULL CHECK(status IN ('realized','blocked','unknown')),
     workload_id     TEXT NOT NULL,
+    node_key        TEXT NOT NULL DEFAULT '',
     attack_path_id  TEXT NOT NULL,
     run_id          TEXT NOT NULL,
     evidence_rank   INTEGER NOT NULL,
@@ -65,11 +65,15 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 
 -- Projection results (interp files)
+-- node_key is the stable identity anchor derived from workload_id via parse_workload_ref.
+-- It is used for referential integrity checks so that projections and observations
+-- with different workload_id manifestations (raw IP vs ssh:: prefix) are still joined.
 CREATE TABLE IF NOT EXISTS projections (
     id              TEXT PRIMARY KEY,
     ts              TEXT NOT NULL,
     attack_path_id  TEXT NOT NULL,
     workload_id     TEXT NOT NULL,
+    node_key        TEXT NOT NULL DEFAULT '',
     classification  TEXT NOT NULL,
     score           REAL,
     realized_count  INTEGER,
@@ -82,9 +86,11 @@ CREATE TABLE IF NOT EXISTS projections (
 );
 
 -- Gravity cycles (field_state snapshots)
+-- node_key is the stable identity anchor; target_ip is the routable address.
 CREATE TABLE IF NOT EXISTS gravity_cycles (
     id              TEXT PRIMARY KEY,
     ts              TEXT NOT NULL,
+    node_key        TEXT NOT NULL DEFAULT '',
     target_ip       TEXT NOT NULL,
     energy_before   REAL,
     energy_after    REAL,
@@ -99,6 +105,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     id              TEXT PRIMARY KEY,
     ts              TEXT NOT NULL,
     path_id         TEXT NOT NULL,
+    node_key        TEXT NOT NULL DEFAULT '',
     target_ip       TEXT NOT NULL,
     status          TEXT NOT NULL,
     msf_module      TEXT,
@@ -123,6 +130,7 @@ CREATE TABLE IF NOT EXISTS transitions (
 CREATE TABLE IF NOT EXISTS folds (
     id              TEXT PRIMARY KEY,
     ts              TEXT NOT NULL,
+    node_key        TEXT NOT NULL DEFAULT '',
     target_ip       TEXT NOT NULL,
     fold_type       TEXT NOT NULL,
     location        TEXT,
@@ -202,13 +210,19 @@ def ingest_events(conn: sqlite3.Connection, events_dir: Path) -> int:
                     wicket_id,
                 )
 
+                node_key = str(
+                    payload.get("identity_key")
+                    or payload.get("workload_id")
+                    or payload.get("target_ip")
+                    or ""
+                ).strip()
                 conn.execute("""
                     INSERT OR IGNORE INTO observations
                     (id, ts, collected_at, source_id, toolchain,
-                     wicket_id, status, workload_id, attack_path_id,
+                     wicket_id, status, workload_id, node_key, attack_path_id,
                      run_id, evidence_rank, confidence, detail,
                      target_ip, domain)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     ev_id,
                     ev.get("ts", ""),
@@ -218,6 +232,7 @@ def ingest_events(conn: sqlite3.Connection, events_dir: Path) -> int:
                     wicket_id,
                     payload.get("status", "unknown"),
                     payload.get("workload_id", ""),
+                    node_key,
                     payload.get("attack_path_id", ""),
                     payload.get("run_id", ""),
                     prov.get("evidence_rank", 0),
@@ -288,17 +303,22 @@ def ingest_projections(conn: sqlite3.Connection, interp_dir: Path) -> int:
             else:
                 domain = _infer_domain("", payload.get("attack_path_id",""), "")
 
+            from skg.identity import parse_workload_ref as _parse_ref
+            _proj_wid = payload.get("workload_id", "")
+            _proj_node_key = _parse_ref(_proj_wid).get("identity_key", _proj_wid)
+
             conn.execute("""
                 INSERT OR IGNORE INTO projections
-                (id, ts, attack_path_id, workload_id, classification,
+                (id, ts, attack_path_id, workload_id, node_key, classification,
                  score, realized_count, blocked_count, unknown_count,
                  run_id, domain, sheaf_h1, source_file)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 ev_id,
                 data.get("ts", payload.get("computed_at", "")),
                 payload.get("attack_path_id", ""),
-                payload.get("workload_id", ""),
+                _proj_wid,
+                _proj_node_key,
                 payload.get("classification", ""),
                 float(score) if score else 0.0,
                 len(payload.get("realized", [])),
@@ -332,15 +352,20 @@ def ingest_folds(conn: sqlite3.Connection, discovery_dir: Path) -> int:
 
             for fold in (folds if isinstance(folds, list) else [folds]):
                 fold_id = fold.get("id", str(uuid.uuid4()))
+                fold_ip = fold.get("target_ip", ip)
+                fold_node_key = str(
+                    fold.get("identity_key") or fold.get("node_key") or fold_ip
+                ).strip()
                 conn.execute("""
                     INSERT OR IGNORE INTO folds
-                    (id, ts, target_ip, fold_type, location,
+                    (id, ts, node_key, target_ip, fold_type, location,
                      detail, discovery_prob, gravity_weight, resolved)
-                    VALUES (?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
                 """, (
                     fold_id,
                     fold.get("detected_at", ""),
-                    fold.get("target_ip", ip),
+                    fold_node_key,
+                    fold_ip,
                     fold.get("fold_type", ""),
                     fold.get("location", ""),
                     fold.get("detail", "")[:500],
@@ -411,6 +436,23 @@ def ingest_transitions(conn: sqlite3.Connection, delta_dir: Path) -> int:
     return count
 
 
+# ── Schema migration ─────────────────────────────────────────────────────
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply incremental schema changes to an existing database."""
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM pragma_table_info('projections')"
+        )
+    }
+    if "node_key" not in existing:
+        conn.execute(
+            "ALTER TABLE projections ADD COLUMN node_key TEXT NOT NULL DEFAULT ''"
+        )
+        conn.commit()
+
+
 # ── Build the database ────────────────────────────────────────────────────
 
 def build_engagement_db(
@@ -430,11 +472,12 @@ def build_engagement_db(
     events_dir    = events_dir    or EVENTS_DIR
     interp_dir    = interp_dir    or INTERP_DIR
     discovery_dir = discovery_dir or DISCOVERY_DIR
-    delta_dir     = delta_dir     or SKG_STATE_DIR
+    delta_dir     = delta_dir     or DELTA_DIR
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.executescript(SCHEMA)
+    _migrate_schema(conn)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -656,10 +699,16 @@ def analyze_engagement_integrity(
         _check("DP-04", "realized",
                "All field values within declared bounds")
 
-    # DP-05: Referential integrity — projections reference known workloads
+    # DP-05: Referential integrity — projections reference known workloads.
+    # Join on node_key (stable identity) rather than exact workload_id so that
+    # different manifestation shapes (e.g. "10.0.0.1" vs "ssh::10.0.0.1") for
+    # the same identity are not treated as orphaned.
     orphaned = conn.execute("""
         SELECT COUNT(*) FROM projections p
-        WHERE p.workload_id NOT IN (
+        WHERE p.node_key NOT IN (
+            SELECT DISTINCT node_key FROM observations WHERE node_key != ''
+        )
+        AND p.workload_id NOT IN (
             SELECT DISTINCT workload_id FROM observations
         )
     """).fetchone()[0]

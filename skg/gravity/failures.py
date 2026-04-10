@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import SKG_STATE_DIR
+from skg_core.config.paths import SKG_STATE_DIR
 
 
 class GravityFailureReporter:

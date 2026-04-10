@@ -1,0 +1,5 @@
+score_key: host_score
+status_priority:
+  blocked: 3
+  realized: 2
+  unknown: 1

@@ -71,9 +71,20 @@ def iso_now() -> str:
 def _ev(wicket_id: str, status: str, rank: int, confidence: float,
         detail: str, workload_id: str, run_id: str,
         source_kind: str = "db_profiler_runtime",
-        pointer: str = "") -> dict:
+        pointer: str = "",
+        attack_path_id: str = "") -> dict:
     """Build a compliant obs.attack.precondition envelope event."""
     now = iso_now()
+    payload: dict = {
+        "wicket_id":    wicket_id,
+        "status":       status,
+        "workload_id":  workload_id,
+        "detail":       detail,
+        "run_id":       run_id,
+        "observed_at":  now,
+    }
+    if attack_path_id:
+        payload["attack_path_id"] = attack_path_id
     return {
         "id":   str(uuid.uuid4()),
         "ts":   now,
@@ -83,14 +94,7 @@ def _ev(wicket_id: str, status: str, rank: int, confidence: float,
             "toolchain":  TOOLCHAIN,
             "version":    get_version(),
         },
-        "payload": {
-            "wicket_id":    wicket_id,
-            "status":       status,
-            "workload_id":  workload_id,
-            "detail":       detail,
-            "run_id":       run_id,
-            "observed_at":  now,
-        },
+        "payload": payload,
         "provenance": {
             "evidence_rank": rank,
             "evidence": {
@@ -912,6 +916,16 @@ def profile_table(url: str, table: str, workload_id: str,
     finally:
         db.close()
         save_state(workload_id, state)
+
+    # Stamp attack_path_id onto each event payload so the projector can resolve
+    # the correct attack path rather than default-pathing everything.
+    if attack_path_id:
+        for ev in all_events:
+            try:
+                if "attack_path_id" not in ev["payload"]:
+                    ev["payload"]["attack_path_id"] = attack_path_id
+            except (KeyError, TypeError):
+                pass
 
     return all_events
 

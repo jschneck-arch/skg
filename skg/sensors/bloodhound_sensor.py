@@ -46,9 +46,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.sensors import BaseSensor, register, emit_events
+from skg.sensors import BaseSensor, register
 from skg.sensors.adapter_runner import run_bloodhound
-from skg.core.paths import SKG_STATE_DIR
+from skg_core.config.paths import SKG_STATE_DIR
+try:
+    from skg_services.gravity.event_writer import emit_events
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import emit_events
 
 log = logging.getLogger("skg.sensors.bloodhound")
 
@@ -573,7 +577,9 @@ def write_bh_dir(data: dict, bh_dir: Path):
         (bh_dir / f"{key}.json").write_text(
             json.dumps({key: items, "count": len(items)}, indent=2)
         )
-    # Sessions stored separately (not a standard BH file, used for AD-22)
+    # Sessions stored separately (not a standard BH file). The runtime seam
+    # in skg.sensors.adapter_runner routes this evidence into canonical
+    # AD-domain input shape for AD-22 migration readiness.
     sessions = data.get("sessions", [])
     if sessions:
         (bh_dir / "sessions.json").write_text(
@@ -674,7 +680,14 @@ class BloodHoundSensor(BaseSensor):
 
             if self._ctx and wicket_id:
                 et = f"{wicket_id}: {p.get('detail','')}"
-                conf = self._ctx.calibrate(base_conf, et, wicket_id, domain, workload_id)
+                conf = self._ctx.calibrate(
+                    base_conf,
+                    et,
+                    wicket_id,
+                    domain,
+                    workload_id,
+                    source_id=ev.get("source", {}).get("source_id", ""),
+                )
                 ev["provenance"]["evidence"]["confidence"] = conf
                 self._ctx.record(
                     evidence_text=et, wicket_id=wicket_id, domain=domain,

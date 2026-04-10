@@ -450,23 +450,28 @@ def ingest_from_surface(surface_path: str, out_dir: str, api_key: str) -> dict:
         print("[NVD-FEED] No service versions found to look up.")
         return {"candidates": [], "run_id": run_id}
 
-    # Query NVD for each unique service
-    seen_services = set()
+    # Query NVD for each unique (target, service) pair.
+    # NVD API responses are cached by service string to avoid redundant calls,
+    # but events are emitted once per (target, service) so each host gets coverage.
+    queried_services: set[str] = set()  # tracks unique service strings (for API dedup)
+    seen_target_services: set[tuple[str, str]] = set()  # tracks (ip, svc) pairs for event dedup
     events_file = out_path / f"cve_events_{run_id[:8]}.ndjson"
 
     for ip, services in service_versions.items():
         print(f"  Target: {ip}")
         for svc in services:
-            if svc in seen_services:
+            key = (ip, svc)
+            if key in seen_target_services:
                 continue
-            seen_services.add(svc)
+            seen_target_services.add(key)
+            queried_services.add(svc)
 
             candidates = ingest_service(svc, ip, events_file, api_key, run_id)
             all_candidates.extend(candidates)
 
     # Summary
     print()
-    print(f"[NVD-FEED] Queried {len(seen_services)} services")
+    print(f"[NVD-FEED] Queried {len(queried_services)} unique services across {len(seen_target_services)} (target, service) pairs")
     print(f"[NVD-FEED] Found {len(all_candidates)} high-severity CVE matches")
     if events_file.exists():
         count = sum(1 for _ in open(events_file))
@@ -478,7 +483,7 @@ def ingest_from_surface(surface_path: str, out_dir: str, api_key: str) -> dict:
         json.dump({
             "run_id": run_id,
             "ts": iso_now(),
-            "services_queried": list(seen_services),
+            "services_queried": list(queried_services),
             "candidates": all_candidates,
         }, f, indent=2)
     print(f"[NVD-FEED] Summary: {summary_file}")

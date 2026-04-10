@@ -61,7 +61,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from skg.core.paths import SKG_STATE_DIR
+from skg_core.config.paths import SKG_STATE_DIR
 from skg.intel.gap_detector import detect_from_events, detect_from_web_fingerprints
 from skg.identity import parse_workload_ref
 
@@ -430,7 +430,11 @@ class FoldDetector:
                 # CVSS 10.0 → 0.95, CVSS 7.0 → 0.70, CVSS 4.0 → 0.40
                 prob = min(0.95, max(0.20, cvss / 10.5))
 
-                target_ip  = payload.get("target_ip", "unknown")
+                node_key   = (
+                    payload.get("identity_key")
+                    or payload.get("target_ip")
+                    or "unknown"
+                )
                 service    = ""
                 try:
                     service = json.loads(payload.get("detail","{}")).get("service","")
@@ -439,7 +443,7 @@ class FoldDetector:
 
                 folds.append(Fold(
                     fold_type="contextual",
-                    location=f"cve::{target_ip}",
+                    location=f"cve::{node_key}",
                     constraint_source=f"nvd_feed::{cve_id}",
                     discovery_probability=prob,
                     detail=(
@@ -453,15 +457,15 @@ class FoldDetector:
                         "cve_id": cve_id,
                         "service": service,
                         "cvss": cvss,
-                        "target_ip": target_ip,
+                        "identity_key": node_key,
                     },
                     hypotheses=[
-                        f"{cve_id} reflects a real condition on {target_ip} that current wickets do not express",
+                        f"{cve_id} reflects a real condition on {node_key} that current wickets do not express",
                         "The generic service model is underspecified for this observed version/configuration",
                     ],
                     discriminators=[
                         f"Map {cve_id} to a concrete evidence-checkable wicket",
-                        f"Collect service/version/config detail for {service or target_ip}",
+                        f"Collect service/version/config detail for {service or node_key}",
                     ],
                 ))
 
@@ -490,8 +494,33 @@ class FoldDetector:
         # Track latest observation per (identity_key, wicket_id)
         latest: dict[tuple, dict] = {}
 
+        # Only look at events from the past 30 days to prevent unbounded accumulation.
+        # Events older than this have already been captured in pearls or are irrelevant.
+        _cutoff = now - timedelta(days=30)
+
         if events_dir and events_dir.exists():
-            for f in sorted(events_dir.glob("*.ndjson"))[-100:]:
+            try:
+                from skg_protocol.observation_mapping import decay_class_for_event as _kernel_decay_class
+            except Exception:
+                from skg.kernel.adapters import _decay_class as _kernel_decay_class
+            # Collect recent sensor/gravity event files; skip pure CVE-feed files which
+            # are not per-target observations that need re-observation.
+            _all_files = sorted(events_dir.glob("*.ndjson"))
+            _recent_files = []
+            for _f in _all_files:
+                # Skip CVE feed files (not re-observable target-side evidence)
+                if _f.name.startswith("cve_"):
+                    continue
+                try:
+                    _mtime = datetime.fromtimestamp(_f.stat().st_mtime, tz=timezone.utc)
+                    if _mtime >= _cutoff:
+                        _recent_files.append(_f)
+                except Exception:
+                    pass
+            # Fallback: if nothing in the window, scan last 50 non-cve files
+            if not _recent_files:
+                _recent_files = [f for f in _all_files[-100:] if not f.name.startswith("cve_")]
+            for f in _recent_files[-100:]:
                 for line in f.read_text(errors="replace").splitlines():
                     if not line.strip():
                         continue
@@ -504,12 +533,23 @@ class FoldDetector:
 
                     payload     = ev.get("payload", {})
                     prov        = ev.get("provenance", {})
+                    source      = ev.get("source", {})
                     wicket_id   = payload.get("wicket_id", "")
                     workload_id = payload.get("workload_id", "")
                     status      = payload.get("status", "unknown")
                     ts_str      = ev.get("ts", "")
-                    decay_class = prov.get("evidence", {}).get(
-                        "source_kind", "operational")
+                    source_id   = str(source.get("source_id", "") or "")
+                    instrument  = source_id.split(".")[-1] if "." in source_id else source_id
+                    evidence_rank = int(prov.get("evidence_rank") or prov.get("evidence", {}).get("rank") or 3)
+                    decay_class = _kernel_decay_class(instrument, evidence_rank)
+
+                    # CVE-feed wickets are not target-side observations that need
+                    # re-observation — skip them to avoid spurious temporal folds.
+                    if wicket_id.startswith("CVE-"):
+                        continue
+                    # Skip NVD/CVE sensor source events
+                    if "nvd" in source_id.lower() or "cve_sensor" in source_id.lower():
+                        continue
 
                     if not wicket_id or status != "realized":
                         continue
@@ -536,7 +576,10 @@ class FoldDetector:
                     continue
                 ts_str = pearl.get("timestamp", "")
                 snapshot = pearl.get("energy_snapshot", {})
-                workload_id = snapshot.get("workload_id") or f"gravity::{snapshot.get('target_ip', '')}"
+                workload_id = (
+                    snapshot.get("workload_id")
+                    or f"gravity::{snapshot.get('identity_key') or snapshot.get('target_ip', '')}"
+                )
                 identity_key = snapshot.get("identity_key") or _identity_key(workload_id)
                 decay_class = snapshot.get("decay_class", "operational")
                 for change in pearl.get("state_changes", []):
@@ -544,6 +587,10 @@ class FoldDetector:
                         continue
                     wicket_id = change.get("wicket_id", "")
                     if not wicket_id:
+                        continue
+                    # CVE-prefixed wicket IDs are NVD feed artifacts, not
+                    # target-side observations that need re-observation.
+                    if wicket_id.startswith("CVE-"):
                         continue
                     key = (identity_key, wicket_id)
                     if key not in latest or ts_str > latest[key]["ts"]:

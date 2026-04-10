@@ -388,6 +388,86 @@ def run_checks(c: dict, out: Path, attack_path_id: str,
 # Entry point
 # ---------------------------------------------------------------------------
 
+def run(
+    host: str,
+    user: str,
+    workload_id: str,
+    run_id: str,
+    *,
+    password: str | None = None,
+    key: str | None = None,
+    ssh_port: int = 22,
+    timeout: int = 30,
+    binary: str = "",
+    attack_path_id: str = "binary_stack_overflow_v1",
+) -> list[dict]:
+    """
+    Programmatic entry point called by gravity_field._exec_binary_analysis.
+
+    Connects via SSH, discovers candidate binaries if none specified,
+    runs the full BA-01..BA-06 check suite, and returns all events as a list.
+    """
+    import paramiko
+    import tempfile
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    connect_kw: dict = {"hostname": host, "port": ssh_port,
+                        "username": user, "timeout": timeout}
+    if key:
+        connect_kw["key_filename"] = str(Path(key).expanduser().resolve())
+    elif password:
+        connect_kw["password"] = password
+
+    try:
+        client.connect(**connect_kw)
+    except Exception as exc:
+        return []
+
+    # Discover candidate binaries if none provided
+    candidates: list[str] = []
+    if binary:
+        candidates = [binary]
+    else:
+        def _find(cmd: str) -> list[str]:
+            try:
+                _, out, _ = client.exec_command(cmd, timeout=20)
+                return [l.strip() for l in out.read().decode("utf-8", errors="replace").splitlines()
+                        if l.strip()]
+            except Exception:
+                return []
+
+        suid_bins = _find("find / -perm -4000 -type f 2>/dev/null | head -10")
+        tmp_bins  = _find("find /tmp /var/tmp -type f -executable 2>/dev/null | head -5")
+        candidates = (suid_bins + tmp_bins)[:8] or ["/bin/su"]
+
+    all_events: list[dict] = []
+    for bin_path in candidates:
+        with tempfile.NamedTemporaryFile(suffix=".ndjson", delete=False) as tf:
+            out_path = Path(tf.name)
+        try:
+            c = collect(client, bin_path, timeout=timeout)
+            run_checks(c, out_path, attack_path_id, run_id, workload_id, bin_path)
+            if out_path.exists():
+                for line in out_path.read_text().splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            all_events.append(json.loads(line))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        finally:
+            try:
+                out_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    client.close()
+    return all_events
+
+
 def main() -> None:
     import paramiko
 

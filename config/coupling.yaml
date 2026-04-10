@@ -1,0 +1,83 @@
+inter_local:
+  host:
+    host: 0.80
+    smb: 0.80
+    vuln: 0.85
+    data: 0.70
+    container: 0.60
+    lateral: 0.80
+    binary: 0.60
+  smb:
+    vuln: 0.90
+  credential:
+    host: 0.95
+    ssh: 0.95
+    web: 0.80
+  web:
+    data: 0.85
+    cmdi: 0.90
+    lateral: 0.55
+  cmdi:
+    shell: 0.90
+  container:
+    host: 0.85
+  lateral:
+    host: 0.70
+  data:
+    lateral: 0.65
+  binary:
+    host: 0.60
+
+cluster:
+  host:
+    host: 0.80
+    web: 0.75
+    data: 0.70
+    container: 0.60
+    lateral: 0.80
+  web:
+    host: 0.65
+    data: 0.85
+  credential:
+    host: 0.95
+    ssh: 0.95
+  container:
+    host: 0.85
+  lateral:
+    host: 0.70
+  data:
+    lateral: 0.65
+
+intra_target:
+  web:
+    data_pipeline: 0.65
+    host: 0.60
+    container_escape: 0.50
+  host:
+    web: 0.45
+    container_escape: 0.70
+    ad_lateral: 0.55
+    data_pipeline: 0.40
+  container_escape:
+    host: 0.75
+    web: 0.45
+    ad_lateral: 0.65
+  ad_lateral:
+    host: 0.60
+  aprs:
+    host: 0.70
+    container_escape: 0.50
+  binary_analysis:
+    host: 0.55
+  sysaudit:
+    host: 0.50
+  data_pipeline:
+    host: 0.30
+    web: 0.55
+
+decay_ttl_hours:
+  ephemeral: 4
+  operational: 24
+  structural: 168
+
+reverse_discount: 0.8

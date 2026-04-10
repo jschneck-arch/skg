@@ -1,0 +1,9 @@
+name: ai-testing
+status: scaffold
+runtime: domain-pack
+contracts:
+  catalogs: contracts/catalogs
+components:
+  adapters: adapters
+  projectors: projectors
+  policies: policies

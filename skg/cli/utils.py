@@ -4,10 +4,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 import urllib.request, urllib.error
-from skg.core.paths import (
-    SKG_HOME, SKG_STATE_DIR, DISCOVERY_DIR, CVE_DIR, SKG_CONFIG_DIR,
-    EVENTS_DIR, INTERP_DIR, IDENTITY_FILE,
-)
+from skg_core.config.paths import SKG_HOME, SKG_STATE_DIR, DISCOVERY_DIR, SKG_CONFIG_DIR, EVENTS_DIR, INTERP_DIR
+from skg_services.gravity.path_policy import CVE_DIR, IDENTITY_FILE
+from skg.identity import parse_workload_ref
 API = "http://127.0.0.1:5055"
 
 
@@ -63,7 +62,7 @@ def _resonance_engine():
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from skg.resonance.engine import ResonanceEngine
-    from skg.core.paths import RESONANCE_DIR
+    from skg_services.gravity.path_policy import RESONANCE_DIR
     engine = ResonanceEngine(RESONANCE_DIR)
     engine.boot()
     return engine
@@ -172,7 +171,7 @@ def _ensure_local_runtime_targets(surface: dict) -> None:
 def _surface_target(ip: str) -> dict | None:
     surface, _ = _load_surface_data()
     for target in surface.get("targets", []):
-        if target.get("ip") == ip:
+        if _subject_matches_filter(ip, identity_key=target.get("identity_key", ""), target=target):
             return target
     return None
 
@@ -320,6 +319,29 @@ def _run_python(script_path, *args, env_extra=None):
     return subprocess.call([sys.executable, str(script_path)] + list(args), env=env)
 
 
+def _load_skg_env_value(name: str) -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+
+    env_file = SKG_CONFIG_DIR / "skg.env"
+    if not env_file.exists():
+        return ""
+
+    try:
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            if key.strip() != name:
+                continue
+            return raw_value.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
 def _proposal_backlog() -> dict:
     proposals_dir = SKG_STATE_DIR / "proposals"
     counts = {
@@ -381,11 +403,11 @@ def _fold_summary_offline() -> dict:
 
 
 def _choose_fold_summary(api_folds: dict | None) -> dict:
-    offline = _fold_summary_offline()
-    online = (api_folds or {}).get("summary") or {}
-    if offline.get("total", 0) >= online.get("total", 0):
-        return offline
-    return online
+    # api_folds is None only when the daemon is unreachable.
+    # If the daemon responded (even with 0 folds), trust its answer over stale disk state.
+    if api_folds is not None:
+        return (api_folds or {}).get("summary") or {}
+    return _fold_summary_offline()
 
 
 def _load_folds_offline() -> list[dict]:
@@ -402,11 +424,11 @@ def _load_folds_offline() -> list[dict]:
 
 
 def _choose_fold_rows(api_folds: dict | None) -> list[dict]:
-    offline = _load_folds_offline()
-    online = (api_folds or {}).get("folds") or []
-    if len(offline) >= len(online):
-        return offline
-    return online
+    # api_folds is None only when the daemon is unreachable.
+    # If the daemon responded (even with 0 folds), trust its answer over stale disk state.
+    if api_folds is not None:
+        return (api_folds or {}).get("folds") or []
+    return _load_folds_offline()
 
 
 def _target_state_counts(target: dict) -> dict:
@@ -433,37 +455,330 @@ def _target_state_counts(target: dict) -> dict:
     }
 
 
-def _rank_surface_targets(surface: dict, folds: list[dict] | None = None) -> list[dict]:
-    fold_weight_by_ip = {}
-    fold_count_by_ip = {}
-    for fold in folds or []:
-        ip = fold.get("target_ip") or fold.get("location", "").split("::")[-1]
-        if not ip:
+def _collect_subject_aliases(*values: str) -> list[str]:
+    aliases: set[str] = set()
+
+    def add(value) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        aliases.add(text)
+        parsed = parse_workload_ref(text)
+        for candidate in (
+            parsed.get("identity_key"),
+            parsed.get("host"),
+            parsed.get("locator"),
+            parsed.get("manifestation_key"),
+        ):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                aliases.add(candidate_text)
+        if "://" in text:
+            try:
+                parsed_url = urlparse(text)
+                if parsed_url.hostname:
+                    aliases.add(parsed_url.hostname)
+            except Exception:
+                pass
+
+    for value in values:
+        add(value)
+    return sorted(aliases)
+
+
+def _subject_aliases(
+    identity_key: str = "",
+    *,
+    target: dict | None = None,
+    workload_id: str = "",
+    manifestation_key: str = "",
+    extra: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    target = dict(target or {})
+    values = [
+        identity_key,
+        workload_id,
+        manifestation_key,
+        target.get("identity_key"),
+        target.get("ip"),
+        target.get("host"),
+        target.get("hostname"),
+        target.get("workload_id"),
+        target.get("source_url"),
+    ]
+    if extra:
+        values.extend(list(extra))
+    return _collect_subject_aliases(*values)
+
+
+def _subject_matches_filter(
+    target_filter: str | None,
+    *,
+    identity_key: str = "",
+    target: dict | None = None,
+    workload_id: str = "",
+    manifestation_key: str = "",
+    extra: list[str] | tuple[str, ...] | None = None,
+) -> bool:
+    if not target_filter:
+        return True
+    needle = str(target_filter or "").strip()
+    if not needle:
+        return True
+    aliases = _subject_aliases(
+        identity_key,
+        target=target,
+        workload_id=workload_id,
+        manifestation_key=manifestation_key,
+        extra=extra,
+    )
+    return needle in aliases
+
+
+def _fold_identity_key(fold: dict) -> str:
+    why = fold.get("why") or {}
+    for candidate in (
+        fold.get("identity_key"),
+        why.get("identity_key"),
+        fold.get("workload_id"),
+        why.get("workload_id"),
+        fold.get("target_ip"),
+        why.get("target_ip"),
+        fold.get("location"),
+    ):
+        parsed = parse_workload_ref(str(candidate or ""))
+        identity_key = str(parsed.get("identity_key") or candidate or "").strip()
+        if identity_key:
+            return identity_key
+    return ""
+
+
+def _merge_workload_state_counts(workloads: list[dict]) -> dict:
+    precedence = {"unknown": 1, "blocked": 2, "realized": 3}
+    states: dict[str, str] = {}
+    unresolved_reasons: dict[str, int] = {}
+    compatibility_values: list[float] = []
+    decoherence_total = 0.0
+
+    for row in workloads:
+        measured = row.get("measured_now") or row
+        for status_key in ("unknown", "blocked", "realized"):
+            for node_id in measured.get(status_key, []) or []:
+                existing = states.get(node_id, "")
+                if precedence.get(status_key, 0) >= precedence.get(existing, 0):
+                    states[node_id] = status_key
+        if row.get("unknown"):
+            compatibility_values.append(float(row.get("compatibility_score", 0.0) or 0.0))
+            reason = str(row.get("unresolved_reason") or "unmeasured")
+            unresolved_reasons[reason] = unresolved_reasons.get(reason, 0) + 1
+        decoherence_total += float(row.get("decoherence", 0.0) or 0.0)
+
+    realized = sorted(node_id for node_id, status in states.items() if status == "realized")
+    blocked = sorted(node_id for node_id, status in states.items() if status == "blocked")
+    unknown = sorted(node_id for node_id, status in states.items() if status == "unknown")
+    return {
+        "unknown": len(unknown),
+        "realized": len(realized),
+        "blocked": len(blocked),
+        "realized_sample": realized[:15],
+        "unresolved_reasons": unresolved_reasons,
+        "compatibility_score_mean": round(sum(compatibility_values) / len(compatibility_values), 3) if compatibility_values else 0.0,
+        "decoherence_total": round(decoherence_total, 3),
+    }
+
+
+def _surface_subject_rows(measured_surface: dict | None = None, target_surface: dict | None = None) -> list[dict]:
+    measured_surface = dict(measured_surface or {})
+    target_surface = dict(target_surface or {})
+
+    target_index: dict[str, dict] = {}
+    for target in target_surface.get("targets", []) or []:
+        parsed = parse_workload_ref(
+            str(target.get("workload_id") or target.get("ip") or target.get("host") or "")
+        )
+        identity_key = str(target.get("identity_key") or parsed.get("identity_key") or "").strip()
+        if not identity_key:
             continue
-        fold_count_by_ip[ip] = fold_count_by_ip.get(ip, 0) + 1
+        current = dict(target_index.get(identity_key, {}))
+        current.update({k: v for k, v in target.items() if v not in (None, "", [], {})})
+        domains = set(current.get("domains", []) or [])
+        domains.update(target.get("domains", []) or [])
+        current["domains"] = sorted(domains)
+        current["identity_key"] = identity_key
+        if len(target.get("services", []) or []) >= len(current.get("services", []) or []):
+            current["services"] = list(target.get("services", []) or [])
+        target_index[identity_key] = current
+
+    groups: dict[str, dict] = {}
+    for row in measured_surface.get("workloads", []) or []:
+        identity_key = str(row.get("identity_key") or "").strip()
+        if not identity_key:
+            continue
+        target_meta = dict(target_index.get(identity_key, {}))
+        group = groups.setdefault(identity_key, {
+            "identity_key": identity_key,
+            "ip": target_meta.get("ip") or (identity_key if identity_key.count(".") == 3 else ""),
+            "host": target_meta.get("host") or identity_key,
+            "hostname": target_meta.get("hostname"),
+            "kind": target_meta.get("kind") or target_meta.get("os") or "?",
+            "os": target_meta.get("os"),
+            "domains": set(target_meta.get("domains", []) or []),
+            "services": list(target_meta.get("services", []) or []),
+            "workloads": [],
+            "manifestations": set(),
+            "wicket_states": dict(target_meta.get("wicket_states", {}) or {}),
+            "observed_tools": {},
+        })
+        group["domains"].add(str(row.get("domain") or "").strip())
+        if row.get("manifestation_key"):
+            group["manifestations"].add(str(row["manifestation_key"]))
+        group["workloads"].append(row)
+        tool_overlay = dict(row.get("observed_tools", {}) or {})
+        if tool_overlay.get("tool_names") or tool_overlay.get("observed_tools"):
+            current_overlay = dict(group.get("observed_tools", {}) or {})
+            merged_tools: dict[str, dict] = {
+                str(item.get("name") or ""): dict(item)
+                for item in current_overlay.get("observed_tools", []) or []
+                if str(item.get("name") or "").strip()
+            }
+            for item in tool_overlay.get("observed_tools", []) or []:
+                name = str(item.get("name") or "").strip()
+                if name:
+                    merged_tools[name] = dict(item)
+            current_overlay["observed_tools"] = sorted(
+                merged_tools.values(),
+                key=lambda item: str(item.get("name") or ""),
+            )
+            current_overlay["tool_names"] = sorted(merged_tools)
+            current_overlay["domain_hints"] = sorted({
+                str(domain or "").strip()
+                for item in current_overlay["observed_tools"]
+                for domain in item.get("domain_hints", []) or []
+                if str(domain or "").strip()
+            })
+            current_overlay["instrument_hints"] = sorted({
+                str(name or "").strip()
+                for item in current_overlay["observed_tools"]
+                for name in item.get("instrument_names", []) or []
+                if str(name or "").strip()
+            })
+            current_overlay["scope"] = str(
+                tool_overlay.get("scope")
+                or current_overlay.get("scope")
+                or "node_local"
+            )
+            current_overlay["status"] = str(
+                tool_overlay.get("status")
+                or current_overlay.get("status")
+                or "unknown"
+            )
+            current_overlay["observed_at"] = str(
+                tool_overlay.get("observed_at")
+                or current_overlay.get("observed_at")
+                or ""
+            )
+            current_overlay["notes"] = str(
+                tool_overlay.get("notes")
+                or current_overlay.get("notes")
+                or ""
+            )
+            group["observed_tools"] = current_overlay
+
+    for identity_key, target in target_index.items():
+        group = groups.setdefault(identity_key, {
+            "identity_key": identity_key,
+            "ip": target.get("ip") or (identity_key if identity_key.count(".") == 3 else ""),
+            "host": target.get("host") or identity_key,
+            "hostname": target.get("hostname"),
+            "kind": target.get("kind") or target.get("os") or "?",
+            "os": target.get("os"),
+            "domains": set(target.get("domains", []) or []),
+            "services": list(target.get("services", []) or []),
+            "workloads": [],
+            "manifestations": set(),
+            "wicket_states": dict(target.get("wicket_states", {}) or {}),
+            "observed_tools": {},
+        })
+        group["domains"].update(target.get("domains", []) or [])
+
+    rows = []
+    for identity_key, group in groups.items():
+        row = {
+            "identity_key": identity_key,
+            "ip": group.get("ip") or "",
+            "host": group.get("host") or identity_key,
+            "hostname": group.get("hostname"),
+            "kind": group.get("kind") or "?",
+            "os": group.get("os"),
+            "domains": sorted(domain for domain in group.get("domains", set()) if domain),
+            "services": list(group.get("services", []) or []),
+            "manifestations": sorted(group.get("manifestations", set())),
+            "workloads": list(group.get("workloads", []) or []),
+            "wicket_states": dict(group.get("wicket_states", {}) or {}),
+            "observed_tools": dict(group.get("observed_tools", {}) or {}),
+        }
+        if row["workloads"]:
+            counts = _merge_workload_state_counts(row["workloads"])
+        else:
+            counts = _target_state_counts(row)
+            counts["realized_sample"] = []
+        row.update({
+            "realized_count": counts["realized"],
+            "blocked_count": counts["blocked"],
+            "unknown_count": counts["unknown"],
+            "realized_sample": counts.get("realized_sample", []),
+            "unresolved_reasons": counts["unresolved_reasons"],
+            "compatibility_score_mean": counts["compatibility_score_mean"],
+            "decoherence_total": counts["decoherence_total"],
+        })
+        row["aliases"] = _subject_aliases(
+            identity_key,
+            target=row,
+            extra=row.get("manifestations", []),
+        )
+        rows.append(row)
+
+    rows.sort(
+        key=lambda row: (
+            -int(row.get("unknown_count", 0) or 0),
+            -int(row.get("blocked_count", 0) or 0),
+            str(row.get("identity_key") or row.get("ip") or ""),
+        ),
+    )
+    return rows
+
+
+def _rank_surface_targets(surface: dict, folds: list[dict] | None = None) -> list[dict]:
+    fold_weight_by_identity = {}
+    fold_count_by_identity = {}
+    for fold in folds or []:
+        identity_key = _fold_identity_key(fold)
+        if not identity_key:
+            continue
+        fold_count_by_identity[identity_key] = fold_count_by_identity.get(identity_key, 0) + 1
         try:
-            fold_weight_by_ip[ip] = fold_weight_by_ip.get(ip, 0.0) + float(fold.get("gravity_weight", 0.0))
+            fold_weight_by_identity[identity_key] = fold_weight_by_identity.get(identity_key, 0.0) + float(fold.get("gravity_weight", 0.0))
         except Exception:
             pass
 
     ranked = []
-    for target in surface.get("targets", []):
-        counts = _target_state_counts(target)
-        ip = target.get("ip", "")
+    for target in _surface_subject_rows(measured_surface=surface, target_surface=surface):
+        identity_key = target.get("identity_key", "")
         ranked.append({
-            "ip": ip,
+            "identity_key": identity_key,
+            "ip": target.get("ip") or identity_key,
             "kind": target.get("kind") or target.get("os") or "?",
             "domains": target.get("domains", []),
             "services": target.get("services", []),
-            "unknown": counts["unknown"],
-            "realized": counts["realized"],
-            "blocked": counts["blocked"],
-            "unresolved_reasons": counts["unresolved_reasons"],
-            "compatibility_score_mean": counts["compatibility_score_mean"],
-            "decoherence_total": counts["decoherence_total"],
-            "folds": fold_count_by_ip.get(ip, 0),
-            "fold_weight": round(fold_weight_by_ip.get(ip, 0.0), 2),
-            "priority": counts["unknown"] + fold_weight_by_ip.get(ip, 0.0),
+            "unknown": target.get("unknown_count", 0),
+            "realized": target.get("realized_count", 0),
+            "blocked": target.get("blocked_count", 0),
+            "unresolved_reasons": target.get("unresolved_reasons", {}),
+            "compatibility_score_mean": target.get("compatibility_score_mean", 0.0),
+            "decoherence_total": target.get("decoherence_total", 0.0),
+            "folds": fold_count_by_identity.get(identity_key, 0),
+            "fold_weight": round(fold_weight_by_identity.get(identity_key, 0.0), 2),
+            "priority": int(target.get("unknown_count", 0) or 0) + fold_weight_by_identity.get(identity_key, 0.0),
         })
     ranked.sort(key=lambda row: (row["priority"], row["unknown"], row["realized"]), reverse=True)
     return ranked
@@ -776,8 +1091,16 @@ def _load_target_snapshot_from_pearls(target_filter: str, at_ts=None) -> dict | 
         except Exception:
             continue
         snap = pearl.get("target_snapshot", {}) or {}
-        target_ip = snap.get("ip") or pearl.get("energy_snapshot", {}).get("target_ip")
-        if target_ip != target_filter:
+        if not _subject_matches_filter(
+            target_filter,
+            identity_key=str(snap.get("identity_key") or ""),
+            target=snap,
+            workload_id=str(pearl.get("workload_id") or ""),
+            extra=[
+                pearl.get("target_ip"),
+                (pearl.get("energy_snapshot", {}) or {}).get("target_ip"),
+            ],
+        ):
             continue
         ts = _parse_report_timestamp(pearl.get("timestamp"))
         if at_ts and (ts is None or ts > at_ts):

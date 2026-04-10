@@ -1,0 +1,3 @@
+# redteam
+
+Domain scaffold for \.

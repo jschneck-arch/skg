@@ -1,0 +1,3 @@
+# medical
+
+Domain scaffold for \.

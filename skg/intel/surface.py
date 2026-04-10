@@ -27,8 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import INTERP_DIR, EVENTS_DIR, SKG_STATE_DIR, SKG_HOME
+from skg_core.config.paths import INTERP_DIR, EVENTS_DIR, SKG_STATE_DIR, SKG_HOME
 from skg.identity import parse_workload_ref
+from skg.kernel.pearl_manifold import load_pearl_manifold
+from skg.substrate.node import ViewNode
+from skg.temporal.interp import normalize_interp_classification, read_interp_payload
 
 # Score key by domain
 SCORE_KEY = {
@@ -39,9 +42,13 @@ SCORE_KEY = {
     "web":              "web_score",
     "ai_target":        "ai_score",
     "data":             "data_score",
+    "data_pipeline":    "data_score",
     "supply_chain":     "supply_chain_score",
     "iot_firmware":     "iot_score",
     "binary":           "binary_score",
+    "binary_analysis":  "binary_score",
+    "metacognition":    "metacognition_score",
+    "nginx":            "web_score",
 }
 
 DOMAIN_LABEL = {
@@ -52,9 +59,13 @@ DOMAIN_LABEL = {
     "web":              "Web Surface",
     "ai_target":        "AI/ML Target",
     "data":             "Data Exposure",
+    "data_pipeline":    "Data Pipeline",
     "supply_chain":     "Supply Chain",
     "iot_firmware":     "IoT Firmware",
     "binary":           "Binary Exploitation",
+    "binary_analysis":  "Binary Analysis",
+    "metacognition":    "Metacognition",
+    "nginx":            "NGINX / Web",
 }
 
 CLASSIFICATION_RANK = {
@@ -66,15 +77,7 @@ CLASSIFICATION_RANK = {
 
 
 def _normalize_classification(classification: str) -> str:
-    if classification in {"realized", "not_realized", "indeterminate", "unknown"}:
-        return classification
-    if classification == "fully_realized":
-        return "realized"
-    if classification == "blocked":
-        return "not_realized"
-    if classification in {"partial", "indeterminate_h1"}:
-        return "indeterminate"
-    return classification or "unknown"
+    return normalize_interp_classification(classification)
 
 
 def _read_interp_dir(interp_dir: Path) -> list[dict]:
@@ -85,26 +88,9 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
     files = list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson"))
     for f in files:
         try:
-            text = f.read_text()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                if f.suffix != ".ndjson":
-                    raise
-                data = None
-                for line in reversed(text.splitlines()):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    data = json.loads(line)
-                    break
-                if data is None:
-                    continue
-            # Handle both direct payload and wrapped event
-            if "payload" in data:
-                payload = data["payload"]
-            else:
-                payload = data
+            payload = read_interp_payload(f)
+            if payload is None:
+                continue
             wid    = payload.get("workload_id", f.stem)
             path_id = payload.get("attack_path_id", "unknown")
             key    = f"{wid}::{path_id}"
@@ -127,6 +113,9 @@ def _read_interp_dir(interp_dir: Path) -> list[dict]:
 
 
 def _infer_domain(payload: dict, filename: str) -> str:
+    explicit = str(payload.get("domain") or "").strip()
+    if explicit:
+        return explicit
     for key, domain in [("aprs","aprs"), ("lateral_score","ad_lateral"),
                         ("escape_score","container_escape"), ("host_score","host"),
                         ("web_score","web"), ("ai_score","ai_target"),
@@ -158,10 +147,113 @@ def _get_score(payload: dict, domain: str) -> float:
     return 0.0
 
 
+def _memory_overlay_index(pearls_path: Path | None = None) -> dict[tuple[str, str], dict]:
+    pearls_path = pearls_path or (SKG_STATE_DIR / "pearls.jsonl")
+    if not pearls_path.exists():
+        return {}
+
+    try:
+        manifold = load_pearl_manifold(pearls_path)
+    except Exception:
+        return {}
+
+    overlays: dict[tuple[str, str], dict] = {}
+    for neighborhood in manifold.neighborhoods():
+        overlays[(neighborhood.identity_key, neighborhood.domain)] = {
+            "pearl_count": neighborhood.pearl_count,
+            "reinforced_wickets": list(neighborhood.reinforced_wickets),
+            "reinforced_reasons": list(neighborhood.reinforced_reasons),
+            "transition_density": neighborhood.transition_density,
+            "mean_energy": neighborhood.mean_energy,
+            "manifestation_keys": list(neighborhood.manifestation_keys),
+        }
+    return overlays
+
+
+def _observed_tool_index(events_dir: Path | None = None) -> dict[str, dict]:
+    events_dir = events_dir or EVENTS_DIR
+    if not events_dir.exists():
+        return {}
+
+    latest: dict[str, tuple[float, dict]] = {}
+    for path in events_dir.glob("*.ndjson"):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if event.get("type") != "obs.substrate.node":
+                continue
+            payload = dict(event.get("payload", {}) or {})
+            if str(payload.get("node_id") or "").strip() != "CTX-TOOLS":
+                continue
+            subject = parse_workload_ref(
+                str(payload.get("workload_id") or payload.get("identity_key") or payload.get("target_ip") or "")
+            )
+            identity_key = str(subject.get("identity_key") or "").strip()
+            if not identity_key:
+                continue
+            observed_at = str(payload.get("observed_at") or event.get("ts") or "").strip()
+            try:
+                observed_ts = datetime.fromisoformat(observed_at).timestamp() if observed_at else 0.0
+            except Exception:
+                observed_ts = 0.0
+            current = latest.get(identity_key)
+            if current is not None and observed_ts < current[0]:
+                continue
+            attrs = dict(payload.get("attributes") or {})
+            latest[identity_key] = (
+                observed_ts,
+                {
+                    "observed_at": observed_at,
+                    "tool_names": list(attrs.get("tool_names") or []),
+                    "observed_tools": list(attrs.get("observed_tools") or []),
+                    "domain_hints": list(attrs.get("domain_hints") or []),
+                    "instrument_hints": list(attrs.get("instrument_hints") or []),
+                    "scope": str(attrs.get("scope") or "node_local"),
+                    "status": str(payload.get("status") or "unknown"),
+                    "notes": str(payload.get("notes") or ""),
+                },
+            )
+    return {
+        identity_key: payload
+        for identity_key, (_observed_ts, payload) in latest.items()
+    }
+
+
+def _build_view_nodes(workloads: list[dict]) -> list[dict]:
+    views: list[dict] = []
+    for workload in workloads:
+        view = ViewNode(
+            identity_key=str(workload.get("identity_key", "")),
+            manifestation_key=str(workload.get("manifestation_key", "")),
+            domain=str(workload.get("domain", "")),
+            attack_path_id=str(workload.get("attack_path_id", "")),
+            classification=str(workload.get("classification", "unknown")),
+            score=float(workload.get("score", 0.0) or 0.0),
+            realized=list(workload.get("realized", []) or []),
+            blocked=list(workload.get("blocked", []) or []),
+            unknown=list(workload.get("unknown", []) or []),
+            computed_at=str(workload.get("computed_at", "")),
+            memory_overlay=dict(workload.get("memory_overlay", {}) or {}),
+            observed_tools=dict(workload.get("observed_tools", {}) or {}),
+        )
+        views.append(view.as_dict())
+    return views
+
+
 def surface(interp_dir: Path | None = None,
             delta_store=None,
             graph=None,
-            min_score: float = 0.0) -> dict:
+            min_score: float = 0.0,
+            pearls_path: Path | None = None) -> dict:
     """
     Current attack surface across all workloads.
 
@@ -186,6 +278,8 @@ def surface(interp_dir: Path | None = None,
     """
     interp_dir = interp_dir or INTERP_DIR
     projections = _read_interp_dir(interp_dir)
+    memory_overlays = _memory_overlay_index(pearls_path)
+    observed_tooling = _observed_tool_index()
 
     workloads = []
     for proj in projections:
@@ -203,6 +297,31 @@ def surface(interp_dir: Path | None = None,
                 neighbors = [neighbor_id for neighbor_id, _, _ in graph.neighbors(wid, min_weight=0.1)]
             except Exception:
                 pass
+
+        memory_overlay = memory_overlays.get(
+            (ident["identity_key"], domain),
+            {
+                "pearl_count": 0,
+                "reinforced_wickets": [],
+                "reinforced_reasons": [],
+                "transition_density": 0.0,
+                "mean_energy": 0.0,
+                "manifestation_keys": [],
+            },
+        )
+        tool_overlay = observed_tooling.get(
+            ident["identity_key"],
+            {
+                "observed_at": "",
+                "tool_names": [],
+                "observed_tools": [],
+                "domain_hints": [],
+                "instrument_hints": [],
+                "scope": "node_local",
+                "status": "unknown",
+                "notes": "",
+            },
+        )
 
         workloads.append({
             "workload_id":    proj.get("workload_id","unknown"),
@@ -229,6 +348,16 @@ def surface(interp_dir: Path | None = None,
             "unresolved_reason": proj.get("unresolved_reason", ""),
             "neighbors":      neighbors,
             "computed_at":    proj.get("computed_at",""),
+            "fresh_view":     True,
+            "measured_now": {
+                "classification": classification,
+                "realized": list(proj.get("realized", []) or []),
+                "blocked": list(proj.get("blocked", []) or []),
+                "unknown": list(proj.get("unknown", []) or []),
+                "computed_at": proj.get("computed_at",""),
+            },
+            "memory_overlay": memory_overlay,
+            "observed_tools": tool_overlay,
         })
 
     # Sort: realized first, then by score desc
@@ -241,9 +370,11 @@ def surface(interp_dir: Path | None = None,
     realized_paths = [w for w in workloads if w["classification"] == "realized"]
     indet_paths    = [w for w in workloads if w["classification"] == "indeterminate"]
     not_real_paths = [w for w in workloads if w["classification"] == "not_realized"]
+    views = _build_view_nodes(workloads)
 
     return {
         "workloads": workloads,
+        "view_nodes": views,
         "summary": {
             "total_workloads":    len(workloads),
             "realized_paths":     len(realized_paths),
@@ -254,8 +385,26 @@ def surface(interp_dir: Path | None = None,
                  "score": w["score"], "attack_path_id": w["attack_path_id"]}
                 for w in realized_paths[:5]
             ],
+            "memory_backed_workloads": sum(
+                1 for w in workloads
+                if int((w.get("memory_overlay", {}) or {}).get("pearl_count", 0) or 0) > 0
+            ),
         },
     }
+
+
+def view_nodes(interp_dir: Path | None = None,
+               delta_store=None,
+               graph=None,
+               min_score: float = 0.0,
+               pearls_path: Path | None = None) -> list[dict]:
+    return surface(
+        interp_dir=interp_dir,
+        delta_store=delta_store,
+        graph=graph,
+        min_score=min_score,
+        pearls_path=pearls_path,
+    ).get("view_nodes", [])
 
 
 def delta_report(delta_store=None, hours: int = 24) -> dict:
@@ -265,7 +414,7 @@ def delta_report(delta_store=None, hours: int = 24) -> dict:
     if delta_store is None:
         try:
             from skg.temporal import DeltaStore
-            from skg.core.paths import DELTA_DIR
+            from skg_core.config.paths import DELTA_DIR
             delta_store = DeltaStore(DELTA_DIR)
         except Exception:
             return {"error": "DeltaStore unavailable", "transitions": []}

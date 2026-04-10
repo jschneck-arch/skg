@@ -267,3 +267,50 @@ class Node:
             "tags": self.tags,
             "metadata": self.metadata,
         }
+
+
+@dataclass
+class ViewNode:
+    """
+    Fresh present-tense view of a workload-local node context.
+
+    `measured_now` is only what the current observer/projector collapsed.
+    `memory_overlay` is advisory history from the pearl ledger.
+    """
+    identity_key: str
+    manifestation_key: str
+    domain: str
+    attack_path_id: str
+    classification: str
+    score: float
+    realized: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+    computed_at: str = ""
+    memory_overlay: dict = field(default_factory=dict)
+    observed_tools: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "identity_key": self.identity_key,
+            "manifestation_key": self.manifestation_key,
+            "domain": self.domain,
+            "attack_path_id": self.attack_path_id,
+            "classification": self.classification,
+            "score": self.score,
+            "realized": list(self.realized),
+            "blocked": list(self.blocked),
+            "unknown": list(self.unknown),
+            "computed_at": self.computed_at,
+            "fresh_view": True,
+            "measured_now": {
+                "classification": self.classification,
+                "realized": list(self.realized),
+                "blocked": list(self.blocked),
+                "unknown": list(self.unknown),
+                "computed_at": self.computed_at,
+                "observed_tools": dict(self.observed_tools or {}),
+            },
+            "memory_overlay": dict(self.memory_overlay or {}),
+            "observed_tools": dict(self.observed_tools or {}),
+        }

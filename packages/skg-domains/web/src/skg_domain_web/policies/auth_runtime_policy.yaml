@@ -1,0 +1,18 @@
+max_default_attempts: 8
+default_credentials:
+  - username: bee
+    password: bug
+  - username: admin
+    password: password
+  - username: admin
+    password: admin
+  - username: admin
+    password: admin123
+  - username: root
+    password: root
+  - username: root
+    password: toor
+  - username: guest
+    password: guest
+  - username: demo
+    password: demo

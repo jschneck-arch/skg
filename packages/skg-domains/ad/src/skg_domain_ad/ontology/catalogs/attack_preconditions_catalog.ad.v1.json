@@ -1,0 +1,227 @@
+{
+  "domain": "ad",
+  "version": "1.0.0",
+  "description": "Canonical AD domain preconditions catalog for privilege relationship mapping, credential-hint normalization, weak password policy, AS-REP baseline exposure, Kerberoast baseline exposure, LAPS baseline coverage, AD-22 baseline tiering posture, and delegation posture-core (AD-06/AD-08) slices (Phases 7A, 7C, 7D, 7F, 7G, 7I, 7L, and 7P).",
+  "wickets": {
+    "AD-PR-01": {
+      "id": "AD-PR-01",
+      "label": "privileged_groups_enumerated",
+      "description": "Privileged AD groups are present in the inventory snapshot.",
+      "evidence_hint": "Group inventory includes names matching configured privileged-group aliases.",
+      "decay_class": "operational"
+    },
+    "AD-PR-02": {
+      "id": "AD-PR-02",
+      "label": "privileged_group_memberships_present",
+      "description": "At least one membership edge targets a privileged AD group.",
+      "evidence_hint": "Group inventory provides non-empty member lists for privileged groups.",
+      "decay_class": "operational"
+    },
+    "AD-PR-03": {
+      "id": "AD-PR-03",
+      "label": "enabled_human_privileged_members_present",
+      "description": "At least one enabled non-machine user is assigned to a privileged AD group.",
+      "evidence_hint": "Membership object IDs resolve to enabled user accounts not ending with '$'.",
+      "decay_class": "operational"
+    },
+    "AD-CH-01": {
+      "id": "AD-CH-01",
+      "label": "credential_hints_in_descriptions_present",
+      "description": "At least one AD account description contains credential-hint text patterns.",
+      "evidence_hint": "Description text contains configured credential keywords (password/passwd/pwd/secret/etc).",
+      "decay_class": "operational"
+    },
+    "AD-CH-02": {
+      "id": "AD-CH-02",
+      "label": "enabled_non_machine_credential_hints_present",
+      "description": "At least one enabled non-machine account contains credential-hint text in its description.",
+      "evidence_hint": "Credential-hint findings resolve to enabled non-machine principals.",
+      "decay_class": "operational"
+    },
+    "AD-WP-01": {
+      "id": "AD-WP-01",
+      "label": "password_policy_snapshot_observed",
+      "description": "Domain password policy attributes are present in the observed AD policy snapshot.",
+      "evidence_hint": "Domain policy includes minimum password length attributes.",
+      "decay_class": "operational"
+    },
+    "AD-WP-02": {
+      "id": "AD-WP-02",
+      "label": "weak_minimum_password_length_present",
+      "description": "One or more observed domains have minimum password length below configured security threshold.",
+      "evidence_hint": "Observed minimum password length is less than configured threshold (default: 12).",
+      "decay_class": "operational"
+    },
+    "AD-AS-01": {
+      "id": "AD-AS-01",
+      "label": "user_preauth_state_observed",
+      "description": "AD user inventory includes pre-authentication state required for AS-REP exposure assessment.",
+      "evidence_hint": "User inventory includes dontreqpreauth and/or userAccountControl fields.",
+      "decay_class": "operational"
+    },
+    "AD-AS-02": {
+      "id": "AD-AS-02",
+      "label": "asrep_roastable_accounts_present",
+      "description": "Enabled user accounts with pre-authentication disabled are present.",
+      "evidence_hint": "Enabled user records have dontreqpreauth=true or UAC DONT_REQUIRE_PREAUTH bit set.",
+      "decay_class": "operational"
+    },
+    "AD-KR-01": {
+      "id": "AD-KR-01",
+      "label": "kerberoastable_accounts_present",
+      "description": "Enabled SPN-linked user accounts are present for Kerberoast baseline exposure assessment.",
+      "evidence_hint": "Enabled user records contain SPNs or hasspn=true (machine accounts optionally excluded by policy).",
+      "decay_class": "operational"
+    },
+    "AD-KR-02": {
+      "id": "AD-KR-02",
+      "label": "kerberoastable_rc4_permitted_accounts_present",
+      "description": "Kerberoastable accounts indicate RC4-permitted encryption behavior.",
+      "evidence_hint": "Kerberoastable account encryption types are not AES-only.",
+      "decay_class": "operational"
+    },
+    "AD-LP-01": {
+      "id": "AD-LP-01",
+      "label": "laps_baseline_candidate_hosts_observed",
+      "description": "Enabled non-DC computer inventory is observed for LAPS baseline coverage assessment.",
+      "evidence_hint": "Computer inventory includes enabled non-DC records from BloodHound/LDAP snapshots.",
+      "decay_class": "operational"
+    },
+    "AD-LP-02": {
+      "id": "AD-LP-02",
+      "label": "non_dc_hosts_without_laps_present",
+      "description": "One or more enabled non-DC computer accounts indicate missing LAPS coverage.",
+      "evidence_hint": "Explicit haslaps=false or missing LAPS password attributes on observed non-DC computers.",
+      "decay_class": "operational"
+    },
+    "AD-06": {
+      "id": "AD-06",
+      "label": "unconstrained_delegation_non_dc",
+      "description": "Enabled non-domain-controller principals with unconstrained delegation are present in observed AD delegation posture input.",
+      "evidence_hint": "Canonical delegation sidecar reports one or more unconstrained non-DC hosts.",
+      "decay_class": "operational"
+    },
+    "AD-08": {
+      "id": "AD-08",
+      "label": "constrained_delegation_protocol_transition",
+      "description": "Enabled principals with protocol-transition constrained delegation are present in observed AD delegation posture input.",
+      "evidence_hint": "Canonical delegation sidecar reports principals with trusted_to_auth_for_delegation and non-empty allowed_to_delegate.",
+      "decay_class": "operational"
+    },
+    "AD-TI-01": {
+      "id": "AD-TI-01",
+      "label": "privileged_session_tiering_observation_present",
+      "description": "Canonical AD-22 tiering sidecar input is observed for the workload.",
+      "evidence_hint": "Runtime emits canonical sidecar (`ad22_tiering_input.json`) with schema `skg.ad.tiering_input.v1`.",
+      "decay_class": "operational"
+    },
+    "AD-22": {
+      "id": "AD-22",
+      "label": "no_privileged_account_tiering",
+      "description": "Privileged sessions are present on non-tier-0 systems, indicating baseline tiering posture failure.",
+      "evidence_hint": "Canonical AD-22 sidecar summary reports non-tier0 privileged sessions.",
+      "decay_class": "operational"
+    }
+  },
+  "attack_paths": {
+    "ad_privilege_relationship_mapping_v1": {
+      "id": "ad_privilege_relationship_mapping_v1",
+      "description": "Directory privilege relationships are present and mappable from inventory snapshots.",
+      "required_wickets": [
+        "AD-PR-01",
+        "AD-PR-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1069/002/"
+      ]
+    },
+    "ad_human_admin_assignment_v1": {
+      "id": "ad_human_admin_assignment_v1",
+      "description": "Enabled human principals are assigned directly to privileged AD groups.",
+      "required_wickets": [
+        "AD-PR-01",
+        "AD-PR-03"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1098/"
+      ]
+    },
+    "ad_password_hint_exposure_v1": {
+      "id": "ad_password_hint_exposure_v1",
+      "description": "Credential-hint text appears in AD account descriptions, including enabled non-machine accounts.",
+      "required_wickets": [
+        "AD-CH-01",
+        "AD-CH-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1552/004/"
+      ]
+    },
+    "ad_weak_password_policy_v1": {
+      "id": "ad_weak_password_policy_v1",
+      "description": "Observed AD domain password policy allows minimum length below the configured threshold.",
+      "required_wickets": [
+        "AD-WP-01",
+        "AD-WP-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1110/"
+      ]
+    },
+    "ad_asrep_exposure_baseline_v1": {
+      "id": "ad_asrep_exposure_baseline_v1",
+      "description": "Observed AD user inventory indicates whether enabled users with pre-authentication disabled are present.",
+      "required_wickets": [
+        "AD-AS-01",
+        "AD-AS-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1558/004/"
+      ]
+    },
+    "ad_kerberoast_exposure_baseline_v1": {
+      "id": "ad_kerberoast_exposure_baseline_v1",
+      "description": "Observed AD user inventory indicates whether enabled SPN-linked accounts exist and permit RC4-oriented Kerberoast baseline exposure.",
+      "required_wickets": [
+        "AD-KR-01",
+        "AD-KR-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1558/003/"
+      ]
+    },
+    "ad_laps_coverage_baseline_v1": {
+      "id": "ad_laps_coverage_baseline_v1",
+      "description": "Observed AD computer inventory indicates whether enabled non-DC hosts lack LAPS baseline coverage.",
+      "required_wickets": [
+        "AD-LP-01",
+        "AD-LP-02"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1078/"
+      ]
+    },
+    "ad_delegation_posture_baseline_v1": {
+      "id": "ad_delegation_posture_baseline_v1",
+      "description": "Observed canonical delegation sidecar indicates whether AD-06 unconstrained non-DC delegation posture and AD-08 protocol-transition constrained delegation posture are present.",
+      "required_wickets": [
+        "AD-06",
+        "AD-08"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1558/"
+      ]
+    },
+    "ad_privileged_session_tiering_baseline_v1": {
+      "id": "ad_privileged_session_tiering_baseline_v1",
+      "description": "Observed canonical AD-22 sidecar indicates whether privileged sessions occur on non-tier-0 systems.",
+      "required_wickets": [
+        "AD-TI-01",
+        "AD-22"
+      ],
+      "references": [
+        "https://attack.mitre.org/techniques/T1078/"
+      ]
+    }
+  }
+}

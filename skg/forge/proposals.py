@@ -43,7 +43,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import SKG_STATE_DIR, SKG_HOME
+from skg_core.config.paths import SKG_STATE_DIR, SKG_HOME
+from skg.identity import parse_workload_ref
 from skg.kernel.pearls import Pearl, PearlLedger
 
 log = logging.getLogger("skg.forge.proposals")
@@ -55,6 +56,34 @@ SUPERSEDED_DIR = SKG_STATE_DIR / "proposals_superseded"
 
 DEFAULT_COOLDOWN_DAYS = 30
 DEFAULT_DEFER_DAYS    = 7
+
+
+def _subject_aliases(*values: str) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        aliases.add(text)
+        parsed = parse_workload_ref(text)
+        for candidate in (
+            parsed.get("identity_key"),
+            parsed.get("host"),
+            parsed.get("locator"),
+            parsed.get("manifestation_key"),
+        ):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                aliases.add(candidate_text)
+    return aliases
+
+
+def _primary_identity_key(hosts: list[str] | None = None, fallback: str = "") -> str:
+    for host in list(hosts or []) + [fallback]:
+        identity_key = str(parse_workload_ref(str(host or "")).get("identity_key") or "").strip()
+        if identity_key:
+            return identity_key
+    return ""
 
 
 def _proposal_path(proposal_id: str) -> Path:
@@ -109,7 +138,8 @@ def _record_proposal_memory(
 ) -> None:
     hosts = list(proposal.get("hosts", []) or [])
     host = hosts[0] if hosts else ""
-    workload_id = f"growth::{host}" if host else f"growth::{proposal.get('domain', 'unknown')}"
+    identity_key = str(proposal.get("identity_key") or _primary_identity_key(hosts, fallback=host)).strip()
+    workload_id = f"growth::{identity_key or host}" if (identity_key or host) else f"growth::{proposal.get('domain', 'unknown')}"
     ledger = _proposal_pearl_ledger()
     ledger.record(Pearl(
         reason_changes=[{
@@ -125,12 +155,14 @@ def _record_proposal_memory(
         }],
         energy_snapshot={
             "target_ip": host,
+            "identity_key": identity_key or host,
             "workload_id": workload_id,
             "domain": proposal.get("domain"),
             "proposal_kind": proposal.get("proposal_kind"),
             "proposal_status": proposal.get("status"),
         },
         target_snapshot={
+            "identity_key": identity_key or host,
             "workload_id": workload_id,
             "hosts": hosts,
             "domain": proposal.get("domain"),
@@ -160,7 +192,9 @@ def _load_recall_adjustment(domain: str, hosts: list[str] | None = None) -> dict
         "delta": 0.0,
         "confirmation_rate": None,
         "confirmed": 0,
+        "growth_memory": {},
     }
+    host_aliases = _subject_aliases(*(hosts or []))
     if not records_path.exists() and not pearls_path.exists():
         return recall
 
@@ -177,10 +211,20 @@ def _load_recall_adjustment(domain: str, hosts: list[str] | None = None) -> dict
                 continue
             if domain and rec.get("domain") != domain:
                 continue
-            if hosts:
+            if host_aliases:
                 wid = str(rec.get("workload_id", ""))
+                rec_aliases = _subject_aliases(
+                    wid,
+                    rec.get("identity_key"),
+                    rec.get("target_ip"),
+                )
                 cond = str(rec.get("wicket_id", ""))
-                if not any(h in wid or h in cond for h in hosts):
+                evidence = str(rec.get("evidence_text", ""))
+                if not (
+                    rec_aliases & host_aliases
+                    or any(alias and alias in cond for alias in host_aliases)
+                    or any(alias and alias in evidence for alias in host_aliases if len(alias) > 3)
+                ):
                     continue
             confirmed.append(rec)
 
@@ -302,6 +346,7 @@ def create(
         "description":       description,
         "attack_surface":    gap.get("attack_surface", ""),
         "hosts":             gap.get("hosts", []),
+        "identity_key":      _primary_identity_key(gap.get("hosts", [])),
         "hosts_count":       len(gap.get("hosts", [])),
         "category":          gap.get("category", "unknown"),
         "evidence":          gap.get("evidence", ""),
@@ -322,6 +367,13 @@ def create(
         "defer_until":       None,
         "reviewed_at":       None,
     }
+    trigger = gap.get("metacognition_trigger")
+    if isinstance(trigger, dict) and trigger:
+        proposal["metacognition_trigger"] = trigger
+        proposal["substrate_trigger"] = trigger
+    cognitive_signal = gap.get("cognitive_signal")
+    if isinstance(cognitive_signal, dict) and cognitive_signal:
+        proposal["cognitive_signal"] = cognitive_signal
 
     _proposal_path(proposal_id).write_text(json.dumps(proposal, indent=2))
     log.info(f"[proposals] created: {proposal_id} ({domain}, {len(gap.get('hosts',[]))} hosts)")
@@ -359,6 +411,7 @@ def create_catalog_growth(
         "description":    description,
         "attack_surface": attack_surface,
         "hosts":          hosts,
+        "identity_key":   _primary_identity_key(hosts),
         "hosts_count":    len(hosts),
         "category":       category,
         "evidence":       evidence,
@@ -446,7 +499,7 @@ def accept(proposal_id: str) -> dict:
     proposal = get(proposal_id)
     if not proposal:
         raise ValueError(f"Proposal not found: {proposal_id}")
-    if proposal["status"] not in ("pending", "error_missing_rc"):
+    if proposal["status"] not in ("pending", "triggered", "error_missing_rc"):
         raise ValueError(f"Proposal {proposal_id} is {proposal['status']}, not pending")
 
     if proposal.get("proposal_kind") == "catalog_growth":
@@ -565,19 +618,6 @@ def accept(proposal_id: str) -> dict:
     else:
         log.info(f"[proposals] accepted: {proposal_key} → {installed_path}")
 
-    # Training corpus — positive example from operator acceptance
-    try:
-        from skg.training.corpus import on_proposal_accept
-        # Reconstruct generation_result from proposal data
-        gen_result = {
-            "generation_backend": proposal.get("generation_backend", "unknown"),
-            "staging_path": proposal.get("staged_path", ""),
-            "wicket_count": proposal.get("wicket_count", 0),
-        }
-        on_proposal_accept(proposal, gen_result)
-    except Exception as _te:
-        log.debug(f"[proposals] corpus hook error: {_te}")
-
     return {
         "accepted": True,
         "domain":   proposal["domain"],
@@ -633,13 +673,6 @@ def reject(proposal_id: str,
 
     log.info(f"[proposals] rejected: {proposal_key} ({proposal['domain']}, "
              f"cooldown until {cooldown_until[:10]})")
-
-    # Training corpus — negative example from operator rejection
-    try:
-        from skg.training.corpus import on_proposal_reject
-        on_proposal_reject(proposal, reason=reason)
-    except Exception as _te:
-        log.debug(f"[proposals] corpus hook error: {_te}")
 
     return {
         "rejected": True,
@@ -779,6 +812,18 @@ def format_proposal_list(proposals: list[dict], verbose: bool = False) -> str:
                     )
             else:
                 lines.append(f"           backend: {p.get('generation_backend','')}")
+                trigger = p.get("metacognition_trigger", {}) or {}
+                if trigger:
+                    lines.append(
+                        f"           trigger: {trigger.get('signal_id', '')} "
+                        f"{trigger.get('label', '')} ({trigger.get('service', '')})"
+                    )
+                cognitive_signal = p.get("cognitive_signal", {}) or {}
+                if cognitive_signal:
+                    lines.append(
+                        f"           cognitive: {cognitive_signal.get('signal_id', '')} "
+                        f"{cognitive_signal.get('label', '')}"
+                    )
                 errs = p.get("generation_errors", [])
                 if errs:
                     lines.append(f"           warnings: {'; '.join(errs[:2])}")
@@ -805,6 +850,24 @@ def format_proposal_detail(proposal: dict) -> str:
     lines.append(f"Backend:  {proposal.get('generation_backend','')}")
     lines.append(f"Generated:{proposal.get('generated_at','')[:19]}")
     lines.append("")
+
+    trigger = proposal.get("metacognition_trigger", {}) or {}
+    if trigger:
+        lines.append("Metacognition:")
+        lines.append(f"  signal: {trigger.get('signal_id', '')} {trigger.get('label', '')}")
+        if trigger.get("service"):
+            lines.append(f"  service: {trigger.get('service', '')}")
+        if trigger.get("detail"):
+            lines.append(f"  detail: {trigger.get('detail', '')}")
+        lines.append("")
+
+    cognitive_signal = proposal.get("cognitive_signal", {}) or {}
+    if cognitive_signal:
+        lines.append("Cognitive Signal:")
+        lines.append(f"  signal: {cognitive_signal.get('signal_id', '')} {cognitive_signal.get('label', '')}")
+        if cognitive_signal.get("detail"):
+            lines.append(f"  detail: {cognitive_signal.get('detail', '')}")
+        lines.append("")
 
     if proposal.get("proposal_kind") == "catalog_growth":
         hints = proposal.get("compiler_hints", {})
@@ -895,6 +958,16 @@ def create_action(
         "description":    description,
         "attack_surface": attack_surface,
         "hosts":          hosts,
+        "identity_key":   _primary_identity_key(
+            hosts,
+            fallback=str(
+                action.get("identity_key")
+                or action.get("execution_target")
+                or action.get("workload_id")
+                or action.get("target_ip")
+                or ""
+            ),
+        ),
         "hosts_count":    len(hosts),
         "category":       category,
         "evidence":       evidence,
@@ -913,18 +986,27 @@ def create_action(
     return proposal
 
 
+_TRIGGERABLE_KINDS = {"field_action", "cognitive_action"}
+
+
 def trigger_action(proposal_id: str) -> dict:
     """
-    Mark a field-action proposal as operator-triggered.
+    Mark an operator-reviewable proposal as triggered.
     Returns the proposal payload for the caller to dispatch.
     Does NOT execute anything itself.
+
+    Triggerable kinds: field_action (RC execution), cognitive_action (observation recommendation).
     """
     proposal = get(proposal_id)
     if not proposal:
         raise ValueError(f"Proposal not found: {proposal_id}")
 
-    if proposal.get("proposal_kind") != "field_action":
-        raise ValueError(f"Proposal {proposal_id} is not a field_action proposal")
+    kind = proposal.get("proposal_kind", "field_action")
+    if kind not in _TRIGGERABLE_KINDS:
+        raise ValueError(
+            f"Proposal {proposal_id} has kind '{kind}' which is not triggerable; "
+            f"triggerable kinds: {sorted(_TRIGGERABLE_KINDS)}"
+        )
 
     if proposal.get("status") != "pending":
         raise ValueError(f"Proposal {proposal_id} is {proposal.get('status')}, not pending")

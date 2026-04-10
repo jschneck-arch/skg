@@ -1,0 +1,11 @@
+source_kind: ad.tiering.snapshot
+source_id: adapter.ad_tiering_posture
+pointer_prefix: ad://
+schema: skg.ad.tiering_input.v1
+wickets:
+  AD-TI-01:
+    evidence_rank: 2
+    confidence: 0.92
+  AD-22:
+    evidence_rank: 2
+    confidence: 0.9

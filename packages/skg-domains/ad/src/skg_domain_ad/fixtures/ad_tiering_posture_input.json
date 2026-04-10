@@ -1,0 +1,52 @@
+{
+  "schema": "skg.ad.tiering_input.v1",
+  "wicket_id": "AD-22",
+  "slice": "ad22_baseline_tiering_core_input",
+  "source_kind": "bloodhound.sessions",
+  "workload_id": "ad::contoso.local",
+  "run_id": "run-ad-tiering-fixture",
+  "observed_at": "2026-04-02T00:00:00+00:00",
+  "session_rows": [
+    {
+      "computer": "WS01.CONTOSO.LOCAL",
+      "user": "DA1@CONTOSO.LOCAL",
+      "computer_id": "C-WS01",
+      "user_id": "U-DA1"
+    },
+    {
+      "computer": "DC01.CONTOSO.LOCAL",
+      "user": "DA2@CONTOSO.LOCAL",
+      "computer_id": "C-DC01",
+      "user_id": "U-DA2"
+    }
+  ],
+  "computer_inventory_count": 2,
+  "summary": {
+    "status": "realized",
+    "observed_session_count": 2,
+    "non_tier0_session_count": 1,
+    "tier0_session_count": 1,
+    "unknown_tier_session_count": 0,
+    "non_tier0_sessions": [
+      {
+        "computer": "WS01.CONTOSO.LOCAL",
+        "user": "DA1@CONTOSO.LOCAL",
+        "computer_id": "C-WS01",
+        "user_id": "U-DA1"
+      }
+    ],
+    "tier0_sessions": [
+      {
+        "computer": "DC01.CONTOSO.LOCAL",
+        "user": "DA2@CONTOSO.LOCAL",
+        "computer_id": "C-DC01",
+        "user_id": "U-DA2"
+      }
+    ],
+    "unknown_tier_sessions": []
+  },
+  "deferred_coupling": {
+    "path_value_reasoning": true,
+    "runtime_orchestration": true
+  }
+}

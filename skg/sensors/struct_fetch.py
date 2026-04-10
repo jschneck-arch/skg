@@ -39,15 +39,18 @@ from __future__ import annotations
 
 import json
 import re
-import socket
-import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urljoin, urlparse
+
+try:
+    from skg_protocol.events import (
+        build_event_envelope as envelope,
+        build_precondition_payload as precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope, precondition_payload
 
 TOOLCHAIN = "skg-web-toolchain"
 SOURCE_ID = "adapter.struct_fetch"
@@ -106,8 +109,24 @@ PRIVATE_IP_RE = re.compile(
     r"|192\.168\.\d{1,3}\.\d{1,3})\b"
 )
 
+_WICKET_LABELS = {
+    "WB-30": "exposed_api_schema",
+    "WB-31": "config_endpoint_exposed",
+    "WB-32": "debug_endpoint_exposed",
+    "WB-33": "health_endpoint_exposed",
+    "WB-34": "metrics_exposed",
+    "WB-35": "xmlrpc_exposed",
+    "WB-36": "security_txt_present",
+    "WB-37": "version_disclosed",
+    "WB-38": "credentials_in_config",
+    "WB-39": "internal_ip_disclosed",
+    "WB-40": "jsonl_event_stream",
+}
+
 
 def _now() -> str:
+    from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -122,35 +141,32 @@ def _event(
     target_ip: str,
     attack_path_id: str = "web_sqli_to_shell_v1",
 ) -> dict:
-    return {
-        "id": str(uuid.uuid4()),
-        "ts": _now(),
-        "type": "obs.attack.precondition",
-        "source": {
-            "source_id": SOURCE_ID,
-            "toolchain": TOOLCHAIN,
-            "version": "0.1.0",
-        },
-        "payload": {
-            "wicket_id": wicket_id,
-            "status": status,
-            "workload_id": workload_id,
-            "detail": str(detail)[:500],
-            "attack_path_id": attack_path_id,
-            "run_id": run_id,
-            "observed_at": _now(),
-            "target_ip": target_ip,
-        },
-        "provenance": {
-            "evidence_rank": rank,
-            "evidence": {
-                "source_kind": "http_structured",
-                "pointer": f"http://{target_ip}",
-                "collected_at": _now(),
-                "confidence": confidence,
-            },
-        },
-    }
+    ts = _now()
+    payload = precondition_payload(
+        wicket_id=wicket_id,
+        label=_WICKET_LABELS.get(wicket_id, ""),
+        domain="web",
+        workload_id=workload_id,
+        realized=status == "realized",
+        status=status,
+        detail=str(detail)[:500],
+        attack_path_id=attack_path_id,
+        target_ip=target_ip,
+    )
+    payload["run_id"] = run_id
+    payload["observed_at"] = ts
+    return envelope(
+        "obs.attack.precondition",
+        source_id=SOURCE_ID,
+        toolchain=TOOLCHAIN,
+        payload=payload,
+        evidence_rank=rank,
+        source_kind="http_structured",
+        pointer=f"http://{target_ip}",
+        confidence=confidence,
+        version="0.1.0",
+        ts=ts,
+    )
 
 
 def _fetch(url: str, timeout: float = 8.0) -> Tuple[Optional[bytes], Optional[str], int]:

@@ -30,7 +30,7 @@ from typing import Optional
 
 log = logging.getLogger("skg.sensors.zero_day_detector")
 
-SKG_HOME = Path(__file__).resolve().parents[3]
+SKG_HOME = Path(__file__).resolve().parents[2]
 
 # CVSS threshold — only generate wickets for CVEs above this score
 CVSS_MIN = 6.0

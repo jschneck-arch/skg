@@ -8,7 +8,7 @@ direct use from exploit_dispatch and the CLI.
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "skg-gravity"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "skg-gravity"))
 
 try:
     from exploit_dispatch import analyze_binary

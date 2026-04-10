@@ -1,0 +1,13 @@
+[
+  {
+    "host": "192.168.56.30",
+    "port": 5985,
+    "username": "Administrator",
+    "winrm_exposed": true,
+    "credential_valid": true,
+    "is_admin": true,
+    "credential_in_env": true,
+    "env_text": "API_KEY=demo-secret",
+    "whoami_groups": "BUILTIN\\Administrators"
+  }
+]

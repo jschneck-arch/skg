@@ -1,0 +1,16 @@
+{
+  "schema_fingerprint": {
+    "orders": "amount,created_at,order_id,product_id,status,user_id"
+  },
+  "distribution": {
+    "orders.amount": {
+      "mean": 243.84699999999998
+    }
+  },
+  "null_counts": {
+    "orders.order_id": 0,
+    "orders.user_id": 0,
+    "orders.amount": 0,
+    "orders.created_at": 0
+  }
+}

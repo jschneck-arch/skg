@@ -72,7 +72,7 @@ def compute_supply_chain_score(
     sheaf_data = {}
     try:
         import sys as _sys, pathlib as _pl
-        _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[4]))
+        _sys.path.insert(0, str(_pl.Path(__file__).resolve().parents[3]))
         from skg.topology.sheaf import classify_with_sheaf
         classification, sheaf_data = classify_with_sheaf(
             classification, catalog, attack_path_id,

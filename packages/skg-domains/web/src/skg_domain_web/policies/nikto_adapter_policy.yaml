@@ -1,0 +1,4 @@
+source_kind: nikto
+evidence_rank: 5
+default_confidence: 0.65
+pointer_prefix: nikto://

@@ -1,0 +1,7 @@
+attack_path_aliases:
+  web_sqli_to_shell_v1: web_full_chain_v1
+score_key: web_score
+status_priority:
+  blocked: 3
+  realized: 2
+  unknown: 1

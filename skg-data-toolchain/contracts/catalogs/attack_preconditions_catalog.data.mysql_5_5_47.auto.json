@@ -1,0 +1,38 @@
+{
+  "domain": "data",
+  "version": "1.0.0-auto",
+  "description": "Auto-generated: mysql 5.5.47 version-specific CVEs",
+  "generated_by": "skg.sensors.zero_day_detector",
+  "generated_at": "2026-04-01T16:16:45.767322+00:00",
+  "source_product": "mysql",
+  "source_version": "5.5.47",
+  "wickets": {
+    "DP-Z0589": {
+      "label": "cve_2016_0546_vulnerability",
+      "description": "mysql 5.5.47: Unspecified vulnerability in Oracle MySQL 5.5.46 and earlier, 5.6.27 and earlier, and 5.7.9 and MariaDB before 5.5.47, 10.0.x before 10.0.23, and 10.1.x before 10.1.10 allows local users to affect confidentiality, integrity, and availability via unknown vectors related to Client.  NOTE: the previous (CVE-2016-0546, CVSS 7.2)",
+      "evidence_hint": "Detected mysql/5.5.47 on port 3306. Verify CVE-2016-0546 (CVSS 7.2) with targeted scan or MSF module.",
+      "cve_id": "CVE-2016-0546",
+      "cvss": 7.2,
+      "auto_generated": true,
+      "decay_class": "structural"
+    },
+    "DP-Z7E32": {
+      "label": "cve_2016_0505_vulnerability",
+      "description": "mysql 5.5.47: Unspecified vulnerability in Oracle MySQL 5.5.46 and earlier, 5.6.27 and earlier, and 5.7.9 and MariaDB before 5.5.47, 10.0.x before 10.0.23, and 10.1.x before 10.1.10 allows remote authenticated users to affect availability via unknown vectors related to Options. (CVE-2016-0505, CVSS 6.8)",
+      "evidence_hint": "Detected mysql/5.5.47 on port 3306. Verify CVE-2016-0505 (CVSS 6.8) with targeted scan or MSF module.",
+      "cve_id": "CVE-2016-0505",
+      "cvss": 6.8,
+      "auto_generated": true,
+      "decay_class": "structural"
+    },
+    "DP-ZB3C3": {
+      "label": "cve_2016_0640_vulnerability",
+      "description": "mysql 5.5.47: Unspecified vulnerability in Oracle MySQL 5.5.47 and earlier, 5.6.28 and earlier, and 5.7.10 and earlier and MariaDB before 5.5.48, 10.0.x before 10.0.24, and 10.1.x before 10.1.12 allows local users to affect integrity and availability via vectors related to DML. (CVE-2016-0640, CVSS 6.1)",
+      "evidence_hint": "Detected mysql/5.5.47 on port 3306. Verify CVE-2016-0640 (CVSS 6.1) with targeted scan or MSF module.",
+      "cve_id": "CVE-2016-0640",
+      "cvss": 6.1,
+      "auto_generated": true,
+      "decay_class": "structural"
+    }
+  }
+}

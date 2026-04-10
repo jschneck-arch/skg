@@ -1,0 +1,5 @@
+{
+  "schema_fingerprint": {
+    "orders": "amount,created_at,order_id,product_id,status,user_id"
+  }
+}

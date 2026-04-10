@@ -15,12 +15,15 @@ sys.path.insert(0, "/opt/skg")
 from skg.intel.surface import _read_interp_dir, surface
 from skg.forge import proposals as forge_proposals
 from skg.graph import WorkloadGraph, WicketPrior
+from skg.kernel.engine import KernelStateEngine
+from skg.kernel.field_functional import field_functional_breakdown, phi_fiber_breakdown
+from skg.kernel.field_local import FieldLocal
 from skg.kernel.folds import FoldDetector
 from skg.kernel.energy import EnergyEngine
 from skg.kernel.observations import Observation
 from skg.kernel.pearl_manifold import PearlManifold
 from skg.kernel.pearls import Pearl, PearlLedger
-from skg.kernel.support import SupportEngine
+from skg.kernel.support import SupportContribution, SupportEngine
 from skg.resonance.observation_memory import ObservationMemory
 from skg.sensors import adapter_runner
 from skg.sensors import envelope, precondition_payload
@@ -110,6 +113,246 @@ def _load_cred_reuse_module():
 
 
 class SensorProjectionLoopTests(unittest.TestCase):
+    def test_canonical_field_functional_is_order_stable_and_curved(self):
+        web_local = FieldLocal(
+            local_id="10.0.0.7::web",
+            workload_id="10.0.0.7",
+            domain="web",
+            wicket_states={
+                "WB-01": SupportContribution(
+                    unresolved=0.6,
+                    contradiction=0.1,
+                    decoherence=0.05,
+                    compatibility_score=0.5,
+                    compatibility_span=1,
+                )
+            },
+        )
+        data_local = FieldLocal(
+            local_id="10.0.0.7::data",
+            workload_id="10.0.0.7",
+            domain="data",
+            wicket_states={
+                "DA-01": SupportContribution(
+                    unresolved=0.4,
+                    contradiction=0.0,
+                    decoherence=0.08,
+                    compatibility_score=0.7,
+                    compatibility_span=2,
+                )
+            },
+        )
+        cluster = FiberCluster(
+            cluster_id="cluster::10.0.0.7",
+            anchor="10.0.0.7",
+            spheres=["web", "data"],
+            kinds=["access_path", "datastore"],
+            member_count=4,
+            total_coherence=1.7,
+            total_tension=1.1,
+            fibers=[
+                Fiber(
+                    fiber_id="f-web",
+                    sphere="web",
+                    kind="access_path",
+                    anchor="10.0.0.7",
+                    members=["credential-a", "service-http"],
+                    coherence=0.9,
+                    tension=0.7,
+                ),
+                Fiber(
+                    fiber_id="f-data",
+                    sphere="data",
+                    kind="datastore",
+                    anchor="10.0.0.7",
+                    members=["credential-a", "service-mysql"],
+                    coherence=0.8,
+                    tension=0.4,
+                ),
+            ],
+        )
+        topology = decompose_field_topology(
+            sphere_energies={
+                "web": SphereEnergy(
+                    sphere="web",
+                    G=0.2,
+                    G_norm=0.3,
+                    n_wickets=3,
+                    n_realized=1,
+                    n_blocked=0,
+                    n_unknown=2,
+                    unknown_mass=2.0,
+                    total_local_energy=0.7,
+                    mean_local_energy=0.35,
+                    n_latent=0,
+                ),
+                "data": SphereEnergy(
+                    sphere="data",
+                    G=0.4,
+                    G_norm=0.45,
+                    n_wickets=2,
+                    n_realized=0,
+                    n_blocked=0,
+                    n_unknown=2,
+                    unknown_mass=1.3,
+                    total_local_energy=0.6,
+                    mean_local_energy=0.3,
+                    n_latent=0,
+                ),
+            },
+            coupling={"web": {"data": 0.7}, "data": {"web": 0.7}},
+            fiber_tension={"web": 0.3, "data": 0.2},
+            pearl_persistence={"web": 0.0, "data": 0.0},
+            beta_1=1,
+            h1_obstruction_count=1,
+        )
+
+        ab = field_functional_breakdown([web_local, data_local], fiber_cluster=cluster, topology=topology)
+        ba = field_functional_breakdown([data_local, web_local], fiber_cluster=cluster, topology=topology)
+
+        self.assertAlmostEqual(ab.self_energy, ba.self_energy, places=6)
+        self.assertAlmostEqual(ab.coupling_energy, ba.coupling_energy, places=6)
+        self.assertAlmostEqual(ab.total, ba.total, places=6)
+        self.assertGreater(ab.curvature, 0.0)
+        self.assertIn("web", ab.relevant_spheres)
+        self.assertIn("data", ab.relevant_spheres)
+
+    def test_fiber_breakdown_uses_actual_cluster_structure(self):
+        host_local = FieldLocal(
+            local_id="10.0.0.7::host",
+            workload_id="10.0.0.7",
+            domain="host",
+            wicket_states={
+                "HO-01": SupportContribution(
+                    unresolved=0.2,
+                    contradiction=0.0,
+                    decoherence=0.0,
+                    compatibility_score=0.1,
+                    compatibility_span=1,
+                )
+            },
+        )
+        data_local = FieldLocal(
+            local_id="10.0.0.7::data",
+            workload_id="10.0.0.7",
+            domain="data",
+            wicket_states={
+                "DA-01": SupportContribution(
+                    unresolved=0.9,
+                    contradiction=0.0,
+                    decoherence=0.1,
+                    compatibility_score=0.2,
+                    compatibility_span=1,
+                )
+            },
+        )
+        cluster = FiberCluster(
+            cluster_id="cluster::10.0.0.7",
+            anchor="10.0.0.7",
+            spheres=["host", "data"],
+            kinds=["credential_binding", "datastore"],
+            member_count=4,
+            total_coherence=1.85,
+            total_tension=2.2,
+            fibers=[
+                Fiber(
+                    fiber_id="f-host",
+                    sphere="host",
+                    kind="credential_binding",
+                    anchor="10.0.0.7",
+                    members=["cred-a", "shared-token"],
+                    coherence=0.95,
+                    tension=1.4,
+                ),
+                Fiber(
+                    fiber_id="f-data",
+                    sphere="data",
+                    kind="datastore",
+                    anchor="10.0.0.7",
+                    members=["shared-token", "mysql"],
+                    coherence=0.9,
+                    tension=0.8,
+                ),
+            ],
+        )
+
+        base = phi_fiber_breakdown(["HO-01"], 1.0, [host_local, data_local])
+        enriched = phi_fiber_breakdown(["HO-01"], 1.0, [host_local, data_local], fiber_cluster=cluster)
+
+        self.assertGreater(enriched.tension, base.tension)
+        self.assertNotEqual(enriched.coupling, base.coupling)
+        self.assertEqual(enriched.coupling, 0.0)
+        self.assertGreater(base.coupling, 0.0)
+        self.assertEqual(enriched.fiber_cluster_id, "cluster::10.0.0.7")
+        self.assertGreater(enriched.total, base.total)
+
+    def test_kernel_instrument_potential_uses_fiber_cluster_context(self):
+        kernel = KernelStateEngine(Path("/tmp/skg_discovery"), Path("/tmp/skg_state/events"))
+        states = {
+            "HO-01": {
+                "status": "unknown",
+                "phi_u": 0.3,
+                "contradiction": 0.0,
+                "decoherence": 0.0,
+                "compatibility_score": 0.1,
+                "compatibility_span": 1,
+            },
+            "DA-01": {
+                "status": "unknown",
+                "phi_u": 0.9,
+                "contradiction": 0.0,
+                "decoherence": 0.1,
+                "compatibility_score": 0.2,
+                "compatibility_span": 1,
+            },
+        }
+        cluster = FiberCluster(
+            cluster_id="cluster::10.0.0.7",
+            anchor="10.0.0.7",
+            spheres=["host", "data"],
+            kinds=["credential_binding", "datastore"],
+            member_count=4,
+            total_coherence=1.85,
+            total_tension=2.2,
+            fibers=[
+                Fiber(
+                    fiber_id="f-host",
+                    sphere="host",
+                    kind="credential_binding",
+                    anchor="10.0.0.7",
+                    members=["cred-a", "shared-token"],
+                    coherence=0.95,
+                    tension=1.4,
+                ),
+                Fiber(
+                    fiber_id="f-data",
+                    sphere="data",
+                    kind="datastore",
+                    anchor="10.0.0.7",
+                    members=["shared-token", "mysql"],
+                    coherence=0.9,
+                    tension=0.8,
+                ),
+            ],
+        )
+
+        kwargs = {
+            "instrument_name": "nmap",
+            "instrument_wavelength": ["HO-01"],
+            "instrument_cost": 1.0,
+            "node_key": "10.0.0.7",
+            "applicable_wickets": {"HO-01", "DA-01"},
+            "domain_wickets": {"host": {"HO-01"}, "data": {"DA-01"}},
+        }
+
+        with mock.patch.object(kernel, "states_with_detail", return_value=states):
+            with mock.patch.object(kernel, "_fiber_clusters_by_anchor", return_value={}):
+                baseline = kernel.instrument_potential(**kwargs)
+            with mock.patch.object(kernel, "_fiber_clusters_by_anchor", return_value={"10.0.0.7": cluster}):
+                enriched = kernel.instrument_potential(**kwargs)
+
+        self.assertGreater(enriched, baseline)
+
     def test_substrate_classify_collapses_on_blocked_even_with_unknowns(self):
         self.assertEqual(
             classify(
@@ -125,11 +368,15 @@ class SensorProjectionLoopTests(unittest.TestCase):
         payload = precondition_payload(
             wicket_id="HO-01",
             domain="host",
-            workload_id="host-a",
+            workload_id="host::10.0.0.7",
             realized=True,
         )
         self.assertEqual(payload["status"], "realized")
         self.assertTrue(payload["realized"])
+        self.assertEqual(payload["node_id"], "HO-01")
+        self.assertEqual(payload["identity_key"], "10.0.0.7")
+        self.assertEqual(payload["manifestation_key"], "host::10.0.0.7")
+        self.assertEqual(payload["target_ip"], "10.0.0.7")
 
         event = envelope(
             event_type="obs.attack.precondition",
@@ -245,6 +492,9 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 pointer="test://HO-03-unknown",
             ),
         ]
+        for idx in (0, 1, 2):
+            events[idx]["ts"] = "2026-03-16T00:00:00+00:00"
+            events[idx]["payload"]["observed_at"] = "2026-03-16T00:00:00+00:00"
         events[-1]["ts"] = "2026-03-16T00:00:01+00:00"
         events[-1]["payload"]["observed_at"] = "2026-03-16T00:00:01+00:00"
 
@@ -304,6 +554,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 pointer="ssh://172.17.0.3:22?retry=1",
             ),
         ]
+        events[0]["ts"] = "2026-03-16T00:00:00+00:00"
+        events[0]["payload"]["observed_at"] = "2026-03-16T00:00:00+00:00"
         events[-1]["ts"] = "2026-03-16T00:00:01+00:00"
         events[-1]["payload"]["observed_at"] = "2026-03-16T00:00:01+00:00"
 
@@ -390,6 +642,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 pointer="docker://inspect/ce-02",
             ),
         ]
+        events[0]["ts"] = "2026-03-16T00:00:00+00:00"
+        events[0]["payload"]["observed_at"] = "2026-03-16T00:00:00+00:00"
         events[-1]["ts"] = "2026-03-16T00:00:01+00:00"
         events[-1]["payload"]["observed_at"] = "2026-03-16T00:00:01+00:00"
 
@@ -614,13 +868,44 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 targets=["172.17.0.3"],
                 context="WB-09",
                 payload={},
-                event_time=datetime(2026, 3, 16, 12, 0, 0, tzinfo=timezone.utc),
+                event_time=datetime(2026, 3, 19, 10, 0, 0, tzinfo=timezone.utc),
                 decay_class="ephemeral",
                 support_mapping={"172.17.0.3": {"R": 0.0, "B": 0.0, "U": 0.9}},
             ),
         ]
         contrib = engine.aggregate(obs, "172.17.0.3", "WB-09", now)
         self.assertGreater(contrib.decoherence, 0.0)
+        self.assertEqual(contrib.compatibility_span, 1)
+
+    def test_support_engine_expires_observations_past_ttl(self):
+        now = datetime(2026, 3, 19, 12, 0, 0, tzinfo=timezone.utc)
+        engine = SupportEngine()
+        obs = [
+            Observation(
+                instrument="pcap",
+                targets=["172.17.0.3"],
+                context="WB-09",
+                payload={},
+                event_time=datetime(2026, 3, 18, 0, 0, 0, tzinfo=timezone.utc),
+                decay_class="ephemeral",
+                support_mapping={"172.17.0.3": {"R": 0.0, "B": 0.0, "U": 0.9}},
+            ),
+            Observation(
+                instrument="ssh_sensor",
+                targets=["172.17.0.3"],
+                context="WB-09",
+                payload={},
+                event_time=datetime(2026, 3, 19, 11, 0, 0, tzinfo=timezone.utc),
+                decay_class="operational",
+                support_mapping={"172.17.0.3": {"R": 0.7, "B": 0.0, "U": 0.0}},
+            ),
+        ]
+        self.assertTrue(engine.is_expired(obs[0], now))
+        self.assertFalse(engine.is_expired(obs[1], now))
+        contrib = engine.aggregate(obs, "172.17.0.3", "WB-09", now)
+        self.assertGreater(contrib.realized, 0.68)
+        self.assertLess(contrib.realized, 0.7)
+        self.assertAlmostEqual(contrib.unresolved, 0.0, places=3)
         self.assertEqual(contrib.compatibility_span, 1)
 
     def test_observation_memory_recall_uses_shared_identity(self):
@@ -842,6 +1127,45 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertIn("proposal_created", adj["proposal_reasons"])
         self.assertIn("clustered_catalog_growth", adj["proposal_reasons"])
 
+    def test_proposal_recall_adjustment_matches_identity_hosts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            records_dir = state_dir / "resonance" / "records"
+            records_dir.mkdir(parents=True, exist_ok=True)
+            (records_dir / "observations.jsonl").write_text(
+                "\n".join([
+                    json.dumps({
+                        "workload_id": "mysql::db.internal:3306::users",
+                        "domain": "data",
+                        "projection_confirmed": "realized",
+                        "evidence_text": "db.internal measurement",
+                    }),
+                    json.dumps({
+                        "workload_id": "mysql::db.internal:3306::users",
+                        "domain": "data",
+                        "projection_confirmed": "realized",
+                        "evidence_text": "db.internal measurement",
+                    }),
+                    json.dumps({
+                        "workload_id": "mysql::db.internal:3306::users",
+                        "domain": "data",
+                        "projection_confirmed": "realized",
+                        "evidence_text": "db.internal measurement",
+                    }),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(forge_proposals, "SKG_STATE_DIR", state_dir):
+                recall = forge_proposals._load_recall_adjustment(
+                    domain="data",
+                    hosts=["db.internal"],
+                )
+
+        self.assertEqual(recall["confirmed"], 3)
+        self.assertEqual(recall["confirmation_rate"], 1.0)
+        self.assertGreater(recall["delta"], 0.0)
+
     def test_project_event_file_supports_ai_toolchain(self):
         events = [
             {
@@ -917,32 +1241,92 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["classification"], "realized")
 
+    def test_surface_exposes_fresh_view_separately_from_pearl_memory(self):
+        import skg.intel.surface as surface_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            interp_dir = tmp / "interp"
+            pearls_path = tmp / "pearls.jsonl"
+            interp_dir.mkdir()
+
+            (interp_dir / "host__10_0_0_7__host_ssh_initial_access_v1__run-1.json").write_text(
+                json.dumps({
+                    "workload_id": "host::10.0.0.7",
+                    "attack_path_id": "host_ssh_initial_access_v1",
+                    "classification": "indeterminate",
+                    "host_score": 0.5,
+                    "realized": ["HO-01"],
+                    "blocked": [],
+                    "unknown": ["HO-03"],
+                    "computed_at": "2026-03-27T00:00:00+00:00",
+                }),
+                encoding="utf-8",
+            )
+            pearl = {
+                "state_changes": [{"wicket_id": "HO-03"}],
+                "observation_confirms": [{"wicket_id": "HO-03", "status": "realized"}],
+                "projection_changes": [],
+                "reason_changes": [],
+                "observation_refs": [],
+                "energy_snapshot": {
+                    "workload_id": "host::10.0.0.7",
+                    "domain": "host",
+                    "manifestation_key": "host::10.0.0.7",
+                },
+                "target_snapshot": {
+                    "workload_id": "host::10.0.0.7",
+                    "domain": "host",
+                },
+                "fold_context": [],
+                "timestamp": "2026-03-27T00:00:00+00:00",
+            }
+            pearls_path.write_text(
+                json.dumps(pearl) + "\n" + json.dumps({**pearl, "timestamp": "2026-03-27T00:00:01+00:00"}),
+                encoding="utf-8",
+            )
+
+            surf = surface_module.surface(interp_dir=interp_dir, pearls_path=pearls_path)
+
+        row = surf["workloads"][0]
+        self.assertTrue(row["fresh_view"])
+        self.assertEqual(row["classification"], "indeterminate")
+        self.assertEqual(row["measured_now"]["unknown"], ["HO-03"])
+        self.assertEqual(row["memory_overlay"]["pearl_count"], 2)
+        self.assertEqual(row["memory_overlay"]["reinforced_wickets"], ["HO-03"])
+        self.assertEqual(surf["summary"]["memory_backed_workloads"], 1)
+        self.assertEqual(surf["view_nodes"][0]["memory_overlay"]["reinforced_wickets"], ["HO-03"])
+
     def test_run_ssh_host_emits_connectivity_wickets_before_deeper_checks(self):
-        class FakeModule:
-            @staticmethod
-            def eval_ho01_reachability(host, out, apid, rid, wid):
-                out.write_text(
-                    json.dumps({"payload": {"wicket_id": "HO-01"}}) + "\n",
-                    encoding="utf-8",
-                )
-
-            @staticmethod
-            def eval_ho02_ssh(host, port, out, apid, rid, wid):
-                with out.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"payload": {"wicket_id": "HO-02"}}) + "\n")
-
-            @staticmethod
-            def eval_ho03_credential(host, user, auth_type, out, apid, rid, wid):
-                with out.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"payload": {"wicket_id": "HO-03"}}) + "\n")
-
-            @staticmethod
-            def eval_ho10_root(client, host, out, apid, rid, wid):
-                raise RuntimeError("simulated deep evaluator failure")
+        def _fake_collect(
+            client,
+            *,
+            host,
+            out_path,
+            attack_path_id,
+            run_id,
+            workload_id,
+            username,
+            auth_type,
+            port,
+        ):
+            rows = [
+                {"payload": {"wicket_id": "HO-01"}},
+                {"payload": {"wicket_id": "HO-02"}},
+                {"payload": {"wicket_id": "HO-03"}},
+            ]
+            out_path.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            return rows
 
         with tempfile.TemporaryDirectory() as tmpdir:
             out_file = Path(tmpdir) / "events.ndjson"
-            with mock.patch.object(adapter_runner, "_adapter_module", return_value=FakeModule):
+            with mock.patch(
+                "skg_services.gravity.host_runtime.collect_ssh_session_assessment_to_file",
+                side_effect=_fake_collect,
+            ):
                 rows = adapter_runner.run_ssh_host(
                     client=object(),
                     host="172.17.0.3",
@@ -959,6 +1343,175 @@ class SensorProjectionLoopTests(unittest.TestCase):
             [row["payload"]["wicket_id"] for row in rows],
             ["HO-01", "HO-02", "HO-03"],
         )
+
+    def test_gravity_precondition_event_uses_shared_subject_contract(self):
+        gravity_field = _load_gravity_field_module()
+
+        event = gravity_field._gravity_precondition_event(
+            source_id="gravity.binary_analysis",
+            toolchain="skg-binary-toolchain",
+            wicket_id="BA-03",
+            status="realized",
+            workload_id="binary::192.168.254.5::ssh-keysign",
+            target_ip="192.168.254.5",
+            detail="stack cookie missing",
+            evidence_rank=4,
+            source_kind="binary_scanner",
+            pointer="ssh://192.168.254.5",
+            confidence=0.92,
+            run_id="run-1",
+            attack_path_id="binary_stack_overflow_v1",
+            domain="binary",
+            version="0.1.0",
+            ts="2026-03-27T00:00:00+00:00",
+            extra_payload={"observed_at": "2026-03-27T00:00:00+00:00"},
+        )
+
+        payload = event["payload"]
+        self.assertEqual(event["type"], "obs.attack.precondition")
+        self.assertEqual(event["source"]["toolchain"], "skg-binary-toolchain")
+        self.assertEqual(payload["node_id"], "BA-03")
+        self.assertEqual(payload["identity_key"], "192.168.254.5")
+        self.assertEqual(payload["manifestation_key"], "binary::192.168.254.5::ssh-keysign")
+        self.assertEqual(payload["target_ip"], "192.168.254.5")
+        self.assertEqual(payload["attack_path_id"], "binary_stack_overflow_v1")
+
+    def test_gravity_observation_coherence_uses_measured_view_domains(self):
+        gravity_field = _load_gravity_field_module()
+
+        coherence = gravity_field._instrument_observation_coherence(
+            "binary_analysis",
+            {
+                "target": {
+                    "domains": [],
+                    "services": [],
+                },
+                "view_state": {
+                    "measured_domains": ["binary_analysis"],
+                    "view_count": 1,
+                },
+            },
+        )
+
+        self.assertEqual(coherence, 1.0)
+
+    def test_gravity_observation_coherence_uses_observed_tool_hints(self):
+        gravity_field = _load_gravity_field_module()
+
+        coherence = gravity_field._instrument_observation_coherence(
+            "binary_analysis",
+            {
+                "target": {
+                    "domains": [],
+                    "services": [],
+                },
+                "view_state": {
+                    "measured_domains": [],
+                    "view_count": 1,
+                    "observed_tools": {
+                        "tool_names": ["checksec"],
+                        "observed_tools": [
+                            {
+                                "name": "checksec",
+                                "instrument_names": ["binary_analysis"],
+                                "domain_hints": ["binary"],
+                            }
+                        ],
+                        "domain_hints": ["binary"],
+                        "instrument_hints": ["binary_analysis"],
+                        "scope": "node_local",
+                        "status": "realized",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(coherence, 0.85)
+
+    def test_gravity_observed_tool_summary_includes_nse_and_hints(self):
+        gravity_field = _load_gravity_field_module()
+
+        summary = gravity_field._observed_tool_summary({
+            "observed_tools": {
+                "tool_names": ["checksec", "nmap"],
+                "observed_tools": [
+                    {
+                        "name": "nmap",
+                        "nse_available": True,
+                    }
+                ],
+                "instrument_hints": ["binary_analysis", "nmap"],
+                "nse_available": True,
+                "nse_script_count": 612,
+            }
+        })
+
+        self.assertIn("checksec", summary)
+        self.assertIn("nmap (NSE=612)", summary)
+        self.assertIn("hints: binary_analysis, nmap", summary)
+
+    def test_gravity_subject_rows_include_measured_only_identity(self):
+        gravity_field = _load_gravity_field_module()
+
+        rows = gravity_field._gravity_subject_rows(
+            {"targets": []},
+            {
+                "192.168.254.5": {
+                    "identity_key": "192.168.254.5",
+                    "view_count": 1,
+                    "measured_domains": ["binary_analysis"],
+                    "measured_unknowns": 2.0,
+                }
+            },
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["identity_key"], "192.168.254.5")
+        self.assertEqual(rows[0]["ip"], "192.168.254.5")
+        self.assertEqual(rows[0]["view_state"]["measured_domains"], ["binary_analysis"])
+        self.assertTrue(rows[0]["target"]["_synthetic_from_view"])
+        self.assertEqual(rows[0]["target"]["domains"], ["binary_analysis"])
+
+    def test_gravity_fold_identity_key_uses_stable_subject_identity(self):
+        gravity_field = _load_gravity_field_module()
+        from skg.kernel.folds import Fold
+
+        fold = Fold(
+            fold_type="contextual",
+            location="binary::192.168.254.5::ssh-keysign",
+            constraint_source="nvd_feed::CVE-2026-9999",
+        )
+
+        self.assertEqual(gravity_field._fold_identity_key(fold), "192.168.254.5")
+
+    def test_persisted_fold_managers_merge_by_identity_key(self):
+        gravity_field = _load_gravity_field_module()
+        from skg.kernel.folds import Fold, FoldManager
+
+        with tempfile.TemporaryDirectory() as td:
+            folds_dir = Path(td)
+
+            first = FoldManager()
+            first.add(Fold(
+                fold_type="projection",
+                location="binary::192.168.254.5::ssh-keysign",
+                constraint_source="gap::missing_path::binary_stack_overflow_v1",
+            ))
+            first.persist(folds_dir / "folds_projection.json")
+
+            second = FoldManager()
+            second.add(Fold(
+                fold_type="contextual",
+                location="cve::192.168.254.5",
+                constraint_source="nvd_feed::CVE-2026-1111",
+                why={"target_ip": "192.168.254.5"},
+            ))
+            second.persist(folds_dir / "folds_contextual.json")
+
+            loaded = gravity_field._load_persisted_fold_managers(folds_dir)
+
+        self.assertEqual(set(loaded.keys()), {"192.168.254.5"})
+        self.assertEqual(len(loaded["192.168.254.5"].all()), 2)
 
     def test_project_event_file_supports_data_toolchain(self):
         events = [
@@ -1001,8 +1554,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
             outputs = project_event_file(events_file, interp_dir, run_id="run-1")
             self.assertEqual(len(outputs), 1)
 
-            wrapped = json.loads(outputs[0].read_text(encoding="utf-8"))
-            result = wrapped.get("payload", wrapped)
+            result = json.loads(outputs[0].read_text(encoding="utf-8"))
+            self.assertNotIn("payload", result)
             self.assertEqual(result["attack_path_id"], "data_completeness_failure_v1")
             self.assertIn("data_score", result)
 
@@ -1081,8 +1634,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
 
                 outputs = project_event_file(events_file, interp_dir, run_id="run-1")
                 self.assertEqual(len(outputs), 1)
-                wrapped = json.loads(outputs[0].read_text(encoding="utf-8"))
-                result = wrapped.get("payload", wrapped)
+                result = json.loads(outputs[0].read_text(encoding="utf-8"))
+                self.assertNotIn("payload", result)
                 self.assertEqual(result["attack_path_id"], expected_path_id)
                 self.assertIn(score_key, result)
 
@@ -1210,6 +1763,122 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 self.assertIn("--dry-run", accepted_result["command"])
                 self.assertTrue((accepted / f"{proposal['id']}.json").exists())
 
+    def test_forge_pipeline_emits_mc03_trigger_and_reviewable_growth_proposal(self):
+        from skg.forge import pipeline as forge_pipeline
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            events_dir = root / "events"
+            pending = root / "pending"
+            signal_dir = root / "metacognition"
+            cognitive_signal_dir = root / "cognitive"
+            staged = root / "staged-toolchain"
+            events_dir.mkdir(parents=True, exist_ok=True)
+            staged.mkdir(parents=True, exist_ok=True)
+
+            gap = {
+                "service": "redis",
+                "category": "process",
+                "hosts": ["172.17.0.3"],
+                "evidence": "redis-server process observed",
+                "detail": "Running service with no toolchain coverage",
+                "attack_surface": "Unauthenticated access and config rewrite",
+                "collection_hints": ["redis-cli -h {host} ping"],
+                "forge_ready": True,
+            }
+
+            with mock.patch("skg.intel.gap_detector.detect_new_gaps", return_value=[gap]), \
+                 mock.patch("skg.forge.generator.generate_toolchain", return_value={
+                     "success": True,
+                     "staging_path": str(staged),
+                     "wicket_count": 3,
+                     "path_count": 1,
+                     "generation_backend": "template",
+                     "errors": [],
+                 }), \
+                 mock.patch("skg.forge.validator.validate", return_value={"passed": True, "checks": {}}), \
+                 mock.patch.object(forge_pipeline, "METACOGNITION_SIGNAL_DIR", signal_dir), \
+                 mock.patch.object(forge_pipeline, "COGNITIVE_SIGNAL_DIR", cognitive_signal_dir), \
+                 mock.patch.object(forge_proposals, "PROPOSALS_DIR", pending):
+                summary = forge_pipeline.run_forge_pipeline(events_dir=events_dir)
+
+            self.assertEqual(summary["gaps_detected"], 1)
+            self.assertEqual(summary["mc03_realized"], 1)
+            self.assertEqual(summary["cp01_generated"], 1)
+            self.assertEqual(summary["proposed"], 1)
+            self.assertTrue(summary["mc03_signal_file"])
+
+            signal_files = sorted(signal_dir.glob("*.ndjson"))
+            self.assertEqual(len(signal_files), 1)
+            signal_lines = signal_files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(signal_lines), 1)
+            signal = json.loads(signal_lines[0])
+            self.assertEqual(signal["signal_id"], "MC-03")
+            self.assertEqual(signal["label"], "coverage_gap_detected")
+            self.assertEqual(signal["service"], "redis")
+            self.assertEqual(signal["status"], "realized")
+
+            cp_files = sorted(cognitive_signal_dir.glob("*.ndjson"))
+            self.assertEqual(len(cp_files), 1)
+            cp_lines = cp_files[0].read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(cp_lines), 1)
+            cp_signal = json.loads(cp_lines[0])
+            self.assertEqual(cp_signal["signal_id"], "CP-01")
+            self.assertEqual(cp_signal["label"], "toolchain_candidate_generated")
+            self.assertEqual(cp_signal["service"], "redis")
+
+            proposal_files = sorted(pending.glob("*.json"))
+            self.assertEqual(len(proposal_files), 1)
+            proposal = json.loads(proposal_files[0].read_text(encoding="utf-8"))
+            self.assertEqual(proposal["proposal_kind"], "toolchain_generation")
+            self.assertEqual(proposal["domain"], "redis")
+            self.assertEqual(proposal["metacognition_trigger"]["signal_id"], "MC-03")
+            self.assertEqual(proposal["metacognition_trigger"]["service"], "redis")
+            self.assertEqual(proposal["substrate_trigger"]["signal_id"], "MC-03")
+            self.assertEqual(proposal["cognitive_signal"]["signal_id"], "CP-01")
+
+    def test_toolchain_generation_proposal_detail_shows_metacognition_trigger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pending = Path(tmpdir) / "pending"
+            with mock.patch.object(forge_proposals, "PROPOSALS_DIR", pending):
+                proposal = forge_proposals.create(
+                    domain="redis",
+                    description="Coverage gap suggests missing Redis expression",
+                    gap={
+                        "service": "redis",
+                        "hosts": ["172.17.0.3"],
+                        "attack_surface": "Unauthenticated access and config rewrite",
+                        "category": "process",
+                        "evidence": "redis-server process observed",
+                        "metacognition_trigger": {
+                            "signal_id": "MC-03",
+                            "label": "coverage_gap_detected",
+                            "service": "redis",
+                            "detail": "Coverage gap detected for redis",
+                        },
+                        "cognitive_signal": {
+                            "signal_id": "CP-01",
+                            "label": "toolchain_candidate_generated",
+                            "detail": "Candidate toolchain for redis generated and staged for operator review.",
+                        },
+                    },
+                    generation_result={
+                        "staging_path": str(Path(tmpdir) / "staged"),
+                        "wicket_count": 2,
+                        "path_count": 1,
+                        "generation_backend": "template",
+                        "errors": [],
+                    },
+                    validation_result={"passed": True, "checks": {}},
+                )
+
+            detail = forge_proposals.format_proposal_detail(proposal)
+            self.assertIn("Metacognition:", detail)
+            self.assertIn("MC-03 coverage_gap_detected", detail)
+            self.assertIn("Coverage gap detected for redis", detail)
+            self.assertIn("Cognitive Signal:", detail)
+            self.assertIn("CP-01 toolchain_candidate_generated", detail)
+
     def test_supersede_catalog_growth_archives_and_records_memory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1308,6 +1977,40 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertEqual(captured[0]["domain"], "web")
         self.assertIn("jenkins_groovy_rce_v1", captured[0]["command"])
         self.assertIn("--description", captured[0]["command"])
+
+    def test_catalog_growth_proposals_preserve_identity_hosts(self):
+        gravity_field = _load_gravity_field_module()
+
+        class FoldStub:
+            fold_type = "projection"
+            discovery_probability = 0.8
+            id = "fold-proj-hostname"
+            detail = "jenkins observed at dc01.corp.local but attack path 'jenkins_groovy_rce_v1' is not catalogued"
+            constraint_source = "gap::missing_path::jenkins_groovy_rce_v1::dc01.corp.local"
+            why = {
+                "service": "jenkins",
+                "attack_path_id": "jenkins_groovy_rce_v1",
+            }
+
+        class FoldManagerStub:
+            def all(self):
+                return [FoldStub()]
+
+        captured = []
+
+        def fake_create_catalog_growth(**kwargs):
+            captured.append(kwargs)
+            return {"id": "proposal-hostname"}
+
+        with mock.patch.object(forge_proposals, "proposals_for_dedupe", return_value=[]), \
+             mock.patch.object(forge_proposals, "is_in_cooldown", return_value=False), \
+             mock.patch.object(forge_proposals, "create_catalog_growth", side_effect=fake_create_catalog_growth):
+            created = gravity_field._create_catalog_growth_proposals_from_folds(
+                {"dc01.corp.local": FoldManagerStub()}
+            )
+
+        self.assertEqual(created, ["proposal-hostname"])
+        self.assertEqual(captured[0]["hosts"], ["dc01.corp.local"])
 
     def test_catalog_growth_proposals_cluster_related_contextual_folds(self):
         gravity_field = _load_gravity_field_module()
@@ -1825,7 +2528,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
         }
 
         with mock.patch("skg.core.daemon_registry._all_targets_index", return_value=[target]), \
-             mock.patch("skg.core.daemon_registry._identity_world", return_value=world):
+             mock.patch("skg.core.daemon_registry._identity_world", return_value=world), \
+             mock.patch("skg.core.daemon_registry._daemon_loop_running", True):
             clusters = compute_field_fibers()
 
         cluster = next(c for c in clusters if c.anchor == "172.17.0.3")
@@ -1870,6 +2574,42 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertIn("data", by_sphere)
         self.assertIn("host", by_sphere)
         self.assertTrue(any(ws.wicket_id == "pearl::10.0.0.1::web" for ws in by_sphere["web"]))
+
+    def test_compute_field_energy_all_does_not_treat_pearl_memory_as_world_state(self):
+        import skg.topology.energy as energy_mod
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            events_dir = tmp / "events"
+            interp_dir = tmp / "interp"
+            discovery_dir = tmp / "discovery"
+            events_dir.mkdir()
+            interp_dir.mkdir()
+            discovery_dir.mkdir()
+            pearls = tmp / "pearls.jsonl"
+            pearls.write_text(json.dumps({
+                "id": "p1",
+                "state_changes": [{"wicket_id": "WB-02"}],
+                "projection_changes": [],
+                "reason_changes": [{"instrument": "http_collector", "success": True}],
+                "observation_refs": [],
+                "energy_snapshot": {
+                    "target_ip": "10.0.0.1",
+                    "workload_id": "host::10.0.0.1",
+                    "domain": "web",
+                    "decay_class": "structural",
+                },
+                "target_snapshot": {"workload_id": "host::10.0.0.1", "domain": "web"},
+                "fold_context": [],
+                "timestamp": "2026-03-27T00:00:00+00:00",
+            }) + "\n", encoding="utf-8")
+
+            with mock.patch.object(energy_mod, "DISCOVERY_DIR", discovery_dir), \
+                 mock.patch.object(energy_mod, "SKG_STATE_DIR", tmp), \
+                 mock.patch.object(energy_mod, "_world_states_from_runtime", return_value={}):
+                energies = energy_mod.compute_field_energy_all(events_dir, interp_dir)
+
+        self.assertEqual(energies, {})
 
     def test_pearl_fibers_from_ledger_capture_preserved_strands(self):
         from skg.topology.energy import _pearl_fibers_from_ledger
@@ -2389,10 +3129,43 @@ class SensorProjectionLoopTests(unittest.TestCase):
             result = daemon.assistant_what_if(req)
 
         self.assertEqual(result["task"], "what_if")
+        self.assertEqual(result["assistant_output_class"], "derived_advice")
+        self.assertEqual(result["authority"]["assistant_output_class"], "derived_advice")
+        self.assertEqual(result["authority"]["state_authority"], "advisory_only")
         self.assertEqual(result["action"]["proposal_kind"], "field_action")
         self.assertTrue(result["predicted_effects"])
         self.assertTrue(any("E 0.75" in row for row in result["predicted_effects"]))
         self.assertTrue(any("counterfactual" in row.lower() for row in result["cautions"]))
+
+    def test_assistant_explain_marks_output_as_advisory(self):
+        daemon = _load_daemon_module()
+        req = types.SimpleNamespace(
+            kind="target",
+            id="10.0.0.7",
+            identity_key="10.0.0.7",
+            task="target_summary",
+        )
+        context = {
+            "kind": "target",
+            "id": "10.0.0.7",
+            "identity_key": "10.0.0.7",
+            "subject": {"identity_key": "10.0.0.7"},
+            "field_path_count": 1,
+            "fold_count": 0,
+            "proposal_count": 0,
+            "artifacts": [],
+            "timeline": {"workload_count": 1, "snapshot_count": 1, "transition_count": 0},
+            "assistant_config": {"enabled": False},
+            "bundle": {"version": 1, "graph": {"neighbors": []}},
+        }
+
+        with mock.patch.object(daemon, "_assistant_prepare_context", return_value=(context, "target_summary")):
+            result = daemon.assistant_explain(req)
+
+        self.assertEqual(result["assistant_output_class"], "derived_advice")
+        self.assertEqual(result["authority"]["assistant_output_class"], "derived_advice")
+        self.assertEqual(result["authority"]["state_authority"], "advisory_only")
+        self.assertFalse(result["authority"]["observation_admissible"])
 
     def test_assistant_demand_derivation_prefers_physics_selected_artifacts(self):
         from skg.assistant.demands import derive_demands
@@ -2539,6 +3312,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
 
             self.assertEqual(proposal["action"]["artifact_contract"], "msf_rc")
             self.assertEqual(proposal["action"]["rc_file"], artifact["path"])
+            self.assertEqual(proposal["action"]["identity_key"], "10.0.0.7")
+            self.assertEqual(proposal["action"]["execution_target"], "10.0.0.7")
             self.assertTrue(Path(artifact["path"]).exists())
             self.assertTrue(Path(artifact["meta_path"]).exists())
 
@@ -2610,7 +3385,15 @@ class SensorProjectionLoopTests(unittest.TestCase):
                 drafted_exists = Path(drafted["draft"]["path"]).exists()
 
         self.assertGreaterEqual(listed["count"], 2)
+        self.assertEqual(listed["assistant_output_class"], "derived_advice")
+        self.assertEqual(listed["authority"]["assistant_output_class"], "derived_advice")
+        self.assertEqual(listed["authority"]["state_authority"], "advisory_only")
+        self.assertEqual(drafted["assistant_output_class"], "mutation_artifact")
+        self.assertEqual(drafted["authority"]["assistant_output_class"], "mutation_artifact")
+        self.assertEqual(drafted["authority"]["state_authority"], "advisory_only")
         self.assertEqual(drafted["draft"]["demand"]["demand_kind"], "catalog_patch")
+        self.assertEqual(drafted["draft"]["assistant_output_class"], "mutation_artifact")
+        self.assertEqual(drafted["draft"]["authority"]["assistant_output_class"], "mutation_artifact")
         self.assertTrue(drafted_exists)
 
     def test_daemon_assistant_draft_uses_derived_demand_not_inline_payload(self):
@@ -2670,6 +3453,7 @@ class SensorProjectionLoopTests(unittest.TestCase):
                  mock.patch.object(writer_module, "SKG_STATE_DIR", state_dir):
                 drafted = daemon.assistant_draft_demand(req)
 
+        self.assertEqual(drafted["assistant_output_class"], "mutation_artifact")
         self.assertEqual(drafted["draft"]["demand"]["source"]["kind"], "fold")
         self.assertEqual(drafted["draft"]["demand"]["source"]["id"], "fold-struct")
 
@@ -2735,6 +3519,8 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertEqual(proposals, [fake_proposal])
         self.assertEqual(helper.call_count, 1)
         self.assertEqual(helper.call_args.kwargs["contract_name"], "msf_rc")
+        self.assertEqual(helper.call_args.kwargs["action"]["identity_key"], "10.0.0.7")
+        self.assertEqual(helper.call_args.kwargs["action"]["execution_target"], "10.0.0.7")
 
     def test_cred_reuse_uses_contract_backed_action_proposal(self):
         cred_reuse = _load_cred_reuse_module()
@@ -2764,10 +3550,173 @@ class SensorProjectionLoopTests(unittest.TestCase):
         self.assertEqual(helper.call_count, 1)
         self.assertEqual(captured["contract_name"], "credential_test_plan")
         self.assertEqual(captured["action"]["instrument"], "ssh")
+        self.assertEqual(captured["action"]["identity_key"], "10.0.0.8")
+        self.assertEqual(captured["action"]["execution_target"], "10.0.0.8")
         self.assertEqual(captured["action"]["dispatch"]["kind"], "cred_reuse")
         self.assertEqual(captured["artifact_content"]["plan_type"], "cred_reuse_v1")
+        self.assertEqual(captured["artifact_content"]["identity_key"], "10.0.0.8")
         self.assertEqual(captured["artifact_content"]["target_ip"], "10.0.0.8")
         self.assertIn("--service ssh", captured["artifact_content"]["command_hint"])
+
+    def test_list_targets_includes_measured_only_identity(self):
+        daemon = _load_daemon_module()
+        measured_surface = {
+            "workloads": [{
+                "identity_key": "db.internal",
+                "workload_id": "mysql::db.internal:3306::users",
+                "manifestation_key": "mysql::db.internal:3306::users",
+                "domain": "data",
+                "realized": ["DP-02"],
+                "blocked": [],
+                "unknown": ["DP-01"],
+                "observed_tools": {
+                    "tool_names": ["checksec", "nikto"],
+                    "observed_tools": [
+                        {"name": "checksec", "instrument_names": ["binary_analysis"], "domain_hints": ["binary"]},
+                        {"name": "nikto", "instrument_names": ["nikto"], "domain_hints": ["web"]},
+                    ],
+                    "domain_hints": ["binary", "web"],
+                    "instrument_hints": ["binary_analysis", "nikto"],
+                    "scope": "node_local",
+                    "status": "realized",
+                },
+            }],
+            "view_nodes": [],
+        }
+
+        with mock.patch.object(daemon, "_all_targets_index", return_value=[{
+            "ip": "10.0.0.7",
+            "services": [{"port": 22, "service": "ssh"}],
+            "domains": ["host"],
+            "kind": "linux",
+        }]), mock.patch.object(
+            daemon,
+            "field_surface",
+            return_value=measured_surface,
+        ), mock.patch.object(
+            daemon,
+            "_identity_profile",
+            return_value={"evidence_count": 1},
+        ), mock.patch.object(
+            daemon,
+            "_identity_world",
+            return_value={"world_summary": {"service_count": 1}},
+        ), mock.patch.object(
+            daemon,
+            "_identity_relations",
+            return_value=[],
+        ):
+            result = daemon.list_targets()
+
+        rows = {row["identity_key"]: row for row in result["targets"]}
+        self.assertIn("db.internal", rows)
+        self.assertEqual(rows["db.internal"]["fresh_unknown_mass"], 1)
+        self.assertIn("data", rows["db.internal"]["domains"])
+        self.assertEqual(rows["db.internal"]["observed_tools"]["tool_names"], ["checksec", "nikto"])
+        self.assertIn("10.0.0.7", rows)
+
+    def test_assistant_compact_fold_exposes_identity_key(self):
+        daemon = _load_daemon_module()
+        compact = daemon._assistant_compact_fold({
+            "fold_id": "fold-1",
+            "fold_type": "structural",
+            "location": "mysql::db.internal:3306::users",
+            "detail": "mysql surface mismatch",
+            "why": {"service": "mysql", "attack_path_id": "data_exposure_v1"},
+        })
+
+        self.assertEqual(compact["identity_key"], "db.internal")
+
+    def test_fold_resolve_accepts_identity_key(self):
+        daemon = _load_daemon_module()
+        from skg.kernel.folds import Fold, FoldManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            folds_dir = state_dir / "discovery" / "folds"
+            folds_dir.mkdir(parents=True, exist_ok=True)
+
+            fm = FoldManager()
+            fm.add(Fold(
+                fold_type="structural",
+                location="mysql::db.internal:3306::users",
+                constraint_source="gap_detector::mysql",
+                detail="mysql fold",
+            ))
+            fold_id = fm.all()[0].id
+            fold_file = folds_dir / "folds_db.internal.json"
+            fm.persist(fold_file)
+
+            recorded = []
+
+            class _FakeLedger:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def record(self, pearl):
+                    recorded.append(pearl)
+
+            with mock.patch.object(daemon, "SKG_STATE_DIR", state_dir), \
+                 mock.patch.object(daemon, "PearlLedger", _FakeLedger):
+                result = daemon.fold_resolve(fold_id[:8], identity_key="db.internal")
+
+            remaining = FoldManager.load(fold_file)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["identity_key"], "db.internal")
+        self.assertEqual(len(remaining.all()), 0)
+        self.assertEqual(recorded[0].energy_snapshot["identity_key"], "db.internal")
+
+    def test_cred_store_uses_identity_aliases_for_test_tracking(self):
+        cred_reuse = _load_cred_reuse_module()
+
+        with tempfile.TemporaryDirectory() as td:
+            store = cred_reuse.CredentialStore(Path(td) / "credentials.jsonl")
+            record = store.add("alice", "s3cr3t", "db.internal", origin_wicket="WB-08")
+
+            self.assertEqual(store.untested_for("mysql::db.internal:3306::users"), [])
+
+            store.mark_tested(record["id"], "mysql::db.internal:3306::users")
+            persisted = store.all()[0]
+
+        self.assertEqual(persisted["origin_identity"], "db.internal")
+        self.assertEqual(persisted["tested_on"], ["db.internal"])
+
+    def test_cred_reuse_extracts_identity_from_workload_when_target_ip_missing(self):
+        cred_reuse = _load_cred_reuse_module()
+
+        with tempfile.TemporaryDirectory() as td:
+            events_dir = Path(td) / "events"
+            events_dir.mkdir(parents=True, exist_ok=True)
+            (events_dir / "cred.ndjson").write_text(
+                json.dumps({
+                    "type": "obs.attack.precondition",
+                    "payload": {
+                        "wicket_id": "WB-08",
+                        "status": "realized",
+                        "workload_id": "mysql::db.internal:3306::users",
+                        "detail": "Creds accepted: alice:s3cr3t",
+                    },
+                }) + "\n",
+                encoding="utf-8",
+            )
+            store = cred_reuse.CredentialStore(Path(td) / "credentials.jsonl")
+            added = cred_reuse.extract_from_events(events_dir, store)
+
+        self.assertEqual(len(added), 1)
+        self.assertEqual(added[0]["origin_ip"], "db.internal")
+        self.assertEqual(added[0]["origin_identity"], "db.internal")
+
+    def test_daemon_gravity_run_accepts_identity_key(self):
+        daemon = _load_daemon_module()
+
+        with mock.patch.object(daemon.kernel, "gravity_run_target") as runner, \
+             mock.patch.object(daemon.kernel, "gravity_status", return_value={"running": True}):
+            result = daemon.gravity_run(identity_key="db.internal")
+
+        runner.assert_called_once_with("db.internal", authorized=False)
+        self.assertEqual(result["identity_key"], "db.internal")
+        self.assertEqual(result["target_ip"], "")
 
 
 if __name__ == "__main__":

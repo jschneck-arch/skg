@@ -1,0 +1,28 @@
+version_headers:
+  - server
+  - x-powered-by
+  - x-aspnet-version
+  - x-aspnetmvc-version
+  - x-generator
+  - via
+  - x-drupal-cache
+  - x-varnish
+security_headers:
+  - content-security-policy
+  - x-frame-options
+  - strict-transport-security
+  - x-content-type-options
+  - referrer-policy
+  - permissions-policy
+weak_ciphers:
+  - RC4
+  - DES
+  - 3DES
+  - NULL
+  - EXPORT
+  - ANON
+weak_protocols:
+  - SSLv2
+  - SSLv3
+  - TLSv1
+  - TLSv1.1

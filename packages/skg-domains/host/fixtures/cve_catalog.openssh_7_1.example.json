@@ -1,0 +1,29 @@
+{
+  "domain": "host",
+  "version": "1.0.0-auto",
+  "description": "Auto-generated: openssh 7.1 version-specific CVEs",
+  "generated_by": "skg.sensors.zero_day_detector",
+  "generated_at": "2026-03-29T20:12:02.309129+00:00",
+  "source_product": "openssh",
+  "source_version": "7.1",
+  "wickets": {
+    "HO-Z2094": {
+      "label": "cve_2016_0778_vulnerability",
+      "description": "openssh 7.1: The (1) roaming_read and (2) roaming_write functions in roaming_common.c in the client in OpenSSH 5.x, 6.x, and 7.x before 7.1p2, when certain proxy and forward options are enabled, do not properly maintain connection file descriptors, which allows remote servers to cause a denial of service (heap-b (CVE-2016-0778, CVSS 8.1)",
+      "evidence_hint": "Detected openssh/7.1 on port 22. Verify CVE-2016-0778 (CVSS 8.1) with targeted scan or MSF module.",
+      "cve_id": "CVE-2016-0778",
+      "cvss": 8.1,
+      "auto_generated": true,
+      "decay_class": "structural"
+    },
+    "HO-Z7B84": {
+      "label": "cve_2016_0777_vulnerability",
+      "description": "openssh 7.1: The resend_bytes function in roaming_common.c in the client in OpenSSH 5.x, 6.x, and 7.x before 7.1p2 allows remote servers to obtain sensitive information from process memory by requesting transmission of an entire buffer, as demonstrated by reading a private key. (CVE-2016-0777, CVSS 6.5)",
+      "evidence_hint": "Detected openssh/7.1 on port 22. Verify CVE-2016-0777 (CVSS 6.5) with targeted scan or MSF module.",
+      "cve_id": "CVE-2016-0777",
+      "cvss": 6.5,
+      "auto_generated": true,
+      "decay_class": "structural"
+    }
+  }
+}

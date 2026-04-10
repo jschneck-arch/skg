@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "last_run_ts": 1775452441.915133,
+  "sources": {
+    "help:rg": 1775452433.2310107,
+    "man:rg": 1775452433.2310107,
+    "code:/opt/skg/skg/resonance/sphere_gpu.py": 1775452433.2310107
+  }
+}

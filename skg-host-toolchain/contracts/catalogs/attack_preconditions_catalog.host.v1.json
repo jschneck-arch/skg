@@ -7,14 +7,14 @@
       "id": "HO-01",
       "label": "host_reachable_and_responsive",
       "description": "Target host responds to network probes; collection or exploitation is feasible.",
-      "evidence_hint": "Evidence rank min: 4 (nmap scan or successful TCP connect)",
+      "evidence_hint": "Evidence rank min: 4 (nmap scan or successful TCP connect); rank 1 after successful SSH/WinRM authentication",
       "decay_class": "ephemeral"
     },
     "HO-02": {
       "id": "HO-02",
       "label": "ssh_service_exposed",
       "description": "SSH service is listening on a reachable port.",
-      "evidence_hint": "Evidence rank min: 4 (nmap service scan or banner grab)",
+      "evidence_hint": "Evidence rank min: 4 (nmap service scan or banner grab); rank 1 after successful SSH authentication",
       "decay_class": "ephemeral"
     },
     "HO-03": {
@@ -28,7 +28,7 @@
       "id": "HO-04",
       "label": "winrm_service_exposed",
       "description": "WinRM (5985/5986) is listening and accessible.",
-      "evidence_hint": "Evidence rank min: 4 (nmap port scan)",
+      "evidence_hint": "Evidence rank min: 4 (nmap port scan); rank 1 after successful WinRM authentication",
       "decay_class": "ephemeral"
     },
     "HO-05": {
@@ -177,6 +177,20 @@
       "description": "An nmap-identified open port is running a service version with a known exploitable CVE.",
       "evidence_hint": "Evidence rank min: 4 (nmap -sV with version detection)",
       "decay_class": "ephemeral"
+    },
+    "HO-26": {
+      "id": "HO-26",
+      "label": "smb_null_session_allowed",
+      "description": "SMB null/anonymous session permitted — unauthenticated share listing or enumeration is possible.",
+      "evidence_hint": "Evidence rank min: 3 (smbclient -N -L, enum4linux null session)",
+      "decay_class": "operational"
+    },
+    "HO-27": {
+      "id": "HO-27",
+      "label": "smb_sensitive_files_accessible",
+      "description": "Sensitive or credential-bearing files are readable on SMB shares without authentication.",
+      "evidence_hint": "Evidence rank min: 2 (smbclient share traversal, grep for passwords/keys)",
+      "decay_class": "operational"
     }
   },
   "attack_paths": {

@@ -59,8 +59,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.sensors import BaseSensor, register, emit_events
-from skg.core.paths import SKG_STATE_DIR, SKG_CONFIG_DIR
+from skg.sensors import BaseSensor, register
+from skg_core.config.paths import SKG_STATE_DIR, SKG_CONFIG_DIR
+try:
+    from skg_protocol.events import (
+        build_event_envelope as envelope,
+        build_precondition_payload as precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import envelope, precondition_payload
+
+try:
+    from skg_services.gravity.event_writer import emit_events
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import emit_events
 
 log = logging.getLogger("skg.sensors.web")
 
@@ -487,7 +499,8 @@ def collect_web_target(target: dict, client: WebClient) -> dict:
     Returns a collection dict ready for adapter evaluation.
     """
     url        = target["url"].rstrip("/")
-    workload_id = target.get("workload_id", url)
+    _host      = urllib.parse.urlparse(url).hostname or url
+    workload_id = target.get("workload_id") or f"web::{_host}"
     method     = target.get("method", "https")
 
     log.info(f"[web] collecting: {url} ({workload_id})")
@@ -578,34 +591,26 @@ SOURCE_ID  = "adapter.web_collect"
 def _ev(workload_id: str, wicket_id: str, status: str,
         rank: int, kind: str, pointer: str, confidence: float,
         attack_path_id: str, run_id: str, detail: str = "") -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-    return {
-        "id":   str(uuid.uuid4()),
-        "ts":   now,
-        "type": "obs.attack.precondition",
-        "source": {
-            "source_id": SOURCE_ID,
-            "toolchain": TOOLCHAIN,
-            "version":   "1.0.0",
-        },
-        "payload": {
-            "wicket_id":      wicket_id,
-            "status":         status,
-            "attack_path_id": attack_path_id,
-            "run_id":         run_id,
-            "workload_id":    workload_id,
-            "detail":         detail,
-        },
-        "provenance": {
-            "evidence_rank": rank,
-            "evidence": {
-                "source_kind":  kind,
-                "pointer":      pointer,
-                "collected_at": now,
-                "confidence":   confidence,
-            },
-        },
-    }
+    payload = precondition_payload(
+        wicket_id=wicket_id,
+        domain="web",
+        workload_id=workload_id,
+        status=status,
+        detail=detail,
+        attack_path_id=attack_path_id,
+    )
+    payload["run_id"] = run_id
+    return envelope(
+        event_type="obs.attack.precondition",
+        source_id=SOURCE_ID,
+        toolchain=TOOLCHAIN,
+        payload=payload,
+        evidence_rank=rank,
+        source_kind=kind,
+        pointer=pointer,
+        confidence=confidence,
+        version="1.0.0",
+    )
 
 
 def evaluate_wickets(collection: dict, attack_path_id: str,
@@ -630,141 +635,200 @@ def evaluate_wickets(collection: dict, attack_path_id: str,
                           attack_path_id, run_id, detail))
 
     root_status = root.get("status", 0)
+    versions = fp.get("version_strings", [])
+    missing = fp.get("missing_sec_headers", [])
 
-    # WEB-01: Target reachable
+    # WB-01: Web target reachable
     if root_status > 0 and not root.get("error"):
-        ev("WEB-01", "realized", 1, url, 1.0,
+        ev("WB-01", "realized", 1, url, 1.0,
            f"HTTP {root_status} from {url}")
     elif root.get("error"):
-        ev("WEB-01", "blocked", 1, url, 0.9,
+        ev("WB-01", "blocked", 1, url, 0.9,
            f"Connection failed: {root['error']}")
     else:
-        ev("WEB-01", "unknown", 4, url, 0.5)
+        ev("WB-01", "unknown", 4, url, 0.5)
 
-    # WEB-02: TLS in use
-    if url.startswith("https://"):
-        ev("WEB-02", "realized", 4, "https scheme", 1.0)
-    elif url.startswith("http://"):
-        ev("WEB-02", "blocked", 4, "http scheme — no TLS", 1.0,
+    # WB-11: TLS weak or missing
+    # realized = no TLS (http://) or self-signed cert; blocked = https:// with valid cert
+    if url.startswith("http://"):
+        ev("WB-11", "realized", 4, "http scheme — no TLS", 1.0,
            "Plaintext HTTP — credentials and session tokens in the clear")
-    else:
-        ev("WEB-02", "unknown", 4, url, 0.5)
-
-    # WEB-03: TLS self-signed (weak trust)
-    if fp.get("tls_self_signed"):
-        ev("WEB-03", "realized", 4, "tls cert", 0.95,
+    elif fp.get("tls_self_signed"):
+        ev("WB-11", "realized", 4, "tls cert — self-signed", 0.95,
            "Self-signed certificate — no CA trust chain")
-    elif url.startswith("https://") and not fp.get("tls_self_signed"):
-        ev("WEB-03", "blocked", 4, "tls cert", 0.8)
+    elif url.startswith("https://"):
+        ev("WB-11", "blocked", 4, "https with valid cert", 0.8)
     else:
-        ev("WEB-03", "unknown", 4, url, 0.3)
+        ev("WB-11", "unknown", 4, url, 0.5)
 
-    # WEB-04: Admin interface exposed
-    admin_paths = [h for h in hits if any(
+    # WB-02: Server header discloses software version
+    if versions:
+        ev("WB-02", "realized", 1, "server/x-powered-by", 0.95,
+           f"Version disclosure: {', '.join(versions[:5])}")
+    else:
+        ev("WB-02", "blocked", 2, "version header", 0.8)
+
+    # WB-03: X-Powered-By / stack technology leaked
+    _stack_techs = [t for t in techs if t in {
+        "php", "aspnet", "nodejs", "flask", "fastapi", "java_servlet",
+        "spring_boot", "nginx", "apache", "iis", "tomcat", "litespeed",
+    }]
+    if _stack_techs:
+        ev("WB-03", "realized", 1, "tech fingerprint", 0.9,
+           f"Stack identified: {', '.join(_stack_techs[:5])}")
+    else:
+        ev("WB-03", "unknown", 2, "fingerprint", 0.4)
+
+    # WB-04: Missing critical security headers
+    if len(missing) >= 4:
+        ev("WB-04", "realized", 1, "security headers", 0.9,
+           f"Missing: {', '.join(missing)}")
+    elif missing:
+        ev("WB-04", "unknown", 2, "security headers", 0.7,
+           f"Partially missing: {', '.join(missing)}")
+    else:
+        ev("WB-04", "blocked", 1, "security headers", 0.9)
+
+    # WB-05: Admin interface accessible
+    admin_hits = [h for h in hits if any(
         kw in h["description"].lower()
-        for kw in ["admin", "console", "manager", "control"]
+        for kw in ["admin", "console", "manager", "control", "dashboard"]
     )]
-    if admin_paths:
-        ev("WEB-04", "realized", 1,
-           admin_paths[0]["path"], 1.0,
-           f"Admin interface: {', '.join(h['path'] for h in admin_paths[:3])}")
+    if admin_hits:
+        ev("WB-05", "realized", 1,
+           admin_hits[0]["path"], 1.0,
+           f"Admin interface: {', '.join(h['path'] for h in admin_hits[:3])}")
     else:
-        ev("WEB-04", "unknown", 3, "path probe", 0.5)
+        ev("WB-05", "unknown", 3, "path probe", 0.5)
 
-    # WEB-05: Default credentials accepted
+    # WB-06: API docs (Swagger/OpenAPI) exposed
+    apidoc_hits = [h for h in hits if any(
+        kw in h["path"]
+        for kw in ["/swagger", "/openapi", "/api-docs", "/redoc"]
+    )]
+    if apidoc_hits:
+        ev("WB-06", "realized", 1,
+           apidoc_hits[0]["path"], 1.0,
+           f"API docs exposed: {', '.join(h['path'] for h in apidoc_hits[:3])}")
+    else:
+        ev("WB-06", "unknown", 3, "path probe", 0.5)
+
+    # WB-07: Debug/actuator endpoint exposed
+    debug_hits = [h for h in hits if any(
+        kw in h["path"]
+        for kw in ["/actuator", "/debug", "/metrics", "/_cat", "/_cluster",
+                   "/server-status", "/server-info", "/nginx_status"]
+    )]
+    if debug_hits:
+        ev("WB-07", "realized", 1,
+           debug_hits[0]["path"], 1.0,
+           f"Debug/actuator exposed: {', '.join(h['path'] for h in debug_hits[:3])}")
+    else:
+        ev("WB-07", "unknown", 3, "path probe", 0.5)
+
+    # WB-08: .git directory accessible
+    git_hits = [h for h in hits if ".git" in h["path"]]
+    if git_hits:
+        ev("WB-08", "realized", 1,
+           git_hits[0]["path"], 1.0,
+           f"Git exposure: {', '.join(h['path'] for h in git_hits[:3])}")
+    else:
+        ev("WB-08", "unknown", 3, "path probe", 0.5)
+
+    # WB-09: .env or config file with credentials accessible
+    env_hits = [h for h in hits if any(
+        kw in h["path"]
+        for kw in [".env", "config.php", "config.yaml", "config.json",
+                   "web.config", "settings.py", "database.yml"]
+    )]
+    if env_hits:
+        ev("WB-09", "realized", 1,
+           env_hits[0]["path"], 1.0,
+           f"Config/env exposed: {', '.join(h['path'] for h in env_hits[:3])}")
+    else:
+        ev("WB-09", "unknown", 3, "path probe", 0.5)
+
+    # WB-10: Default credentials accepted
     if auths:
         path, cred = next(iter(auths.items()))
-        ev("WEB-05", "realized", 1, path, 1.0,
+        ev("WB-10", "realized", 1, path, 1.0,
            f"Default creds work: {cred['user']}:{cred['password']} on {path}")
     else:
-        ev("WEB-05", "blocked", 1, "auth probe", 0.7,
+        ev("WB-10", "blocked", 1, "auth probe", 0.7,
            "Default credential attempts rejected")
 
-    # WEB-06: Sensitive path exposed (.env, .git, config, phpinfo)
-    sensitive = [h for h in hits if any(
-        kw in h["path"]
-        for kw in [".env", ".git", "config", "phpinfo", "info.php", "test.php"]
-    )]
-    if sensitive:
-        ev("WEB-06", "realized", 1,
-           sensitive[0]["path"], 1.0,
-           f"Sensitive path exposed: {', '.join(h['path'] for h in sensitive[:3])}")
-    else:
-        ev("WEB-06", "unknown", 3, "path probe", 0.5)
-
-    # WEB-07: API/actuator endpoint exposed
-    api_hits = [h for h in hits if any(
-        kw in h["path"]
-        for kw in ["/actuator", "/api", "/swagger", "/openapi", "/metrics",
-                   "/debug", "/_cat", "/_cluster"]
-    )]
-    if api_hits:
-        ev("WEB-07", "realized", 1,
-           api_hits[0]["path"], 1.0,
-           f"API/actuator exposed: {', '.join(h['path'] for h in api_hits[:3])}")
-    else:
-        ev("WEB-07", "unknown", 3, "path probe", 0.5)
-
-    # WEB-08: CORS wildcard
+    # WB-12: CORS wildcard
     if fp.get("cors_wildcard"):
-        ev("WEB-08", "realized", 1,
+        ev("WB-12", "realized", 1,
            "Access-Control-Allow-Origin: *", 0.95,
            "CORS wildcard — cross-origin requests permitted from any domain")
     else:
-        ev("WEB-08", "blocked", 2, "cors header", 0.7)
+        ev("WB-12", "blocked", 2, "cors header", 0.7)
 
-    # WEB-09: Missing security headers (≥4 missing = realized)
-    missing = fp.get("missing_sec_headers", [])
-    if len(missing) >= 4:
-        ev("WEB-09", "realized", 1,
-           f"missing headers", 0.9,
-           f"Missing: {', '.join(missing)}")
-    elif missing:
-        ev("WEB-09", "unknown", 1,
-           f"partial headers", 0.7,
-           f"Missing: {', '.join(missing)}")
-    else:
-        ev("WEB-09", "blocked", 1, "security headers", 0.9)
-
-    # WEB-10: Technology identified (CVE surface)
-    if techs:
-        ev("WEB-10", "realized", 1,
-           "tech fingerprint", 0.9,
-           f"Technologies: {', '.join(techs)}")
-    else:
-        ev("WEB-10", "unknown", 2, "fingerprint", 0.4)
-
-    # WEB-11: Version string in response (enables CVE mapping)
-    versions = fp.get("version_strings", [])
+    # WB-13: Server version matches known CVE pattern
+    # Actual CVE lookup happens in the NVD feed; here we flag version exposure as potential surface
     if versions:
-        ev("WEB-11", "realized", 1,
-           "server/x-powered-by", 0.95,
-           f"Version disclosure: {', '.join(versions[:5])}")
+        ev("WB-13", "realized", 2, "version strings", 0.7,
+           f"Version strings present — potential CVE surface: {', '.join(versions[:3])}")
     else:
-        ev("WEB-11", "blocked", 1, "version header", 0.8)
+        ev("WB-13", "unknown", 3, "version header", 0.4)
 
-    # WEB-12: Credentials/secrets in response body
-    if fp.get("interesting_body"):
-        ev("WEB-12", "realized", 1,
-           "response body", 1.0,
-           f"Credentials/secrets in body: {fp['interesting_body'][0][:60]}")
+    # WB-14: Auth surface present (login/auth endpoints or 401/403 responses)
+    login_hits = [h for h in hits if any(
+        kw in h["path"].lower() or kw in h["description"].lower()
+        for kw in ["login", "signin", "auth", "credential"]
+    )]
+    auth_probe_paths = [p for p, r in probes.items() if r.get("status") in (401, 403)]
+    if fp.get("auth_required") or login_hits or auth_probe_paths:
+        _desc_parts = []
+        if login_hits:
+            _desc_parts.append(f"login paths: {', '.join(h['path'] for h in login_hits[:2])}")
+        if auth_probe_paths:
+            _desc_parts.append(f"401/403: {', '.join(auth_probe_paths[:2])}")
+        ev("WB-14", "realized", 2, url, 0.9,
+           "; ".join(_desc_parts) or "auth surface detected")
     else:
-        ev("WEB-12", "unknown", 1, "body scan", 0.5)
+        ev("WB-14", "unknown", 3, "auth probe", 0.5)
 
-    # WEB-13: Directory listing enabled
-    if fp.get("directory_listing"):
-        ev("WEB-13", "realized", 1,
-           "directory listing", 1.0,
-           "Directory listing enabled — file enumeration possible")
+    # WB-15: CMS detected
+    _cms_found = [t for t in techs if t in {
+        "wordpress", "drupal", "joomla", "ghost", "typo3",
+    }]
+    if _cms_found:
+        ev("WB-15", "realized", 1, "tech fingerprint", 0.95,
+           f"CMS detected: {', '.join(_cms_found)}")
     else:
-        ev("WEB-13", "unknown", 3, "directory probe", 0.5)
+        ev("WB-15", "unknown", 3, "fingerprint", 0.4)
 
-    # WEB-14: Onion service (anonymity surface)
+    # WB-16: Onion service active
     if ".onion" in url:
-        ev("WEB-14", "realized", 4, ".onion domain", 1.0,
+        ev("WB-16", "realized", 4, ".onion domain", 1.0,
            "Tor hidden service — operator anonymity, reduced attribution")
     else:
-        ev("WEB-14", "blocked", 4, "clearnet url", 1.0)
+        ev("WB-16", "blocked", 4, "clearnet url", 1.0)
+
+    # WB-17: Sensitive file accessible (backup, sql dump, key, phpinfo, directory listing)
+    sensitive_hits = [h for h in hits if any(
+        kw in h["path"]
+        for kw in ["backup", ".sql", "id_rsa", "phpinfo", "info.php",
+                   "test.php", ".bak", "dump", ".key", ".pem"]
+    )]
+    if sensitive_hits or fp.get("directory_listing"):
+        _s_parts = []
+        if sensitive_hits:
+            _s_parts.append(f"sensitive files: {', '.join(h['path'] for h in sensitive_hits[:3])}")
+        if fp.get("directory_listing"):
+            _s_parts.append("directory listing enabled")
+        ev("WB-17", "realized", 1, url, 1.0, "; ".join(_s_parts))
+    else:
+        ev("WB-17", "unknown", 3, "path probe", 0.5)
+
+    # WB-38: Credentials/secrets found in response body or config endpoint
+    if fp.get("interesting_body"):
+        ev("WB-38", "realized", 1, "response body", 1.0,
+           f"Credentials/secrets in response: {fp['interesting_body'][0][:60]}")
+    else:
+        ev("WB-38", "unknown", 1, "body scan", 0.5)
 
     return events
 
@@ -855,7 +919,8 @@ class WebSensor(BaseSensor):
                 continue
 
             # Evaluate wickets
-            wid         = target.get("workload_id", url)
+            _whost      = urllib.parse.urlparse(url).hostname or url
+            wid         = target.get("workload_id") or f"web::{_whost}"
             path_id     = target.get("attack_path_id", "web_surface_v1")
             events      = evaluate_wickets(collection, path_id, run_id)
 
@@ -870,7 +935,14 @@ class WebSensor(BaseSensor):
                 realized = True if status == "realized" else (False if status == "blocked" else None)
                 if self._ctx and wkt_id:
                     et   = f"{wkt_id}: {p.get('detail','')}"
-                    conf = self._ctx.calibrate(base_c, et, wkt_id, "web", wid)
+                    conf = self._ctx.calibrate(
+                        base_c,
+                        et,
+                        wkt_id,
+                        "web",
+                        wid,
+                        source_id=ev.get("source", {}).get("source_id", ""),
+                    )
                     ev["provenance"]["evidence"]["confidence"] = conf
                     self._ctx.record(
                         evidence_text=et, wicket_id=wkt_id, domain="web",

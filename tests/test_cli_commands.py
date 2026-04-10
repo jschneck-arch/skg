@@ -4,12 +4,15 @@ Tests for migrated CLI commands.
 These tests don't need the daemon or a live target.
 """
 from __future__ import annotations
+import os
 import sys
 import types
 import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+import yaml
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -235,6 +238,7 @@ class TestUtilsImport:
         assert callable(u._load_target_config)
         assert callable(u._bootstrap_target_surface)
         assert callable(u._run_python)
+        assert callable(u._load_skg_env_value)
         assert callable(u._proposal_backlog)
         assert callable(u._fold_summary_offline)
         assert callable(u._choose_fold_summary)
@@ -365,3 +369,454 @@ class TestConsoleScriptShim:
         }
         props = _infer_identity_properties_from_target(target)
         assert props["interactive_surface_present"] is True
+
+
+class TestParserBehavior:
+    def test_build_parser_importable(self):
+        from skg.cli import build_parser
+
+        parser = build_parser()
+        assert parser is not None
+
+    def test_help_paths_exit_cleanly(self):
+        import pytest
+        from skg.cli import build_parser
+
+        parser = build_parser()
+        for argv in (["--help"], ["graph", "--help"], ["folds", "--help"], ["engage", "--help"], ["core", "--help"]):
+            with pytest.raises(SystemExit) as exc_info:
+                parser.parse_args(argv)
+            assert exc_info.value.code == 0
+
+    def test_graph_defaults_to_topology(self, capsys):
+        from skg.cli.commands.intelligence import cmd_graph
+
+        class _Graph:
+            def topology_report(self):
+                return {
+                    "nodes": 0,
+                    "edges": 0,
+                    "R_global": 0.0,
+                    "n_realized": 0,
+                    "n_blocked": 0,
+                    "n_unknown": 0,
+                    "clusters": {},
+                    "entangled": [],
+                    "top_gradient": [],
+                }
+
+        with patch("skg.kernel.wicket_graph.get_wicket_graph", return_value=_Graph()):
+            cmd_graph(_Args(graph_cmd=None))
+
+        out = capsys.readouterr().out
+        assert "Wicket Knowledge Graph" in out
+
+    def test_folds_defaults_to_list(self, capsys):
+        from skg.cli.commands.surface import cmd_folds
+
+        with patch("skg.cli.commands.surface._api", return_value={"summary": {"total": 0, "total_gravity_weight": 0.0, "by_type": {}}, "folds": [], "note": "none"}):
+            cmd_folds(_Args(folds_cmd=None))
+
+        out = capsys.readouterr().out
+        assert "Active folds" in out
+
+
+class TestCommandPathNormalization:
+    def test_feed_reads_api_key_from_config_env(self, tmp_path):
+        from skg.cli.commands.intelligence import cmd_feed
+
+        fake_home = tmp_path / "repo"
+        fake_script = fake_home / "feeds" / "nvd_ingester.py"
+        fake_script.parent.mkdir(parents=True, exist_ok=True)
+        fake_script.write_text("#!/usr/bin/env python3\n")
+
+        fake_config = tmp_path / "config"
+        fake_config.mkdir()
+        (fake_config / "skg.env").write_text('NIST_NVD_API_KEY="secret"\n')
+
+        with patch("skg.cli.commands.intelligence.SKG_HOME", fake_home):
+            with patch("skg.cli.commands.intelligence.SKG_CONFIG_DIR", fake_config):
+                with patch("skg.cli.utils.SKG_CONFIG_DIR", fake_config):
+                    with patch.dict(os.environ, {}, clear=True):
+                        with patch("subprocess.call", return_value=0) as mock_call:
+                            cmd_feed(_Args(feed_cmd="nvd", service="Apache/2.4.25"))
+
+        mock_call.assert_called_once()
+
+    def test_binary_remote_analysis_projects_and_processes_feedback(self, tmp_path, capsys):
+        from skg.cli.commands.exploit import cmd_exploit
+
+        fake_events = [
+            {
+                "id": f"ev-{idx}",
+                "ts": f"2026-03-27T15:12:5{idx}+00:00",
+                "type": "obs.attack.precondition",
+                "source": {"toolchain": "skg-binary-toolchain"},
+                "payload": {
+                    "wicket_id": wicket_id,
+                    "status": status,
+                    "attack_path_id": "binary_stack_overflow_v1",
+                    "run_id": "remote-run",
+                    "workload_id": "binary::192.168.254.5::ssh-keysign",
+                    "detail": wicket_id,
+                },
+            }
+            for idx, (wicket_id, status) in enumerate([
+                ("BA-01", "blocked"),
+                ("BA-03", "realized"),
+                ("BA-04", "realized"),
+                ("BA-05", "unknown"),
+                ("BA-06", "realized"),
+            ])
+        ]
+
+        def _fake_run(cmd, capture_output, text):
+            assert "--password" in cmd
+            assert "--key" not in cmd
+            out_path = Path(cmd[cmd.index("--out") + 1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                "\n".join(json.dumps(event) for event in fake_events) + "\n",
+                encoding="utf-8",
+            )
+            return _Args(returncode=0, stdout="[binary_analysis] 5 events written", stderr="")
+
+        with patch("skg.cli.commands.exploit.DISCOVERY_DIR", tmp_path / "discovery"), \
+             patch("skg.cli.commands.exploit.INTERP_DIR", tmp_path / "interp"), \
+             patch("skg.cli.commands.exploit._load_target_config", return_value={"auth": {"key": "/tmp/id_rsa"}}), \
+             patch("skg.cli.commands.exploit.subprocess.run", side_effect=_fake_run), \
+             patch("skg.cli.commands.exploit._api", return_value={"processed": 1}):
+            cmd_exploit(_Args(
+                exploit_cmd="binary",
+                binary_path="/usr/lib/ssh/ssh-keysign",
+                target="192.168.254.5",
+                user="skg",
+                password="skg",
+                key="",
+                port=22,
+                attack_path_id="binary_stack_overflow_v1",
+                workload_id="",
+            ))
+
+        out = capsys.readouterr().out
+        assert "Remote target: 192.168.254.5:22" in out
+        assert "Projection written" in out
+        assert "Feedback processed: 1 interp(s)" in out
+        assert list((tmp_path / "interp").glob("*.json"))
+
+    def test_cred_reuse_uses_configured_targets_path(self, tmp_path, capsys):
+        from skg.cli.commands.exploit import cmd_exploit
+
+        captured = {}
+        fake_module = types.ModuleType("cred_reuse")
+
+        class _Store:
+            def count(self):
+                return 1
+
+            def untested_for(self, _target):
+                return []
+
+        def _extract_from_events(_events_dir, _store):
+            return []
+
+        def _extract_from_targets_yaml(path, _store):
+            captured["path"] = path
+            return []
+
+        def _reuse_energy(_target_ip, _surface, _store):
+            return 0.0
+
+        def _run_reuse_sweep(**_kwargs):
+            return []
+
+        fake_module.CredentialStore = _Store
+        fake_module.extract_from_events = _extract_from_events
+        fake_module.extract_from_targets_yaml = _extract_from_targets_yaml
+        fake_module.reuse_energy = _reuse_energy
+        fake_module.run_reuse_sweep = _run_reuse_sweep
+
+        fake_config = tmp_path / "config"
+        fake_config.mkdir()
+
+        with patch.dict(sys.modules, {"cred_reuse": fake_module}):
+            with patch("skg.cli.commands.exploit.SKG_CONFIG_DIR", fake_config):
+                with patch("skg.cli.commands.exploit.DISCOVERY_DIR", tmp_path / "discovery"):
+                    cmd_exploit(_Args(exploit_cmd="cred-reuse", target="10.0.0.7", authorized=False))
+
+        _ = capsys.readouterr()
+        assert captured["path"] == fake_config / "targets.yaml"
+
+
+class TestEngageCommand:
+    def test_missing_subcommand_prints_usage(self, capsys):
+        from skg.cli.commands.report import cmd_engage
+
+        with patch("skg.intel.engagement_dataset.build_engagement_db") as mock_build:
+            with patch("skg.intel.engagement_dataset.generate_engagement_report") as mock_report:
+                with patch("skg.intel.engagement_dataset.analyze_engagement_integrity") as mock_analyze:
+                    cmd_engage(_Args(engage_cmd=None))
+
+        out = capsys.readouterr().out
+        assert "Usage: skg engage" in out
+        mock_build.assert_not_called()
+        mock_report.assert_not_called()
+        mock_analyze.assert_not_called()
+
+
+class TestCoreCouplingCommand:
+    def test_core_coupling_apply_updates_config(self, capsys):
+        from skg.cli.commands.core import cmd_core
+        import skg.core.coupling as coupling
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg_dir = root / "cfg"
+            home_dir = root / "home"
+            learned_path = root / "learned.yaml"
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            home_dir.mkdir(parents=True, exist_ok=True)
+            (cfg_dir / "coupling.yaml").write_text(
+                "\n".join([
+                    "intra_target:",
+                    "  host:",
+                    "    web: 0.33",
+                ]),
+                encoding="utf-8",
+            )
+            learned_path.write_text(
+                "\n".join([
+                    "intra_target:",
+                    "  host:",
+                    "    web: 0.66",
+                ]),
+                encoding="utf-8",
+            )
+
+            coupling._CONFIG_CACHE["path"] = None
+            coupling._CONFIG_CACHE["mtime"] = None
+            coupling._CONFIG_CACHE["payload"] = None
+
+            with patch.object(coupling, "SKG_CONFIG_DIR", cfg_dir), \
+                 patch.object(coupling, "SKG_HOME", home_dir):
+                rc = cmd_core(_Args(
+                    core_cmd="coupling",
+                    validate=False,
+                    show=False,
+                    learn=False,
+                    apply=True,
+                    delta_dir=str(root / "delta"),
+                    out=None,
+                    learned_file=str(learned_path),
+                    review=False,
+                    backup=True,
+                    yes=True,
+                ))
+
+            out = capsys.readouterr().out
+            updated = yaml.safe_load((cfg_dir / "coupling.yaml").read_text(encoding="utf-8"))
+
+        assert rc == 0
+        assert '"ok": true' in out.lower()
+        assert updated["intra_target"]["host"]["web"] == 0.66
+
+
+class TestIdentityFirstCliShell:
+    def test_surface_subject_rows_merge_measured_view_with_target_shell(self):
+        from skg.cli.utils import _surface_subject_rows
+
+        measured_surface = {
+            "workloads": [{
+                "identity_key": "db.internal",
+                "manifestation_key": "mysql::db.internal:3306::users",
+                "domain": "data_pipeline",
+                "classification": "indeterminate",
+                "realized": ["DP-02"],
+                "blocked": [],
+                "unknown": ["DP-01"],
+                "measured_now": {
+                    "realized": ["DP-02"],
+                    "blocked": [],
+                    "unknown": ["DP-01"],
+                },
+                "compatibility_score": 0.71,
+                "decoherence": 0.12,
+                "unresolved_reason": "unmeasured",
+                "observed_tools": {
+                    "tool_names": ["checksec", "nikto"],
+                    "observed_tools": [
+                        {"name": "checksec", "instrument_names": ["binary_analysis"], "domain_hints": ["binary"]},
+                        {"name": "nikto", "instrument_names": ["nikto"], "domain_hints": ["web"]},
+                    ],
+                    "domain_hints": ["binary", "web"],
+                    "instrument_hints": ["binary_analysis", "nikto"],
+                    "scope": "node_local",
+                    "status": "realized",
+                },
+            }],
+        }
+        target_surface = {
+            "targets": [{
+                "host": "db.internal",
+                "hostname": "db.internal",
+                "kind": "database",
+                "services": [{"port": 3306, "service": "mysql"}],
+                "domains": ["data"],
+            }],
+        }
+
+        rows = _surface_subject_rows(measured_surface=measured_surface, target_surface=target_surface)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["identity_key"] == "db.internal"
+        assert row["unknown_count"] == 1
+        assert row["realized_count"] == 1
+        assert row["services"] == [{"port": 3306, "service": "mysql"}]
+        assert "data" in row["domains"]
+        assert "data_pipeline" in row["domains"]
+        assert "mysql::db.internal:3306::users" in row["manifestations"]
+        assert row["observed_tools"]["tool_names"] == ["checksec", "nikto"]
+
+    def test_load_target_snapshot_from_pearls_matches_identity_aliases(self, tmp_path):
+        from skg.cli.utils import _load_target_snapshot_from_pearls
+
+        pearls_path = tmp_path / "pearls.jsonl"
+        pearls_path.write_text(
+            json.dumps({
+                "timestamp": "2026-03-27T12:00:00+00:00",
+                "workload_id": "mysql::db.internal:3306::users",
+                "energy_snapshot": {"target_ip": "10.0.0.9"},
+                "target_snapshot": {
+                    "identity_key": "db.internal",
+                    "hostname": "db.internal",
+                    "domains": ["data"],
+                    "services": [{"port": 3306, "service": "mysql"}],
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("skg.cli.utils.SKG_STATE_DIR", tmp_path):
+            assert _load_target_snapshot_from_pearls("db.internal") is not None
+            assert _load_target_snapshot_from_pearls("10.0.0.9") is not None
+
+    def test_target_list_prints_identity_first_rows(self, tmp_path, capsys):
+        from skg.cli.commands.target import cmd_target
+
+        surface_path = tmp_path / "surface_demo.json"
+        surface_path.write_text(
+            json.dumps({
+                "targets": [{
+                    "ip": "10.0.0.9",
+                    "host": "10.0.0.9",
+                    "hostname": "db.internal",
+                    "kind": "database",
+                    "services": [{"port": 3306, "service": "mysql"}],
+                    "domains": ["data"],
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        interp_dir = tmp_path / "interp"
+        interp_dir.mkdir()
+        (interp_dir / "binary_demo.json").write_text(
+            json.dumps({
+                "workload_id": "mysql::db.internal:3306::users",
+                "attack_path_id": "data_exposure_v1",
+                "domain": "data",
+                "classification": "indeterminate",
+                "realized": ["DP-02"],
+                "blocked": [],
+                "unknown": ["DP-01"],
+                "data_score": 0.61,
+                "computed_at": "2026-03-27T13:00:00+00:00",
+            }),
+            encoding="utf-8",
+        )
+
+        with patch("skg.cli.commands.target._latest_surface", return_value=str(surface_path)), \
+             patch("skg.cli.commands.target.SKG_STATE_DIR", tmp_path):
+            cmd_target(_Args(target_cmd="list"))
+
+        out = capsys.readouterr().out
+        assert "Node" in out
+        assert "db.internal" in out
+
+    def test_target_remove_prunes_subject_aliases(self, tmp_path, capsys):
+        from skg.cli.commands.target import cmd_target
+
+        discovery_dir = tmp_path / "discovery"
+        config_dir = tmp_path / "config"
+        state_dir = tmp_path / "state"
+        interp_dir = tmp_path / "interp"
+        events_dir = tmp_path / "events"
+        for path in (discovery_dir, config_dir, state_dir, interp_dir, events_dir):
+            path.mkdir(parents=True, exist_ok=True)
+
+        (discovery_dir / "surface_demo.json").write_text(
+            json.dumps({
+                "targets": [{
+                    "hostname": "db.internal",
+                    "host": "db.internal",
+                    "services": [{"port": 3306, "service": "mysql"}],
+                }],
+            }),
+            encoding="utf-8",
+        )
+        (config_dir / "targets.yaml").write_text(
+            "targets:\n  - host: db.internal\n    workload_id: mysql::db.internal:3306::users\n",
+            encoding="utf-8",
+        )
+        (state_dir / "pearls.jsonl").write_text(
+            json.dumps({
+                "workload_id": "mysql::db.internal:3306::users",
+                "target_snapshot": {"identity_key": "db.internal"},
+                "energy_snapshot": {"identity_key": "db.internal"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (interp_dir / "mysql_subject.json").write_text(
+            json.dumps({"workload_id": "mysql::db.internal:3306::users"}),
+            encoding="utf-8",
+        )
+
+        with patch("skg.cli.commands.target.DISCOVERY_DIR", discovery_dir), \
+             patch("skg.cli.commands.target.SKG_CONFIG_DIR", config_dir), \
+             patch("skg.cli.commands.target.SKG_STATE_DIR", state_dir), \
+             patch("skg_core.config.paths.INTERP_DIR", interp_dir), \
+             patch("skg_core.config.paths.EVENTS_DIR", events_dir):
+            cmd_target(_Args(target_cmd="remove", ip="db.internal"))
+
+        out = capsys.readouterr().out
+        assert "removed" in out
+        surface = json.loads((discovery_dir / "surface_demo.json").read_text(encoding="utf-8"))
+        assert surface["targets"] == []
+        targets_cfg = yaml.safe_load((config_dir / "targets.yaml").read_text(encoding="utf-8"))
+        assert targets_cfg["targets"] == []
+        assert (state_dir / "pearls.jsonl").read_text(encoding="utf-8").strip() == ""
+        assert not (interp_dir / "mysql_subject.json").exists()
+
+    def test_resolve_fold_offline_matches_identity_key(self, tmp_path):
+        from skg.cli.commands.surface import _resolve_fold_offline
+
+        folds_dir = tmp_path / "folds"
+        folds_dir.mkdir(parents=True, exist_ok=True)
+        fold_id = "fold-db-1"
+        (folds_dir / "folds_db.internal.json").write_text(
+            json.dumps([{
+                "id": fold_id,
+                "fold_type": "structural",
+                "location": "mysql::db.internal:3306::users",
+                "gravity_weight": 1.2,
+            }]),
+            encoding="utf-8",
+        )
+
+        with patch("skg.cli.commands.surface.DISCOVERY_DIR", tmp_path):
+            result = _resolve_fold_offline("db.internal", fold_id[:8])
+
+        assert result["ok"] is True
+        remaining = json.loads((folds_dir / "folds_db.internal.json").read_text(encoding="utf-8"))
+        assert remaining == []

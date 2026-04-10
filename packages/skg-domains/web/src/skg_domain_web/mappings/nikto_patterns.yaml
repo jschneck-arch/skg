@@ -1,0 +1,43 @@
+patterns:
+  - pattern: "sql\\s*injection"
+    wicket_id: WB-41
+    confidence: 0.75
+  - pattern: "xss"
+    wicket_id: WB-42
+    confidence: 0.7
+  - pattern: "command.*(exec|inject)"
+    wicket_id: WB-43
+    confidence: 0.75
+  - pattern: "directory.*listing"
+    wicket_id: WB-17
+    confidence: 0.8
+  - pattern: "phpinfo"
+    wicket_id: WB-17
+    confidence: 0.9
+  - pattern: "server.*version"
+    wicket_id: WB-02
+    confidence: 0.85
+  - pattern: "backup.*file"
+    wicket_id: WB-17
+    confidence: 0.85
+  - pattern: "\\.git"
+    wicket_id: WB-08
+    confidence: 0.9
+  - pattern: "shellshock"
+    wicket_id: WB-43
+    confidence: 0.9
+  - pattern: "file.*inclusion"
+    wicket_id: WB-17
+    confidence: 0.75
+  - pattern: "default.*password"
+    wicket_id: WB-10
+    confidence: 0.8
+  - pattern: "authentication.*bypass"
+    wicket_id: WB-10
+    confidence: 0.8
+  - pattern: "path.*traversal"
+    wicket_id: WB-17
+    confidence: 0.8
+  - pattern: "ssrf"
+    wicket_id: WB-18
+    confidence: 0.75

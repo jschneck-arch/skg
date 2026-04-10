@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "last_run_ts": 1775451539.352877,
+  "query": "optimize grep and rg workflows",
+  "theta": "code",
+  "plan": {
+    "help_cmds": [
+      "rg",
+      "grep",
+      "ss",
+      "uv",
+      "awk",
+      "git",
+      "npm",
+      "sed",
+      "ssh",
+      "bash"
+    ],
+    "man_cmds": [
+      "rg",
+      "grep",
+      "sh",
+      "ss",
+      "awk",
+      "git",
+      "man",
+      "sed"
+    ],
+    "query_tokens": [
+      "and",
+      "code",
+      "grep",
+      "optimize",
+      "rg",
+      "workflows"
+    ]
+  },
+  "totals": {
+    "sources": 178,
+    "added": 1400,
+    "skipped": 87
+  }
+}

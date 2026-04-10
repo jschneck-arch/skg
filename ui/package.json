@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "anydesk": "^0.1.0",
+    "nikto": "^0.0.1"
+  }
+}

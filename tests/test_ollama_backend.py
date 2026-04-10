@@ -25,8 +25,8 @@ class OllamaBackendConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("skg.core.paths.SKG_CONFIG_DIR", config_dir), \
-                 patch("skg.core.paths.SKG_STATE_DIR", config_dir / "state"):
+            with patch("skg_core.config.paths.SKG_CONFIG_DIR", config_dir), \
+                 patch("skg_core.config.paths.SKG_STATE_DIR", config_dir / "state"):
                 backend = OllamaBackend()
 
             self.assertEqual(backend.url, "http://127.0.0.1:22444")

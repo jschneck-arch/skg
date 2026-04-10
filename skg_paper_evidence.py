@@ -290,6 +290,7 @@ def section_c_propagation(verbose: bool = True) -> dict:
     elevates priors for host and container_escape domains on the same target.
     """
     from skg.graph import WorkloadGraph, WicketPrior
+    from skg.core.coupling import intra_target_table
 
     results = {"propagation_events": []}
 
@@ -350,8 +351,9 @@ def section_c_propagation(verbose: bool = True) -> dict:
         # Expected adjustments:
         # web→host coupling = 0.60, sw = 0.95, halved = 0.285
         # web→container_escape coupling = 0.50, sw = 0.95, halved = 0.2375
-        web_host_coupling = wg.INTRA_TARGET_COUPLING.get(("web","host"), 0)
-        web_ce_coupling   = wg.INTRA_TARGET_COUPLING.get(("web","container_escape"), 0)
+        _coupling = intra_target_table()
+        web_host_coupling = _coupling.get(("web","host"), 0)
+        web_ce_coupling   = _coupling.get(("web","container_escape"), 0)
 
         expected_host = round(web_host_coupling * sw * 0.5, 4)
         expected_ce   = round(web_ce_coupling   * sw * 0.5, 4)
@@ -384,7 +386,7 @@ def section_c_propagation(verbose: bool = True) -> dict:
         ]
         results["coupling_table"] = {
             f"{k[0]}→{k[1]}": v
-            for k, v in wg.INTRA_TARGET_COUPLING.items()
+            for k, v in intra_target_table().items()
         }
 
     if verbose:

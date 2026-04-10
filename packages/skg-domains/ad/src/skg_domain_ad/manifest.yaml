@@ -1,0 +1,15 @@
+name: ad
+status: active
+runtime: domain-pack
+version: 1.0.0
+compatibility:
+  protocol: "1.0"
+components:
+  adapters: adapters
+  projectors: projectors
+  policies: policies
+contracts:
+  catalogs: ontology/catalogs
+metadata:
+  description: "Canonical AD domain pack (Phases 7A privileged-membership + 7C credential-hint + 7D weak-password-policy + 7F AS-REP baseline + 7G Kerberoast baseline + 7I LAPS baseline + 7L AD-22 tiering core + 7P delegation posture-core slices)"
+  default_path: ad_privilege_relationship_mapping_v1

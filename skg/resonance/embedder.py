@@ -13,6 +13,7 @@ checks this on load and rebuilds if there's a mismatch.
 
 from __future__ import annotations
 import logging
+import os
 import numpy as np
 from pathlib import Path
 
@@ -24,6 +25,39 @@ ST_DIM        = 384
 
 # TF-IDF fallback dimension
 TFIDF_DIM = 256
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_embedding_config() -> dict:
+    try:
+        import yaml
+        from skg_core.config.paths import SKG_CONFIG_DIR, SKG_HOME
+    except Exception:
+        return {}
+
+    candidates = [
+        SKG_CONFIG_DIR / "skg_config.yaml",
+        SKG_HOME / "config" / "skg_config.yaml",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        resonance = data.get("resonance", {}) or {}
+        embedding = resonance.get("embedding", {}) or {}
+        if isinstance(embedding, dict):
+            return embedding
+    return {}
 
 
 def _try_import_st():
@@ -105,21 +139,45 @@ class TFIDFEmbedder:
         return vec
 
     def embed(self, texts: list[str]) -> np.ndarray:
-        all_texts = self._corpus + texts
-        self._fit(all_texts)
-        self._corpus = all_texts
+        # Accumulate corpus for future rebuild calls, but only fit the IDF
+        # basis once.  Refitting on every call would change the embedding
+        # weights for all previously indexed vectors, making the append-only
+        # index inconsistent.
+        self._corpus.extend(texts)
+        if not self._vocab:
+            self._fit(self._corpus)
         return np.stack([self._vectorize(t) for t in texts])
 
     def embed_one(self, text: str) -> np.ndarray:
         return self.embed([text])[0]
 
+    def rebuild(self) -> None:
+        """
+        Refit the TF-IDF basis on all texts seen so far.
+        All previously indexed vectors become stale after this call —
+        callers must re-index if they need consistent similarity search.
+        """
+        if self._corpus:
+            self._fit(self._corpus)
+
 
 def make_embedder() -> SentenceTransformerEmbedder | TFIDFEmbedder:
     """Return best available embedder."""
+    cfg = _load_embedding_config()
+
+    if _truthy(os.getenv("SKG_RESONANCE_OFFLINE")) or _truthy(cfg.get("offline")):
+        log.info("Resonance embedding offline mode enabled — using TF-IDF fallback embedder")
+        return TFIDFEmbedder()
+
+    if _truthy(cfg.get("prefer_tfidf")):
+        log.info("Resonance embedding prefer_tfidf enabled — using TF-IDF fallback embedder")
+        return TFIDFEmbedder()
+
+    model_name = str(cfg.get("model") or ST_MODEL_NAME)
     ST = _try_import_st()
     if ST is not None:
         try:
-            return SentenceTransformerEmbedder()
+            return SentenceTransformerEmbedder(model_name=model_name)
         except Exception as e:
             log.warning(f"sentence-transformers failed to load: {e} — falling back to TF-IDF")
     return TFIDFEmbedder()

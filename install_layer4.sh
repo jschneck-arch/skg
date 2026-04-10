@@ -144,20 +144,20 @@ from skg.sensors.projector import TOOLCHAIN_PROJECTOR
 # Layer 4 — resonance
 from skg.resonance.engine import ResonanceEngine
 from skg.resonance.memory import MemoryStore
-from skg.resonance.ingester import Ingester
+from skg.resonance.ingester import ingest_all, ingest_adapters
 from skg.resonance.observation_memory import ObservationMemory
 
 # Layer 4 — forge
 from skg.forge.proposals import create_action
 from skg.forge.pipeline import run_forge_pipeline
-from skg.forge.compiler import ForgeCompiler
+from skg.forge.compiler import compile_catalog
 
 # Layer 4 — catalog
-from skg.catalog.compiler import CatalogCompiler
+from skg.catalog.compiler import compile_yaml_to_json, scaffold
 
 # Layer 4 — intel
-from skg.intel.gap_detector import GapDetector
-from skg.intel.surface import SurfaceBuilder
+from skg.intel.gap_detector import detect_new_gaps, detect_from_events
+from skg.intel.surface import surface, ViewNode
 
 # Layer 4 — temporal feedback with full dependency chain
 from skg.temporal.feedback import FeedbackIngester
@@ -165,10 +165,10 @@ from skg.temporal import DeltaStore
 from skg.graph import WorkloadGraph
 
 print("  [OK] sensors: BaseSensor, SensorLoop, envelope, SensorContext")
-print("  [OK] resonance: ResonanceEngine, MemoryStore, Ingester, ObservationMemory")
-print("  [OK] forge: create_action, run_forge_pipeline, ForgeCompiler")
-print("  [OK] catalog: CatalogCompiler")
-print("  [OK] intel: GapDetector, SurfaceBuilder")
+print("  [OK] resonance: ResonanceEngine, MemoryStore, ingest_all, ObservationMemory")
+print("  [OK] forge: create_action, run_forge_pipeline, compile_catalog")
+print("  [OK] catalog: compile_yaml_to_json, scaffold")
+print("  [OK] intel: detect_new_gaps, detect_from_events, surface, ViewNode")
 print("  [OK] temporal+feedback: FeedbackIngester, DeltaStore, WorkloadGraph")
 print()
 print("  Toolchain projectors registered:")

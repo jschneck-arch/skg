@@ -17,7 +17,7 @@ from typing import TypeVar, Generic, Type
 import numpy as np
 
 from skg.resonance.memory import (
-    WicketMemory, AdapterMemory, DomainMemory
+    WicketMemory, AdapterMemory, DomainMemory, CorpusMemory
 )
 from skg.resonance.observation_memory import ObservationMemory
 from skg.resonance.embedder import make_embedder
@@ -177,6 +177,7 @@ class ResonanceEngine:
         self._wickets: MemoryStore[WicketMemory] | None = None
         self._adapters: MemoryStore[AdapterMemory] | None = None
         self._domains: MemoryStore[DomainMemory] | None = None
+        self._corpus: MemoryStore[CorpusMemory] | None = None
         self.observations: ObservationMemory | None = None
         self._ready       = False
 
@@ -194,10 +195,13 @@ class ResonanceEngine:
                                      self._index_dir, self._records_dir, self._embedder)
         self._domains  = MemoryStore("domains",  DomainMemory,
                                      self._index_dir, self._records_dir, self._embedder)
+        self._corpus   = MemoryStore("corpus",   CorpusMemory,
+                                     self._index_dir, self._records_dir, self._embedder)
 
         self._wickets.load()
         self._adapters.load()
         self._domains.load()
+        self._corpus.load()
 
         self.observations = ObservationMemory(
             self._index_dir, self._records_dir, self._embedder
@@ -209,7 +213,8 @@ class ResonanceEngine:
             f"Resonance engine ready — "
             f"wickets={self._wickets.count} "
             f"adapters={self._adapters.count} "
-            f"domains={self._domains.count}"
+            f"domains={self._domains.count} "
+            f"corpus={self._corpus.count}"
         )
 
     def _check_ready(self):
@@ -249,6 +254,17 @@ class ResonanceEngine:
         self._check_ready()
         return self._domains.query(text, k)
 
+    def store_corpus(self, record: CorpusMemory) -> bool:
+        self._check_ready()
+        if self._corpus.has(record.record_id):
+            return False
+        self._corpus.save_record(record)
+        return True
+
+    def query_corpus(self, text: str, k: int = 6) -> list[tuple[CorpusMemory, float]]:
+        self._check_ready()
+        return self._corpus.query(text, k)
+
     def surface(self, query: str, k_each: int = 3) -> dict:
         """
         Surface relevant memory across all types for a given query.
@@ -268,6 +284,10 @@ class ResonanceEngine:
                 {"record": r.to_dict(), "score": round(score, 6)}
                 for r, score in self.query_domains(query, k_each)
             ],
+            "corpus": [
+                {"record": r.to_dict(), "score": round(score, 6)}
+                for r, score in self.query_corpus(query, k_each * 2)
+            ],
         }
 
     def status(self) -> dict:
@@ -278,6 +298,7 @@ class ResonanceEngine:
                 "wickets": self._wickets.count if self._wickets else 0,
                 "adapters": self._adapters.count if self._adapters else 0,
                 "domains": self._domains.count if self._domains else 0,
+                "corpus": self._corpus.count if self._corpus else 0,
                 "observations": self.observations.status() if self.observations else None,
             },
         }
@@ -289,6 +310,7 @@ class ResonanceEngine:
                 "wickets": 0,
                 "adapters": 0,
                 "domains": 0,
+                "corpus": 0,
                 "observations": None,
             },
         }
@@ -315,3 +337,31 @@ class ResonanceEngine:
         }
         draft_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return draft_path
+
+    def list_drafts(self) -> list[dict]:
+        """
+        Return metadata for all pending draft files under the drafts directory.
+        Each entry contains 'file' (filename) and 'meta' (top-level payload fields
+        minus the catalog itself).  Used by CLI and standalone resonance.cli.
+        """
+        if not self._drafts_dir.exists():
+            return []
+        drafts = []
+        for p in sorted(self._drafts_dir.glob("draft_*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                drafts.append({
+                    "file": p.name,
+                    "path": str(p),
+                    "meta": {
+                        "domain":     data.get("domain", "?"),
+                        "drafted_at": data.get("saved_at", "?"),
+                        "status":     data.get("status", "pending"),
+                        "wicket_count": len(
+                            data.get("catalog", {}).get("wickets", {})
+                        ),
+                    },
+                })
+            except Exception:
+                continue
+        return drafts

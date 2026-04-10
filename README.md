@@ -89,6 +89,9 @@ docs/                formal papers (Work 3, Work 4) and architecture documents
 
 Daemon-native today: `skg-aprs-toolchain`, `skg-host-toolchain`, `skg-data-toolchain`, `skg-ad-lateral-toolchain`, and `skg-container-escape-toolchain`.
 Other toolchains in the repo are auxiliary, forge-installed, or operator-invoked rather than uniformly registered in the daemon domain registry.
+The current inventory resolves 12 registered domains and 221 catalog wickets; `host` currently includes the legacy sysaudit catalog, and `data` includes both DP and DB-exposure catalogs.
+Projector discovery is registry-driven and supports both `projections/*/run.py` and `projections/run.py`, but daemon-native scheduling is still intentionally limited to the five domains above.
+Calibration is written by `skg calibrate` to `$SKG_STATE_DIR/calibration.json` and reloaded automatically by runtime sensor calibration on the next confidence-aware emit.
 
 ---
 

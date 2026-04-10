@@ -1,0 +1,69 @@
+wickets:
+  AD-PR-01:
+    label: privileged_groups_enumerated
+    description: Privileged AD groups (for example Domain Admins or Enterprise Admins) are present in the directory inventory.
+    decay_class: operational
+  AD-PR-02:
+    label: privileged_group_memberships_present
+    description: Privileged AD groups contain one or more assigned members in the observed inventory.
+    decay_class: operational
+  AD-PR-03:
+    label: enabled_human_privileged_members_present
+    description: Enabled non-machine user principals are assigned to privileged AD groups.
+    decay_class: operational
+  AD-CH-01:
+    label: credential_hints_in_descriptions_present
+    description: One or more AD account descriptions contain credential-hint text patterns.
+    decay_class: operational
+  AD-CH-02:
+    label: enabled_non_machine_credential_hints_present
+    description: Enabled non-machine accounts contain credential-hint text patterns in descriptions.
+    decay_class: operational
+  AD-WP-01:
+    label: password_policy_snapshot_observed
+    description: Domain password policy attributes are present in the observed AD policy snapshot.
+    decay_class: operational
+  AD-WP-02:
+    label: weak_minimum_password_length_present
+    description: One or more observed domains have minimum password length below configured security threshold.
+    decay_class: operational
+  AD-AS-01:
+    label: user_preauth_state_observed
+    description: AD user inventory includes pre-authentication state required for AS-REP exposure assessment.
+    decay_class: operational
+  AD-AS-02:
+    label: asrep_roastable_accounts_present
+    description: Enabled user accounts with Kerberos pre-authentication disabled are present.
+    decay_class: operational
+  AD-KR-01:
+    label: kerberoastable_accounts_present
+    description: Enabled SPN-linked user accounts are present for Kerberoast baseline exposure assessment.
+    decay_class: operational
+  AD-KR-02:
+    label: kerberoastable_rc4_permitted_accounts_present
+    description: Kerberoastable accounts indicate RC4-permitted encryption behavior.
+    decay_class: operational
+  AD-LP-01:
+    label: laps_baseline_candidate_hosts_observed
+    description: Enabled non-DC computer inventory is observed for LAPS baseline coverage assessment.
+    decay_class: operational
+  AD-LP-02:
+    label: non_dc_hosts_without_laps_present
+    description: One or more enabled non-DC computer accounts indicate missing LAPS coverage.
+    decay_class: operational
+  AD-06:
+    label: unconstrained_delegation_non_dc
+    description: Enabled non-domain-controller principals with unconstrained delegation are present in observed AD delegation posture input.
+    decay_class: operational
+  AD-08:
+    label: constrained_delegation_protocol_transition
+    description: Enabled principals with protocol-transition constrained delegation are present in observed AD delegation posture input.
+    decay_class: operational
+  AD-TI-01:
+    label: privileged_session_tiering_observation_present
+    description: Canonical AD-22 tiering sidecar input is observed for the workload.
+    decay_class: operational
+  AD-22:
+    label: no_privileged_account_tiering
+    description: Privileged sessions are present on non-tier-0 systems, indicating baseline tiering posture failure.
+    decay_class: operational

@@ -25,14 +25,26 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from skg.core.paths import (
-    ensure_runtime_dirs, TOOLCHAIN_DIR, CE_TOOLCHAIN_DIR, AD_TOOLCHAIN_DIR,
-    HOST_TOOLCHAIN_DIR, IDENTITY_FILE, EVENTS_DIR, INTERP_DIR, LOG_FILE, PID_FILE,
-    RESONANCE_DIR, SKG_HOME, SKG_CONFIG_DIR, SKG_STATE_DIR, DISCOVERY_DIR,
+from skg.core.assistant_contract import (
+    DERIVED_ADVICE,
+    MUTATION_ARTIFACT,
+    assistant_output_metadata,
 )
-from skg.core.domain_registry import (
-    load_daemon_domains,
-    summarize_domain_inventory,
+from skg_core.config.paths import EVENTS_DIR, INTERP_DIR, SKG_HOME, SKG_CONFIG_DIR, SKG_STATE_DIR, DISCOVERY_DIR
+from skg_services.gravity.path_policy import (
+    AD_TOOLCHAIN_DIR,
+    CE_TOOLCHAIN_DIR,
+    HOST_TOOLCHAIN_DIR,
+    IDENTITY_FILE,
+    LOG_FILE,
+    PID_FILE,
+    RESONANCE_DIR,
+    TOOLCHAIN_DIR,
+    ensure_runtime_dirs,
+)
+from skg_registry import DomainRegistry as _CanonicalDomainRegistry
+from skg_services.gravity.domain_runtime import (
+    load_daemon_domains_from_inventory as _service_load_daemon_domains_from_inventory,
 )
 from skg.modes import Mode, ModeTransition, MODE_BEHAVIOR, valid_transition
 from skg.identity import Identity, parse_workload_ref
@@ -63,6 +75,97 @@ def _select_surface_path() -> str | None:
     if not surfaces:
         return None
     return max(surfaces, key=_surface_score)
+
+
+def _load_interp_payload(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return None
+    return data.get("payload", data) if isinstance(data, dict) else None
+
+
+_DOMAIN_ALIAS_GROUPS: list[set[str]] = [
+    {"binary", "binary_analysis"},
+    {"data", "data_pipeline"},
+    {"container", "container_escape"},
+    {"lateral", "ad", "ad_lateral"},
+    {"iot", "iot_firmware"},
+]
+
+
+def _projection_domain_aliases(domain: str) -> set[str]:
+    raw = str(domain or "").strip() or "unknown"
+    for group in _DOMAIN_ALIAS_GROUPS:
+        if raw in group:
+            return group | {raw}
+    return {raw}
+
+
+def _infer_projection_domain(payload: dict, filename: str) -> str:
+    explicit = str(payload.get("domain") or "").strip()
+    if explicit:
+        return explicit
+
+    for key, domain_name in [
+        ("aprs", "aprs"),
+        ("lateral_score", "ad_lateral"),
+        ("escape_score", "container_escape"),
+        ("host_score", "host"),
+        ("web_score", "web"),
+        ("ai_score", "ai_target"),
+        ("data_score", "data"),
+        ("supply_chain_score", "supply_chain"),
+        ("iot_score", "iot_firmware"),
+        ("binary_score", "binary"),
+    ]:
+        if key in payload:
+            return domain_name
+
+    lower_name = filename.lower()
+    if "binary" in lower_name:
+        return "binary"
+    if "host" in lower_name:
+        return "host"
+    if "web" in lower_name:
+        return "web"
+    if "data" in lower_name:
+        return "data"
+    if "lateral" in lower_name or "ad_" in lower_name:
+        return "ad_lateral"
+    if "escape" in lower_name or "container" in lower_name:
+        return "container_escape"
+    if "aprs" in lower_name or "log4j" in lower_name:
+        return "aprs"
+    return ""
+
+
+def _find_projection_files(interp_dir: Path, domain: str, workload_id: str) -> list[Path]:
+    aliases = _projection_domain_aliases(domain)
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    for alias in aliases:
+        for path in list(interp_dir.glob(f"{alias}_{workload_id}_*.json")) + list(interp_dir.glob(f"{alias}_{workload_id}_*_interp.ndjson")):
+            if path not in seen:
+                seen.add(path)
+                candidates.append(path)
+
+    for path in list(interp_dir.glob("*.json")) + list(interp_dir.glob("*_interp.ndjson")):
+        if path in seen:
+            continue
+        payload = _load_interp_payload(path)
+        if not payload:
+            continue
+        if str(payload.get("workload_id") or "") != workload_id:
+            continue
+        payload_domain = _infer_projection_domain(payload, path.name)
+        if payload_domain not in aliases:
+            continue
+        seen.add(path)
+        candidates.append(path)
+
+    return sorted(candidates, key=lambda f: f.stat().st_mtime)
 
 
 def _configured_local_targets() -> list[dict[str, Any]]:
@@ -114,8 +217,85 @@ def _resonance_boot_timeout_s(default: float = 5.0) -> float:
     except Exception:
         return default
 
-DOMAINS = load_daemon_domains()
-DOMAIN_INVENTORY = summarize_domain_inventory()
+def _canonical_inventory_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for domain in _CanonicalDomainRegistry.discover().list_domains():
+        metadata = dict(domain.manifest.metadata or {})
+        project_sub = metadata.get("project_sub") or []
+        if not isinstance(project_sub, list):
+            project_sub = []
+
+        default_path = str(
+            metadata.get("default_path")
+            or metadata.get("default_attack_path")
+            or ""
+        ).strip()
+
+        projector_path = ""
+        projector_available = False
+        if domain.projectors_dir.exists():
+            run_root = domain.projectors_dir / "run.py"
+            if run_root.exists():
+                projector_available = True
+                projector_path = str(run_root.relative_to(domain.root_dir))
+            else:
+                nested = sorted(domain.projectors_dir.glob("*/run.py"))
+                if nested:
+                    projector_available = True
+                    projector_path = str(nested[0].relative_to(domain.root_dir))
+
+        rows.append(
+            {
+                "name": domain.name,
+                "runtime": domain.manifest.runtime,
+                "daemon_native": bool(metadata.get("daemon_native", False)),
+                "dir": domain.root_dir,
+                "root_dir": domain.root_dir,
+                "toolchain": domain.root_dir.name,
+                "description": str(metadata.get("description") or ""),
+                "default_path": default_path,
+                "project_sub": [str(part) for part in project_sub],
+                "interp_type": str(metadata.get("interp_type") or ""),
+                "manifest_present": domain.manifest_path.exists(),
+                "manifest_path": str(domain.manifest_path),
+                "catalog_count": len(list(domain.catalogs_dir.glob("*.json"))) if domain.catalogs_dir.exists() else 0,
+                "projector_available": projector_available,
+                "projector_path": projector_path,
+                "cli_available": bool(metadata.get("cli")),
+                "cli": str(metadata.get("cli") or ""),
+                "bootstrapped": bool(metadata.get("bootstrapped", False)),
+            }
+        )
+
+    return rows
+
+
+def _summarize_inventory(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": row.get("name", ""),
+            "daemon_native": bool(row.get("daemon_native", False)),
+            "dir": str(row.get("dir", "")),
+            "default_path": row.get("default_path", ""),
+            "description": row.get("description", ""),
+            "manifest_present": bool(row.get("manifest_present", False)),
+            "catalog_count": int(row.get("catalog_count", 0) or 0),
+            "projector_available": bool(row.get("projector_available", False)),
+            "projector_path": row.get("projector_path", ""),
+            "cli_available": bool(row.get("cli_available", False)),
+            "bootstrapped": bool(row.get("bootstrapped", False)),
+        }
+        for row in rows
+    ]
+
+
+def _load_domains_and_inventory() -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    rows = _canonical_inventory_rows()
+    domains = _service_load_daemon_domains_from_inventory(rows)
+    return domains, _summarize_inventory(rows)
+
+
+DOMAINS, DOMAIN_INVENTORY = _load_domains_and_inventory()
 
 
 def setup_logging() -> logging.Logger:
@@ -219,6 +399,8 @@ class SKGKernel:
         self.identity   = Identity(IDENTITY_FILE)
         self.toolchains = {d: Toolchain(d) for d in DOMAINS}
         self.resonance  = ResonanceEngine(RESONANCE_DIR)
+        self.sphere_gpu = None  # lazy-initialized virtual local accelerator
+        self.mcp_threading = None  # lazy-initialized layered MCP orchestrator
         self.delta      = DeltaStore(SKG_STATE_DIR / "delta")
         self.graph      = WorkloadGraph(SKG_STATE_DIR / "graph")
         self.feedback   = None  # initialized in boot() after resonance loads
@@ -337,6 +519,18 @@ class SKGKernel:
                 )
         except Exception as e:
             self.log.warning(f"Feedback ingester failed to initialize: {e}")
+
+        # Initialize SphereGPU virtual accelerator after resonance is available.
+        try:
+            self.ensure_sphere_gpu()
+        except Exception as e:
+            self.log.warning(f"SphereGPU failed to initialize: {e}")
+
+        # Initialize layered MCP threading orchestrator after resonance is available.
+        try:
+            self.ensure_mcp_threading()
+        except Exception as e:
+            self.log.warning(f"MCP threading failed to initialize: {e}")
 
         self.log.info(f"Mode: {self._mode.value} | online.")
         # Start gravity field loop only when explicitly configured.
@@ -517,12 +711,15 @@ class SKGKernel:
                     self.log.debug(f"{cycle_label} exited rc={proc.returncode}")
                 break
 
-    def gravity_run_target(self, target_ip: str, authorized: bool = False) -> None:
+    def gravity_run_target(self, node_key: str, authorized: bool = False) -> None:
         if self._gravity_thread and self._gravity_thread.is_alive():
             raise ValueError("Stop the continuous gravity loop before running a focused target cycle.")
         if self._gravity_focus_thread and self._gravity_focus_thread.is_alive():
             raise ValueError("A focused gravity cycle is already running.")
 
+        focus_key = str(node_key or "").strip()
+        if not focus_key:
+            raise ValueError("No focus identity supplied.")
         surface_path = _select_surface_path()
         if not surface_path:
             raise ValueError("No surface file — run discovery first")
@@ -531,7 +728,7 @@ class SKGKernel:
             self._gravity_state["running"] = True
             self._gravity_state["cycle"] = int(self._gravity_state.get("cycle") or 0) + 1
             try:
-                self._run_gravity_cycle(surface_path, f"focused cycle for {target_ip}", focus_target=target_ip, authorized=authorized)
+                self._run_gravity_cycle(surface_path, f"focused cycle for {focus_key}", focus_target=focus_key, authorized=authorized)
             except Exception as exc:
                 self._gravity_state["error"] = str(exc)
                 self.log.warning(f"Focused gravity cycle error: {exc}")
@@ -540,7 +737,7 @@ class SKGKernel:
 
         self._gravity_focus_thread = threading.Thread(
             target=_worker,
-            name=f"skg-gravity-focus-{target_ip}",
+            name=f"skg-gravity-focus-{focus_key}",
             daemon=True,
         )
         self._gravity_focus_thread.start()
@@ -645,6 +842,32 @@ class SKGKernel:
             },
         }
 
+    def ensure_sphere_gpu(self):
+        if self.sphere_gpu is not None:
+            return self.sphere_gpu
+        try:
+            from skg.resonance.sphere_gpu import SphereGPU
+
+            self.sphere_gpu = SphereGPU.from_config(self.resonance)
+            return self.sphere_gpu
+        except Exception as exc:
+            self.log.warning(f"SphereGPU unavailable: {exc}")
+            self.sphere_gpu = None
+            return None
+
+    def ensure_mcp_threading(self):
+        if self.mcp_threading is not None:
+            return self.mcp_threading
+        try:
+            from skg.resonance.mcp_threading import MCPThreadingOrchestrator
+
+            self.mcp_threading = MCPThreadingOrchestrator.from_config(self.resonance)
+            return self.mcp_threading
+        except Exception as exc:
+            self.log.warning(f"MCP threading unavailable: {exc}")
+            self.mcp_threading = None
+            return None
+
 
 # --- FastAPI ---
 
@@ -735,13 +958,21 @@ def gravity_stop():
 
 
 @app.post("/gravity/run")
-def gravity_run(target_ip: str, authorized: bool = False):
+def gravity_run(target_ip: str = "", identity_key: str = "", authorized: bool = False):
     """Run one focused gravity cycle for a selected target."""
+    focus_key = str(identity_key or target_ip or "").strip()
+    if not focus_key:
+        raise HTTPException(400, "target_ip or identity_key required")
     try:
-        kernel.gravity_run_target(target_ip, authorized=authorized)
+        kernel.gravity_run_target(focus_key, authorized=authorized)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
-    return {"ok": True, "gravity_state": kernel.gravity_status(), "target_ip": target_ip}
+    return {
+        "ok": True,
+        "gravity_state": kernel.gravity_status(),
+        "target_ip": target_ip,
+        "identity_key": focus_key,
+    }
 
 
 _field_state_cache: dict = {"ts": 0.0, "data": {}}
@@ -766,12 +997,21 @@ def _refresh_field_state_bg() -> None:
 
 
 def _compute_field_state() -> dict:
-    """Return cached field state, triggering a background refresh if stale."""
+    """Return cached field state, triggering a background refresh if stale.
+    If the cache is empty (cold start or after explicit invalidation), compute
+    synchronously so the first caller never gets {} (MED-65 fix).
+    """
     import time as _time
     now = _time.monotonic()
-    if now - _field_state_cache["ts"] >= _FIELD_STATE_TTL:
-        t = threading.Thread(target=_refresh_field_state_bg, daemon=True)
-        t.start()
+    stale = now - _field_state_cache["ts"] >= _FIELD_STATE_TTL
+    if stale:
+        if not _field_state_cache["data"]:
+            # Cold cache — compute synchronously so this caller gets a result.
+            _refresh_field_state_bg()
+        else:
+            # Warm cache, just stale — return cached data while refreshing in bg.
+            t = threading.Thread(target=_refresh_field_state_bg, daemon=True)
+            t.start()
     return _field_state_cache["data"]
 
 
@@ -876,7 +1116,7 @@ def _compute_field_state_inner() -> dict:
 
         # Fold boost — structural/contextual/projection/temporal gaps
         # Extract IP from workload_id (e.g. "ssh::172.17.0.2")
-        wid_ip = wid.split("::")[-1] if "::" in wid else wid
+        wid_ip = parse_workload_ref(wid).get("identity_key", wid)
         fold_boost   = fold_boost_by_wid.get(wid_ip, 0.0)
         fold_summary = fold_summary_by_wid.get(wid_ip, {})
 
@@ -901,14 +1141,16 @@ def _compute_field_state_inner() -> dict:
             target_domains.add("container_escape")
         elif apid.startswith("data_"):
             target_domains.add("data_pipeline")
-        elif apid.startswith("ad_"):
+        elif apid.startswith("ad_") or apid.startswith("lateral_"):
             target_domains.add("ad_lateral")
         elif apid.startswith("ai_"):
             target_domains.add("ai_target")
-        elif apid.startswith("iot_"):
+        elif apid.startswith("iot_") or apid.startswith("firmware_"):
             target_domains.add("iot_firmware")
         elif apid.startswith("supply_chain_"):
             target_domains.add("supply_chain")
+        elif apid.startswith("binary_") or apid.startswith("stack_") or apid.startswith("heap_"):
+            target_domains.add("binary_analysis")
 
         field_pull = (
             anchored_field_pull(
@@ -967,6 +1209,8 @@ def _resolution_hint(wicket_id: str) -> str:
         "CE": "Container inspection — docker inspect or USB drop with docker_inspect.json",
         "AD": "BloodHound ingest — requires domain-joined host or bh_data USB drop",
         "AP": "APRS adapter — requires packages.txt + log4j_jars.txt artifact",
+        "WB": "Web sensor sweep — HTTP/HTTPS probe against target surface",
+        "WEB": "Web sensor sweep — HTTP/HTTPS probe against target surface",
         "WE": "Web sensor sweep — HTTP/HTTPS probe against target surface",
         "SC": "CVE sensor — NVD feed cross-reference against installed package list",
         "DP": "Data pipeline profiler — connect to database and run: skg data profile --url <db_url> --table <table>",
@@ -1048,14 +1292,6 @@ def get_projection_field(workload_id: str, domain: str = "host"):
     from pathlib import Path as _P
     from fastapi import HTTPException as _H
 
-    interp_dir = INTERP_DIR
-    def _load_interp_payload(path: _P) -> dict | None:
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            return None
-        return data.get("payload", data) if isinstance(data, dict) else None
-
     def _normalize_projection_classification(classification: str) -> str:
         if classification in {"realized", "not_realized", "indeterminate",
                                "indeterminate_h1", "unknown"}:
@@ -1068,11 +1304,7 @@ def get_projection_field(workload_id: str, domain: str = "host"):
             return "indeterminate"
         return classification or "unknown"
 
-    files = sorted(
-        list(interp_dir.glob(f"{domain}_{workload_id}_*.json")) +
-        list(interp_dir.glob(f"{domain}_{workload_id}_*_interp.ndjson")),
-        key=lambda f: f.stat().st_mtime
-    )
+    files = _find_projection_files(INTERP_DIR, domain, workload_id)
     if not files:
         raise _H(404, f"No projection data for {domain}/{workload_id}")
 
@@ -1135,19 +1367,21 @@ def get_projection_field(workload_id: str, domain: str = "host"):
 def get_projection(workload_id: str,
                    domain: str = "aprs",
                    attack_path_id: str | None = None):
+    matches = _find_projection_files(INTERP_DIR, domain, workload_id)
+    if not matches:
+        raise HTTPException(404, f"No projections for workload '{workload_id}' domain '{domain}'")
+    result = _load_interp_payload(matches[-1])
+    if result:
+        if attack_path_id and result.get("attack_path_id") != attack_path_id:
+            raise HTTPException(404, "No matching projection.")
+        return result
+
     try:
         tc = kernel.get_toolchain(domain)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
     attack_path_id = attack_path_id or DOMAINS[domain]["default_path"]
-    prefix = f"{domain}_{workload_id}_"
-    matches = sorted(
-        list(INTERP_DIR.glob(f"{prefix}*_interp.ndjson")) +
-        list(INTERP_DIR.glob(f"{prefix}*.json"))
-    )
-    if not matches:
-        raise HTTPException(404, f"No projections for workload '{workload_id}' domain '{domain}'")
     result = tc.latest(attack_path_id, workload_id, matches[-1])
     if not result:
         raise HTTPException(404, "No matching projection.")
@@ -1176,8 +1410,99 @@ def resonance_query(q: str, k: int = 5, type: str = "all"):
         elif type == "domains":
             results = kernel.resonance.query_domains(q, k=k)
             return {"domains": [(r.to_dict(), s) for r, s in results]}
+        elif type == "corpus":
+            results = kernel.resonance.query_corpus(q, k=k)
+            return {"corpus": [(r.to_dict(), s) for r, s in results]}
         else:
             return kernel.resonance.surface(q, k_each=k)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/resonance/local-capabilities")
+def resonance_local_capabilities():
+    try:
+        from skg.resonance.local_corpus import discover_local_capabilities
+
+        return discover_local_capabilities()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class ResonanceSmartIndexRequest(BaseModel):
+    query: str = ""
+    theta: str = "general"
+    force: bool = False
+
+
+class ResonanceMCPThreadRequest(BaseModel):
+    query: str | None = None
+    text: str | None = None
+    theta: str = "general"
+    prefer: str | None = None
+    k_each: int | None = None
+    max_workers: int | None = None
+
+
+@app.post("/resonance/index-smart")
+def resonance_index_smart(req: ResonanceSmartIndexRequest):
+    try:
+        from skg.resonance.local_corpus import smart_index_local_corpus
+
+        return smart_index_local_corpus(
+            kernel.resonance,
+            query=req.query,
+            theta=req.theta,
+            force=bool(req.force),
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/resonance/mcp/status")
+def resonance_mcp_status():
+    try:
+        mcp = kernel.ensure_mcp_threading()
+        if mcp is None:
+            raise RuntimeError("MCP threading is unavailable")
+        return mcp.status()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/resonance/mcp/thread")
+def resonance_mcp_thread(req: ResonanceMCPThreadRequest):
+    try:
+        mcp = kernel.ensure_mcp_threading()
+        if mcp is None:
+            raise RuntimeError("MCP threading is unavailable")
+        text = (req.query or req.text or "").strip()
+        if not text:
+            raise HTTPException(400, "query text is required")
+        return mcp.thread(
+            text,
+            theta=req.theta,
+            prefer=req.prefer,
+            k_each=req.k_each,
+            max_workers=req.max_workers,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/resonance/index-micro")
+def resonance_index_micro(req: ResonanceSmartIndexRequest):
+    try:
+        from skg.resonance.local_corpus import micro_index_local_corpus
+
+        return micro_index_local_corpus(
+            kernel.resonance,
+            query=req.query,
+            theta=req.theta,
+            force=bool(req.force),
+        )
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -1217,6 +1542,76 @@ def resonance_llm_pool_status():
 def resonance_drafts():
     try:
         return {"drafts": kernel.resonance.list_drafts()}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+class SphereAskRequest(BaseModel):
+    query: str | None = None
+    text: str | None = None
+    r: float = 0.35
+    theta: str = "general"
+    phi: float = 0.5
+    stream: int = 0
+    k_each: int | None = None
+
+
+class SphereBatchRequest(BaseModel):
+    requests: list[dict[str, Any]] = []
+    max_workers: int | None = None
+
+
+@app.get("/resonance/sphere/status")
+def resonance_sphere_status():
+    try:
+        sphere = kernel.ensure_sphere_gpu()
+        if sphere is None:
+            raise RuntimeError("SphereGPU is unavailable")
+        return sphere.status()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/resonance/sphere/ask")
+def resonance_sphere_ask(req: SphereAskRequest):
+    try:
+        from skg.resonance.sphere_gpu import SpherePoint
+
+        sphere = kernel.ensure_sphere_gpu()
+        if sphere is None:
+            raise RuntimeError("SphereGPU is unavailable")
+        text = (req.query or req.text or "").strip()
+        if not text:
+            raise HTTPException(400, "query text is required")
+        point = SpherePoint.from_values(
+            r=req.r,
+            theta=req.theta,
+            phi=req.phi,
+            stream=req.stream,
+        )
+        return sphere.infer(query=text, point=point, k_each=req.k_each)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/resonance/sphere/batch")
+def resonance_sphere_batch(req: SphereBatchRequest):
+    try:
+        sphere = kernel.ensure_sphere_gpu()
+        if sphere is None:
+            raise RuntimeError("SphereGPU is unavailable")
+        requests = list(req.requests or [])
+        if not requests:
+            raise HTTPException(400, "requests list is required")
+        results = sphere.infer_batch(requests, max_workers=req.max_workers)
+        return {
+            "results": results,
+            "status": sphere.status(),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -1301,25 +1696,25 @@ def collect(req: CollectRequest):
             "password":       req.password,
             "key":            req.key,
             "port":           req.port,
-            "workload_id":    req.workload_id or req.target,
+            "workload_id":    req.workload_id or f"ssh::{req.target}",
             "attack_path_id": req.attack_path_id,
             "enabled":        True,
         }
-        from skg.sensors import collect_host, project_host
+        from skg.sensors import collect_host
+        from skg_services.gravity.projector_runtime import project_events_dir as _proj_dir
         ok = collect_host(target, EVENTS_DIR, HOST_TOOLCHAIN_DIR, run_id)
+        # Locate the emitted file(s) by run_id suffix — the filename is not
+        # predictable from workload_id alone after the emit_events refactor.
+        ev_files = list(EVENTS_DIR.glob(f"*_{run_id}.ndjson")) if ok else []
         interp_path = None
-        if ok and req.auto_project:
-            wid = target["workload_id"]
-            ev_file = EVENTS_DIR / f"host_{wid}_{run_id}.ndjson"
-            if ev_file.exists():
-                interp_path = project_host(
-                    ev_file, INTERP_DIR, HOST_TOOLCHAIN_DIR,
-                    wid, req.attack_path_id, run_id)
+        if ok and req.auto_project and ev_files:
+            results = _proj_dir(EVENTS_DIR, INTERP_DIR, since_run_id=run_id)
+            interp_path = results[0] if results else None
         return {
             "ok": ok,
             "run_id": run_id,
             "target": req.target,
-            "events_file": str(EVENTS_DIR / f"host_{target['workload_id']}_{run_id}.ndjson"),
+            "events_file": str(ev_files[0]) if ev_files else None,
             "interp_file": str(interp_path) if interp_path else None,
         }
     else:
@@ -1346,14 +1741,74 @@ def sensors_trigger():
 def list_targets():
     from skg.sensors import _load_targets
 
-    merged = {
-        (t.get("ip") or t.get("host") or t.get("workload_id") or ""): dict(t)
-        for t in _all_targets_index()
-        if (t.get("ip") or t.get("host") or t.get("workload_id") or "")
-    }
+    def _view_index() -> dict[str, dict[str, Any]]:
+        try:
+            current_surface = field_surface()
+        except Exception:
+            return {}
 
-    for key, target in list(merged.items()):
-        identity_key = target.get("ip") or target.get("host") or key
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in current_surface.get("workloads") or []:
+            identity_key = str(
+                row.get("identity_key")
+                or parse_workload_ref(str(row.get("workload_id") or "")).get("identity_key")
+                or ""
+            ).strip()
+            if not identity_key:
+                continue
+            group = grouped.setdefault(identity_key, {
+                "identity_key": identity_key,
+                "domains": set(),
+                "manifestations": set(),
+                "fresh_unknown_mass": 0,
+                "observed_tools": {},
+            })
+            domain = str(row.get("domain") or "").strip()
+            if domain:
+                group["domains"].add(domain)
+            manifestation_key = str(row.get("manifestation_key") or "").strip()
+            if manifestation_key:
+                group["manifestations"].add(manifestation_key)
+            group["fresh_unknown_mass"] += len(row.get("unknown") or [])
+            tool_overlay = dict(row.get("observed_tools", {}) or {})
+            if tool_overlay.get("tool_names") or tool_overlay.get("observed_tools"):
+                group["observed_tools"] = tool_overlay
+
+        for group in grouped.values():
+            group["domains"] = sorted(group["domains"])
+            group["manifestations"] = sorted(group["manifestations"])
+        return grouped
+
+    merged: dict[str, dict[str, Any]] = {}
+    for target in _all_targets_index():
+        identity_key = str(
+            target.get("identity_key")
+            or parse_workload_ref(
+                str(target.get("workload_id") or target.get("ip") or target.get("host") or "")
+            ).get("identity_key")
+            or ""
+        ).strip()
+        if not identity_key:
+            continue
+        current = dict(merged.get(identity_key, {}))
+        current.update(dict(target))
+        current["identity_key"] = identity_key
+        merged[identity_key] = current
+
+    for identity_key, view in _view_index().items():
+        current = dict(merged.get(identity_key, {}))
+        current.setdefault("identity_key", identity_key)
+        current.setdefault("ip", identity_key if identity_key.count(".") == 3 else "")
+        current.setdefault("host", current.get("ip") or identity_key)
+        domains = set(current.get("domains") or [])
+        domains.update(view.get("domains") or [])
+        current["domains"] = sorted(domains)
+        current["manifestations"] = list(view.get("manifestations") or [])
+        current["fresh_unknown_mass"] = int(view.get("fresh_unknown_mass") or 0)
+        current["observed_tools"] = dict(view.get("observed_tools", {}) or {})
+        merged[identity_key] = current
+
+    for identity_key, target in list(merged.items()):
         try:
             target["profile"] = _identity_profile(identity_key)
         except Exception:
@@ -1366,12 +1821,12 @@ def list_targets():
             target["relations"] = _identity_relations(identity_key, target)[:12]
         except Exception:
             target["relations"] = []
-        merged[key] = target
+        merged[identity_key] = target
 
     targets = sorted(
         merged.values(),
         key=lambda row: (
-            str(row.get("ip") or row.get("host") or ""),
+            str(row.get("identity_key") or row.get("ip") or row.get("host") or ""),
             str(row.get("workload_id") or ""),
         ),
     )
@@ -1382,8 +1837,25 @@ def list_targets():
 def identity_world(identity_key: str):
     try:
         targets = list_targets().get("targets", [])
-        target = next((t for t in targets if (t.get("ip") or t.get("host")) == identity_key), {})
-        world = _identity_world(identity_key, target)
+        target = next(
+            (
+                t for t in targets
+                if _identity_matches(
+                    identity_key,
+                    t.get("identity_key"),
+                    t.get("ip"),
+                    t.get("host"),
+                    t.get("hostname"),
+                )
+            ),
+            {},
+        )
+        # Canonicalize to the matched target's identity key so that
+        # manifestation lookup uses the same form as the measured state (MED-78)
+        canonical_key = (
+            target.get("identity_key") or target.get("host") or target.get("hostname") or identity_key
+        ) if target else identity_key
+        world = _identity_world(canonical_key, target)
         world["computed_at"] = datetime.now(timezone.utc).isoformat()
         return world
     except Exception as exc:
@@ -1410,6 +1882,59 @@ def field_surface(min_score: float = 0.0):
 
 def _normalized_identity_token(identity_key: str) -> str:
     return (identity_key or "").replace(".", "_").replace(":", "_").lower()
+
+
+def _identity_aliases(*values: str) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        aliases.add(text)
+        parsed = parse_workload_ref(text)
+        for candidate in (
+            parsed.get("identity_key"),
+            parsed.get("host"),
+            parsed.get("locator"),
+            parsed.get("manifestation_key"),
+        ):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                aliases.add(candidate_text)
+    return aliases
+
+
+def _identity_matches(identity_key: str, *values: str) -> bool:
+    needle = str(identity_key or "").strip()
+    if not needle:
+        return False
+    return needle in _identity_aliases(*values)
+
+
+def _proposal_identity_key(proposal: dict[str, Any]) -> str:
+    hosts = list(proposal.get("hosts") or [])
+    action = proposal.get("action") or {}
+    parsed = parse_workload_ref(
+        str(
+            proposal.get("identity_key")
+            or (hosts[0] if hosts else "")
+            or action.get("workload_id")
+            or ""
+        )
+    )
+    return str(parsed.get("identity_key") or proposal.get("identity_key") or (hosts[0] if hosts else "")).strip()
+
+
+def _proposal_matches_identity(proposal: dict[str, Any], identity_key: str) -> bool:
+    if not identity_key:
+        return True
+    hosts = list(proposal.get("hosts") or [])
+    action = proposal.get("action") or {}
+    return identity_key in _identity_aliases(
+        proposal.get("identity_key"),
+        action.get("workload_id"),
+        *hosts,
+    )
 
 
 def _latest_matching_files(patterns: list[str], limit: int = 12, per_pattern: int = 3) -> list[str]:
@@ -1907,10 +2432,11 @@ def _network_topology(identity_key: str, profile: dict[str, Any], relations: lis
 
 
 def _identity_manifestations(identity_key: str, limit: int = 64) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    # Newest-wins: collect all candidates with mtime, then dedupe on (workload_id, attack_path_id)
+    candidates: list[tuple[float, dict[str, Any]]] = []
     for interp_file in list(INTERP_DIR.glob("*.json")) + list(INTERP_DIR.glob("*_interp.ndjson")):
         try:
+            mtime = interp_file.stat().st_mtime
             data = json.loads(interp_file.read_text())
         except Exception:
             continue
@@ -1921,6 +2447,14 @@ def _identity_manifestations(identity_key: str, limit: int = 64) -> list[dict[st
         parsed = parse_workload_ref(workload_id)
         if parsed.get("identity_key") != identity_key:
             continue
+        candidates.append((mtime, payload, parsed))
+
+    # Sort newest-first so the first occurrence wins
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    seen: set[tuple[str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    for _mtime, payload, parsed in candidates:
+        workload_id = payload.get("workload_id", "")
         key = (workload_id, payload.get("attack_path_id", ""))
         if key in seen:
             continue
@@ -1930,7 +2464,14 @@ def _identity_manifestations(identity_key: str, limit: int = 64) -> list[dict[st
             "manifestation_key": parsed.get("manifestation_key"),
             "attack_path_id": payload.get("attack_path_id", ""),
             "classification": payload.get("classification", "unknown"),
-            "score": payload.get("host_score", payload.get("web_score", payload.get("data_score", payload.get("escape_score", payload.get("ai_score", 0.0))))),
+            "score": next(
+                (payload[k] for k in (
+                    "host_score", "web_score", "data_score", "escape_score",
+                    "ai_score", "binary_score", "lateral_score", "iot_score",
+                    "supply_chain_score", "aprs",
+                ) if payload.get(k) is not None),
+                0.0,
+            ),
         })
     rows.sort(key=lambda row: (str(row.get("manifestation_key") or ""), str(row.get("attack_path_id") or "")))
     return rows[:limit]
@@ -2020,7 +2561,7 @@ def _identity_world(identity_key: str, target: dict[str, Any] | None = None) -> 
         "evidence_count": int(profile.get("evidence_count") or 0),
         "world_summary": {
             "service_count": len(services),
-            "manifestation_count": len(manifestations),
+            "manifestation_count": len({m.get("manifestation_key") for m in manifestations if m.get("manifestation_key")}),
             "principal_count": len(profile.get("users") or []) + len(profile.get("groups") or []),
             "credential_count": len(profile.get("credential_indicators") or []) + len(profile.get("ssh_keys") or []),
             "datastore_count": len(service_views["datastores"]),
@@ -2049,9 +2590,12 @@ def _artifact_matches_identity(path: Path, identity_key: str) -> tuple[bool, str
         return False, None
     token = _normalized_identity_token(identity)
     name = path.name.lower()
-    if identity.lower() in name or token in name:
-        return True, None
+    filename_match = identity.lower() in name or token in name
 
+    # For structured files with parseable payload, prefer payload identity over
+    # filename heuristics.  A filename match that contradicts payload identity is
+    # rejected so that noise-named files are not attributed to the wrong identity
+    # (MED-70 fix).
     try:
         if path.suffix == ".json":
             data = json.loads(path.read_text())
@@ -2061,7 +2605,14 @@ def _artifact_matches_identity(path: Path, identity_key: str) -> tuple[bool, str
                 parsed = parse_workload_ref(workload_id)
                 if parsed.get("identity_key") == identity:
                     return True, workload_id
+                # Payload has a workload_id but it belongs to a different identity —
+                # reject even if the filename looked like a match.
+                return False, None
+            # No workload_id in payload — fall back to filename heuristic.
+            return filename_match, None
         elif path.suffix == ".ndjson":
+            found_wid: str | None = None
+            found_mismatch = False
             for line in path.read_text(errors="replace").splitlines()[:40]:
                 if not line.strip():
                     continue
@@ -2074,10 +2625,22 @@ def _artifact_matches_identity(path: Path, identity_key: str) -> tuple[bool, str
                 if workload_id:
                     parsed = parse_workload_ref(workload_id)
                     if parsed.get("identity_key") == identity:
-                        return True, workload_id
-        return False, None
+                        found_wid = workload_id
+                        break
+                    else:
+                        found_mismatch = True
+            if found_wid:
+                return True, found_wid
+            if found_mismatch:
+                # At least one line had a workload_id pointing at a different identity.
+                return False, None
+            # No workload_id found in any line — fall back to filename heuristic.
+            return filename_match, None
+        # Non-JSON file — filename heuristic is all we have.
+        return filename_match, None
     except Exception:
-        return False, None
+        # Can't parse — fall back to filename heuristic.
+        return filename_match, None
 
 
 @app.get("/artifacts/{identity_key}")
@@ -2127,6 +2690,8 @@ def identity_timeline(identity_key: str, limit: int = 40):
 
         limit = max(1, min(limit, 200))
         workloads: set[str] = set()
+
+        # Primary source: interp files
         for interp_file in list(INTERP_DIR.glob("*.json")) + list(INTERP_DIR.glob("*_interp.ndjson")):
             try:
                 data = json.loads(interp_file.read_text())
@@ -2139,6 +2704,33 @@ def identity_timeline(identity_key: str, limit: int = 40):
             parsed = parse_workload_ref(workload_id)
             if parsed.get("identity_key") == identity_key:
                 workloads.add(workload_id)
+
+        # Secondary source: recent events files — covers identities whose interp
+        # artifacts may have been archived or not yet produced (MED-66 fix).
+        if EVENTS_DIR.exists():
+            _recent_events = sorted(
+                EVENTS_DIR.glob("*.ndjson"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )[:50]
+            for ev_file in _recent_events:
+                try:
+                    for _line in ev_file.read_text(errors="replace").splitlines():
+                        if not _line.strip():
+                            continue
+                        try:
+                            _ev = json.loads(_line)
+                        except Exception:
+                            continue
+                        _payload = _ev.get("payload", {})
+                        _wid = _payload.get("workload_id") or _ev.get("workload_id")
+                        if not _wid:
+                            continue
+                        _parsed = parse_workload_ref(_wid)
+                        if _parsed.get("identity_key") == identity_key:
+                            workloads.add(_wid)
+                except Exception:
+                    continue
 
         timeline_rows = []
         transition_rows = []
@@ -2269,9 +2861,22 @@ def _assistant_compact_target(group: dict[str, Any], target: dict[str, Any]) -> 
 
 def _assistant_compact_fold(fold: dict[str, Any]) -> dict[str, Any]:
     why = fold.get("why") or {}
+    parsed = parse_workload_ref(
+        str(
+            fold.get("identity_key")
+            or why.get("identity_key")
+            or fold.get("workload_id")
+            or why.get("workload_id")
+            or fold.get("target_ip")
+            or fold.get("location")
+            or ""
+        )
+    )
+    identity_key = str(parsed.get("identity_key") or fold.get("target_ip") or fold.get("location") or "").strip()
     return {
         "fold_id": fold.get("fold_id"),
         "fold_type": fold.get("fold_type"),
+        "identity_key": identity_key,
         "target_ip": fold.get("target_ip") or fold.get("location"),
         "gravity_weight": fold.get("gravity_weight"),
         "detail": fold.get("detail"),
@@ -2288,6 +2893,7 @@ def _assistant_compact_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": proposal.get("id"),
         "kind": proposal.get("proposal_kind"),
+        "identity_key": _proposal_identity_key(proposal),
         "status": proposal.get("status"),
         "description": proposal.get("description"),
         "domain": proposal.get("domain"),
@@ -2434,12 +3040,19 @@ def _assistant_find_memory(neighborhoods: list[dict[str, Any]], selection_id: st
 
 def _assistant_find_fold(folds: list[dict[str, Any]], selection_id: str, identity_key: str) -> dict[str, Any] | None:
     for index, row in enumerate(folds):
-        row_id = row.get("fold_id") or f"{row.get('target_ip') or row.get('location') or 'fold'}:{index}"
+        parsed = parse_workload_ref(
+            str(row.get("identity_key") or row.get("workload_id") or row.get("target_ip") or row.get("location") or "")
+        )
+        fold_identity = str(parsed.get("identity_key") or row.get("target_ip") or row.get("location") or "").strip()
+        row_id = row.get("fold_id") or f"{fold_identity or 'fold'}:{index}"
         if selection_id and row_id == selection_id:
             return row
     for row in folds:
-        target_ip = row.get("target_ip") or row.get("location")
-        if identity_key and target_ip == identity_key:
+        parsed = parse_workload_ref(
+            str(row.get("identity_key") or row.get("workload_id") or row.get("target_ip") or row.get("location") or "")
+        )
+        fold_identity = str(parsed.get("identity_key") or row.get("target_ip") or row.get("location") or "").strip()
+        if identity_key and fold_identity == identity_key:
             return row
     return None
 
@@ -2558,6 +3171,7 @@ def _assistant_reasoning_bundle(
         *(row.get("workload_id") for row in (group.get("paths") or []) if row.get("workload_id")),
         *(row.get("workload_id") for row in field_rows if row.get("workload_id")),
         *(row.get("workload_id") for row in (timeline.get("graph_neighbors") or []) if row.get("workload_id")),
+        *(wid for wid in (timeline.get("workloads") or []) if wid),
     })
     return {
         "version": 1,
@@ -3039,9 +3653,9 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
 
     groups = _assistant_group_surface(surface.get("workloads") or [])
     targets_by_identity = {
-        (row.get("ip") or row.get("host") or ""): row
+        (row.get("identity_key") or row.get("ip") or row.get("host") or ""): row
         for row in targets.get("targets") or []
-        if (row.get("ip") or row.get("host"))
+        if (row.get("identity_key") or row.get("ip") or row.get("host"))
     }
     identity_key = req.identity_key or ""
 
@@ -3064,7 +3678,7 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
         fold = _assistant_find_fold(folds.get("folds") or [], req.id, identity_key)
         if fold:
             subject = _assistant_compact_fold(fold)
-            identity_key = identity_key or fold.get("target_ip") or fold.get("location") or ""
+            identity_key = identity_key or subject.get("identity_key") or fold.get("target_ip") or fold.get("location") or ""
             group = groups.get(identity_key)
             target_row = targets_by_identity.get(identity_key, {})
     elif req.kind == "proposal":
@@ -3075,8 +3689,7 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
                 break
         if proposal:
             subject = _assistant_compact_proposal(proposal)
-            hosts = proposal.get("hosts") or []
-            identity_key = identity_key or (hosts[0] if hosts else "")
+            identity_key = identity_key or _proposal_identity_key(proposal)
             group = groups.get(identity_key)
             target_row = targets_by_identity.get(identity_key, {})
     elif req.kind == "memory":
@@ -3093,12 +3706,12 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
     identity_folds = [
         _assistant_compact_fold(fold)
         for fold in (folds.get("folds") or [])
-        if identity_key and (fold.get("target_ip") or fold.get("location")) == identity_key
+        if identity_key and _assistant_compact_fold(fold).get("identity_key") == identity_key
     ]
     identity_proposals = [
         _assistant_compact_proposal(proposal)
         for proposal in (proposals.get("proposals") or [])
-        if not identity_key or identity_key in (proposal.get("hosts") or [])
+        if _proposal_matches_identity(proposal, identity_key)
     ]
     identity_memory = [
         _assistant_compact_memory(row)
@@ -3114,7 +3727,12 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
         key=lambda row: (-float(row.get("E") or 0.0), str(row.get("attack_path_id") or "")),
     )
     timeline_raw = identity_timeline(identity_key, limit=max(4, limit * 2)) if identity_key else {}
-    artifacts_raw = identity_artifacts(identity_key, limit=limit).get("artifacts", []) if identity_key else []
+    # Use a generous limit to get the true count, but only preview a few rows.
+    # Preserve the upstream total count so assistant references reflect how much
+    # artifact context was actually available, not just the preview size (LOW-10 fix).
+    _artifacts_result = identity_artifacts(identity_key, limit=40) if identity_key else {}
+    artifacts_raw = _artifacts_result.get("artifacts", [])
+    artifacts_total_count = _artifacts_result.get("count", len(artifacts_raw))
     artifact_rows = []
     for row in artifacts_raw[: max(1, min(limit, 3))]:
         item = {
@@ -3159,7 +3777,7 @@ def _assistant_context(req: AssistantExplainRequest) -> dict[str, Any]:
         memory_count=len(identity_memory),
         timeline=timeline,
         artifacts=artifact_rows,
-        artifact_count=len(artifacts_raw),
+        artifact_count=artifacts_total_count,
         limit=limit,
     )
 
@@ -3267,6 +3885,23 @@ def _assistant_draft_context_request(req: Any, demand: dict[str, Any] | None = N
     )
 
 
+def _assistant_authority(
+    output_class: str,
+    *,
+    task: str = "",
+    contract_name: str = "",
+    demand: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    return assistant_output_metadata(
+        output_class,
+        task=task,
+        contract_name=contract_name,
+        demand=demand,
+        model=model,
+    )
+
+
 @app.post("/assistant/explain")
 def assistant_explain(req: AssistantExplainRequest):
     try:
@@ -3291,7 +3926,14 @@ def assistant_explain(req: AssistantExplainRequest):
 
         if not isinstance(rendered, dict):
             rendered = _assistant_fallback(context)
+        authority = _assistant_authority(
+            DERIVED_ADVICE,
+            task=task,
+            model=model,
+        )
         return {
+            "assistant_output_class": DERIVED_ADVICE,
+            "authority": authority,
             "mode": mode,
             "model": model,
             "computing": computing,
@@ -3361,7 +4003,14 @@ def assistant_what_if(req: AssistantWhatIfRequest):
 
         if not isinstance(rendered, dict):
             rendered = _assistant_fallback(context)
+        authority = _assistant_authority(
+            DERIVED_ADVICE,
+            task=task,
+            model=model,
+        )
         return {
+            "assistant_output_class": DERIVED_ADVICE,
+            "authority": authority,
             "mode": mode,
             "model": model,
             "computing": computing,
@@ -3404,7 +4053,13 @@ def assistant_demands(req: AssistantDemandRequest):
         context = _assistant_bundle_context(req)
         bundle = context.get("bundle") or {}
         demands = derive_demands(bundle, limit=req.limit)
+        authority = _assistant_authority(
+            DERIVED_ADVICE,
+            task="derive_demands",
+        )
         return {
+            "assistant_output_class": DERIVED_ADVICE,
+            "authority": authority,
             "selection": bundle.get("selection") or {
                 "kind": req.kind,
                 "id": req.id,
@@ -3446,8 +4101,17 @@ def assistant_draft_demand(req: AssistantDraftDemandRequest):
             raise HTTPException(404, "Assistant demand not found for current physics state")
 
         drafted = draft_demand(demand, use_llm=bool(req.use_llm))
+        authority = _assistant_authority(
+            MUTATION_ARTIFACT,
+            task="draft_demand",
+            contract_name=str(drafted.get("contract") or demand.get("contract") or ""),
+            demand=demand,
+            model=drafted.get("model"),
+        )
         return {
             "ok": True,
+            "assistant_output_class": MUTATION_ARTIFACT,
+            "authority": authority,
             "selection": (context.get("bundle") or {}).get("selection") or demand.get("selection") or {},
             "derived_count": len(derived),
             "draft": drafted,
@@ -3494,11 +4158,23 @@ def _artifact_preview_payload(path: str, lines: int = 12) -> dict[str, Any]:
     if resolved.suffix == ".json":
         payload["preview_kind"] = "json"
         data = json.loads(resolved.read_text())
+        # Bound the JSON preview so large files don't blow up the response (LOW-11 fix).
+        # Keep at most preview_lines top-level keys; truncate long string values.
+        MAX_VALUE_CHARS = 500
         if isinstance(data, dict):
+            bounded: dict[str, object] = {}
+            for k in sorted(data.keys())[:preview_lines]:
+                v = data[k]
+                if isinstance(v, str) and len(v) > MAX_VALUE_CHARS:
+                    v = v[:MAX_VALUE_CHARS] + "…"
+                bounded[k] = v
             payload["rows"] = [{
                 "keys": sorted(list(data.keys()))[:40],
-                "data": data,
+                "data": bounded,
+                "truncated": len(data) > preview_lines,
             }]
+        elif isinstance(data, list):
+            payload["rows"] = [{"data": item} for item in data[:preview_lines]]
         else:
             payload["rows"] = [{"data": data}]
         return payload
@@ -3867,11 +4543,6 @@ def delta_workloads():
     return {"workloads": kernel.delta.all_workloads_latest()}
 
 
-@app.get("/delta/workloads")
-def delta_workloads():
-    return {"workloads": kernel.delta.all_workloads_latest()}
-
-
 # --- Folds endpoints ---
 
 @app.get("/folds")
@@ -3901,6 +4572,7 @@ def folds_summary():
                 fm = FoldManager.load(fold_file)
                 for fold in fm.all():
                     fd = fold.as_dict()
+                    fd["identity_key"] = str(parse_workload_ref(fd.get("location", "")).get("identity_key") or ip).strip()
                     fd["target_ip"] = ip
                     all_folds.append(fd)
                     ft = fold.fold_type
@@ -3947,7 +4619,7 @@ def folds_structural():
 
 
 @app.post("/folds/resolve/{fold_id}")
-def fold_resolve(fold_id: str, target_ip: str = ""):
+def fold_resolve(fold_id: str, target_ip: str = "", identity_key: str = ""):
     """
     Mark a fold as resolved — removes it from E.
 
@@ -3957,45 +4629,58 @@ def fold_resolve(fold_id: str, target_ip: str = ""):
       - Re-observing a stale condition (temporal fold)
       - Cataloguing a new attack path (projection fold)
     """
-    if not target_ip:
-        return {"error": "target_ip required"}
-
     folds_dir  = SKG_STATE_DIR / "discovery" / "folds"
-    ip_safe    = target_ip.replace(".", "_")
-    fold_file  = folds_dir / f"folds_{ip_safe}.json"
+    subject_key = str(identity_key or target_ip or "").strip()
+    if not subject_key:
+        return {"error": "identity_key or target_ip required"}
 
     try:
         from skg.kernel.folds import FoldManager
-        fm = FoldManager.load(fold_file)
-        resolved = fm.resolve(fold_id)
-        if resolved:
+        for fold_file in sorted(folds_dir.glob("folds_*.json")):
+            fm = FoldManager.load(fold_file)
+            if not fm.all():
+                continue
+            file_identity = str(parse_workload_ref(fm.all()[0].location).get("identity_key") or "").strip()
+            legacy_identity = fold_file.stem.replace("folds_", "").replace("_", ".")
+            if not _identity_matches(subject_key, file_identity, legacy_identity):
+                continue
+            resolved = fm.resolve(fold_id)
+            if not resolved:
+                continue
             fm.persist(fold_file)
+            resolved_identity = file_identity or subject_key
+            resolved_target_ip = target_ip if target_ip else (resolved_identity if resolved_identity.count(".") == 3 else "")
             try:
                 PearlLedger(SKG_STATE_DIR / "pearls.jsonl").record(Pearl(
                     reason_changes=[{
                         "kind": "operator_action",
                         "action": "fold_resolved",
                         "fold_id": fold_id,
-                        "target_ip": target_ip,
+                        "target_ip": resolved_target_ip,
+                        "identity_key": resolved_identity,
                     }],
                     energy_snapshot={
-                        "target_ip": target_ip,
-                        "workload_id": f"growth::{target_ip}",
+                        "target_ip": resolved_target_ip,
+                        "identity_key": resolved_identity,
+                        "workload_id": f"growth::{resolved_identity}",
                         "domain": "folds",
                     },
                     target_snapshot={
-                        "workload_id": f"growth::{target_ip}",
-                        "hosts": [target_ip],
-                        "identity_key": target_ip,
+                        "workload_id": f"growth::{resolved_identity}",
+                        "hosts": [resolved_identity],
+                        "identity_key": resolved_identity,
                     },
                 ))
             except Exception:
                 pass
-            return {"ok": True, "resolved": fold_id,
-                    "remaining_folds": len(fm.all()),
-                    "remaining_gravity_weight": round(fm.total_gravity_weight(), 4)}
-        else:
-            return {"ok": False, "error": f"fold {fold_id} not found for {target_ip}"}
+            return {
+                "ok": True,
+                "resolved": fold_id,
+                "identity_key": resolved_identity,
+                "remaining_folds": len(fm.all()),
+                "remaining_gravity_weight": round(fm.total_gravity_weight(), 4),
+            }
+        return {"ok": False, "error": f"fold {fold_id} not found for {subject_key}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -4035,6 +4720,13 @@ def run():
 
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
+    # Signal that the daemon loop is active so topology callers know they can
+    # perform expensive per-target identity_world lookups safely.
+    try:
+        from skg.core import daemon_registry as _dr
+        _dr._daemon_loop_running = True
+    except Exception:
+        pass
     kernel.boot()
     # Pre-warm the field_state cache in background so /status is fast on first call
     threading.Thread(target=_refresh_field_state_bg, daemon=True).start()

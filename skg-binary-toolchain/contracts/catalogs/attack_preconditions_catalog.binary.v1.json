@@ -1,19 +1,19 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "domain": "binary_analysis",
-  "description": "Binary exploitation precondition analysis. Wickets describe memory protection absence and exploitation path constructibility. Same tri-state physics: REALIZED = protection absent (exploitable condition confirmed), BLOCKED = protection present (constraint prevents exploitation), UNKNOWN = not yet measured.",
+  "description": "Binary exploitation precondition analysis. Wickets describe memory protection absence, exploitation path constructibility, and offensive capability presence. Tri-state physics: REALIZED = exploitable/offensive condition confirmed, BLOCKED = protection prevents exploitation, UNKNOWN = not yet measured.",
   "wickets": {
     "BA-01": {
       "id": "BA-01",
       "label": "nx_disabled",
-      "description": "NX (non-executable stack/heap) not set. Stack memory is executable \u2014 shellcode injection viable without ROP.",
+      "description": "NX (non-executable stack/heap) not set. Stack memory is executable — shellcode injection viable without ROP.",
       "evidence_hint": "checksec --file=<binary> | grep NX. Evidence rank 3 (config/binary attributes).",
       "decay_class": "structural"
     },
     "BA-02": {
       "id": "BA-02",
       "label": "aslr_disabled_or_weak",
-      "description": "PIE disabled or ASLR weak. Load address is predictable \u2014 absolute addressing in payload viable.",
+      "description": "PIE disabled or ASLR weak. Load address is predictable — absolute addressing in payload viable.",
       "evidence_hint": "checksec --file=<binary> | grep PIE; cat /proc/sys/kernel/randomize_va_space. Evidence rank 3.",
       "decay_class": "structural"
     },
@@ -44,11 +44,39 @@
       "description": "Sufficient ROP gadgets exist or direct EIP/RIP control demonstrated via cyclic pattern.",
       "evidence_hint": "ROPgadget --binary <binary> --rop; pwndbg cyclic + offset. Evidence rank 2.",
       "decay_class": "structural"
+    },
+    "BA-07": {
+      "id": "BA-07",
+      "label": "capability_identified",
+      "description": "capa matched ≥ 1 named capability rule against the binary. Indicates the binary implements identifiable techniques such as code injection, credential harvesting, process enumeration, or C2 communication patterns.",
+      "evidence_hint": "capa --json <binary> | python -m json.tool — check rules[*].matches. Evidence rank 2.",
+      "decay_class": "structural"
+    },
+    "BA-08": {
+      "id": "BA-08",
+      "label": "attck_technique_confirmed",
+      "description": "capa matched ≥ 1 ATT&CK technique ID in the binary. Confirms the binary implements specific MITRE ATT&CK tradecraft (e.g. T1055 Process Injection, T1027 Obfuscation, T1059 Scripting).",
+      "evidence_hint": "capa --json <binary> — check rules[*].meta.attack[*].id. Evidence rank 2.",
+      "decay_class": "structural"
+    },
+    "BA-09": {
+      "id": "BA-09",
+      "label": "symbolic_vuln_path_confirmed",
+      "description": "angr symbolic execution found a feasible execution path from program entry to a dangerous function with symbolic (unconstrained) stdin input. Provides stronger evidence than import analysis alone that the path is reachable.",
+      "evidence_hint": "angr CFGFast + simgr.explore(find=dangerous_addrs). Evidence rank 2.",
+      "decay_class": "structural"
+    },
+    "BA-10": {
+      "id": "BA-10",
+      "label": "runtime_hook_confirmed",
+      "description": "Frida dynamic instrumentation intercepted ≥ 1 dangerous function call during live execution of the binary. Argument values and call context are available. Highest-fidelity runtime evidence — requires authorized execution.",
+      "evidence_hint": "frida: Interceptor.attach(dangerous_sym, {onEnter}) — see adapter.frida_trace. Evidence rank 1. Requires authorized=True.",
+      "decay_class": "ephemeral"
     }
   },
   "attack_paths": {
     "binary_stack_overflow_v1": {
-      "description": "Stack buffer overflow \u2192 code execution. Requires no NX, no canary, dangerous function reachable, controlled input, gadgets.",
+      "description": "Stack buffer overflow → code execution. Requires no NX, no canary, dangerous function reachable, controlled input, gadgets.",
       "required_wickets": [
         "BA-01",
         "BA-03",
@@ -59,7 +87,7 @@
       "failure_class": "memory_corruption"
     },
     "binary_rop_chain_v1": {
-      "description": "ROP chain bypasses NX \u2192 code execution. Canary absent, dangerous function reachable, controlled input, gadgets.",
+      "description": "ROP chain bypasses NX → code execution. Canary absent, dangerous function reachable, controlled input, gadgets.",
       "required_wickets": [
         "BA-03",
         "BA-04",
@@ -69,12 +97,37 @@
       "failure_class": "rop_exploitation"
     },
     "binary_format_string_v1": {
-      "description": "Format string vulnerability \u2192 arbitrary read/write. Dangerous function (printf family) reachable with controlled format arg.",
+      "description": "Format string vulnerability → arbitrary read/write. Dangerous function (printf family) reachable with controlled format arg.",
       "required_wickets": [
         "BA-04",
         "BA-05"
       ],
       "failure_class": "format_string"
+    },
+    "binary_offensive_capability_v1": {
+      "description": "Binary implements identifiable offensive tradecraft confirmed by capa capability rules and ATT&CK technique mapping. Does not require exploitability — binary itself is a threat actor tool.",
+      "required_wickets": [
+        "BA-07",
+        "BA-08"
+      ],
+      "failure_class": "offensive_tool_present"
+    },
+    "binary_symbolic_confirmed_v1": {
+      "description": "Symbolic execution (angr) confirms a feasible path from program input to dangerous function. Combined with no stack canary and dangerous imports, constitutes high-confidence pre-exploitation assessment without live execution.",
+      "required_wickets": [
+        "BA-03",
+        "BA-04",
+        "BA-09"
+      ],
+      "failure_class": "memory_corruption"
+    },
+    "binary_runtime_confirmed_v1": {
+      "description": "Live Frida instrumentation intercepted dangerous function calls with inspectable arguments. Provides runtime ground truth for exploit path confirmation. Requires authorized execution of the binary.",
+      "required_wickets": [
+        "BA-04",
+        "BA-10"
+      ],
+      "failure_class": "memory_corruption"
     }
   }
 }

@@ -1,0 +1,24 @@
+[2026-03-30T13:10:55.066144808+00:00] startup: base_url=https://chatgpt.com/backend-api path_style=wham
+[2026-03-30T13:10:55.199026257+00:00] auth: mode=ChatGPT account_id=84bb09d5-dafb-4b09-9277-50c434a98384
+[2026-03-30T13:10:55.199067355+00:00] auth: set ChatGPT-Account-Id header: 84bb09d5-dafb-4b09-9277-50c434a98384
+[2026-03-30T13:10:55.217323396+00:00] startup: wham_force_internal=false ua=codex_cli_rs/0.115.0 (Arch Linux Rolling Release; x86_64) VTE/8203 (codex_cloud_tasks_tui)
+[2026-03-30T13:10:55.283048384+00:00] env: parsed HTTP GitHub origin => jschneck-arch/skg
+[2026-03-30T13:10:55.283344778+00:00] env: git origins: ["https://github.com/jschneck-arch/skg.git"]
+[2026-03-30T13:10:55.283367835+00:00] env: parsed HTTP GitHub origin => jschneck-arch/skg
+[2026-03-30T13:10:55.283382641+00:00] env: GET https://chatgpt.com/backend-api/wham/environments/by-repo/github/jschneck-arch/skg
+[2026-03-30T13:10:56.191383682+00:00] http.list_tasks: env=<all> limit=20 cursor_in=<none> cursor_out=<none> items=0
+[2026-03-30T13:10:56.191617616+00:00] refresh.apply: env=<all> count=0
+[2026-03-30T13:10:56.677180940+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:10:56.682312256+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:10:56.682456156+00:00] env: by-repo returned 0 env(s) for jschneck-arch/skg
+[2026-03-30T13:10:56.682575611+00:00] env: GET https://chatgpt.com/backend-api/wham/environments
+[2026-03-30T13:10:57.862383964+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:10:57.869239003+00:00] env: /environments JSON (pretty):
+[]
+[2026-03-30T13:10:57.926026137+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:11:09.229385389+00:00] env: parsed HTTP GitHub origin => jschneck-arch/skg
+[2026-03-30T13:11:10.182281904+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:11:10.433216772+00:00] env: status=200 OK content-type=application/json
+[2026-03-30T13:11:14.870105719+00:00] env.select: All
+[2026-03-30T13:11:15.097728302+00:00] http.list_tasks: env=<all> limit=20 cursor_in=<none> cursor_out=<none> items=0
+[2026-03-30T13:11:15.097897426+00:00] refresh.apply: env=<all> count=0

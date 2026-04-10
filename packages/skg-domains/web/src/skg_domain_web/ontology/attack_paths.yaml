@@ -1,0 +1,31 @@
+attack_paths:
+  web_initial_access_v1:
+    label: Web Initial Access
+    description: Exploit exposed admin/auth surface
+    required_wickets:
+      - WB-01
+      - WB-05
+    ordered: false
+  web_credential_exposure_v1:
+    label: Web Credential Exposure
+    description: Extract credentials from exposed config
+    required_wickets:
+      - WB-01
+      - WB-09
+    ordered: false
+  web_sqli_to_shell_v1:
+    label: Web SQLi to Shell
+    description: SQL injection confirmed and escalate via default credential abuse
+    required_wickets:
+      - WB-01
+      - WB-09
+      - WB-10
+    ordered: false
+  web_full_chain_v1:
+    label: Web Full Chain (SQLi)
+    description: Alias for web_sqli_to_shell_v1 full exploitation chain
+    required_wickets:
+      - WB-01
+      - WB-09
+      - WB-10
+    ordered: false

@@ -1,9 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Iterable
 import math
 from datetime import timezone
+
+from skg.core.coupling import decay_ttl_hours
 
 from .observations import Observation
 
@@ -50,7 +52,33 @@ class SupportEngine:
     def __init__(self, now_fn=None) -> None:
         self.now_fn = now_fn or datetime.utcnow
 
+    def ttl_for(self, obs: Observation) -> timedelta | None:
+        hours = decay_ttl_hours().get(obs.decay_class)
+        if hours is None:
+            return None
+        try:
+            hours_f = float(hours)
+        except Exception:
+            return None
+        if hours_f <= 0.0:
+            return timedelta(seconds=0)
+        return timedelta(hours=hours_f)
+
+    def is_expired(self, obs: Observation, as_of: datetime) -> bool:
+        ttl = self.ttl_for(obs)
+        if ttl is None:
+            return False
+        obs_t = obs.event_time
+        as_of_n = as_of
+        if obs_t.tzinfo is not None and as_of_n.tzinfo is None:
+            as_of_n = as_of_n.replace(tzinfo=timezone.utc)
+        elif obs_t.tzinfo is None and as_of_n.tzinfo is not None:
+            obs_t = obs_t.replace(tzinfo=timezone.utc)
+        return (as_of_n - obs_t) > ttl
+
     def weight(self, obs: Observation, as_of: datetime) -> float:
+        if self.is_expired(obs, as_of):
+            return 0.0
         # Use event_time (when evidence was collected), not observation_time (when ingested)
         obs_t = obs.event_time
         as_of_n = as_of
@@ -77,6 +105,8 @@ class SupportEngine:
         observed_cycle_ids: set[str] = set()
         for obs in observations:
             if obs.context != context or target not in obs.targets:
+                continue
+            if self.is_expired(obs, as_of):
                 continue
             mapping = obs.support_mapping.get(target, {})
             w = self.weight(obs, as_of)

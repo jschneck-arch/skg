@@ -25,11 +25,12 @@ Nothing else in gravity_field.py changes.
 from __future__ import annotations
 
 import logging
+from glob import glob
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from .adapters import load_observations_for_target
+from .adapters import load_observations_for_node
 from .energy import EnergyEngine
 from .folds import Fold
 from .gravity import GravityScheduler
@@ -44,14 +45,21 @@ log = logging.getLogger("skg.kernel.engine")
 _WICKET_PREFIX_DOMAIN: Dict[str, str] = {
     "WB-": "web",
     "HO-": "host",
-    "DA-": "data",
-    "CE-": "container",
-    "LA-": "lateral",
-    "BI-": "binary",
+    "AD-": "ad_lateral",
+    "CE-": "container_escape",
+    "DP-": "data",
+    "DE-": "data",
+    "BA-": "binary",
     "AI-": "ai_target",
     "SC-": "supply_chain",
-    "IO-": "iot_firmware",
+    "IF-": "iot_firmware",
     "AP-": "aprs",
+    "MC-": "metacognition",
+    # Legacy aliases
+    "DA-": "data",
+    "LA-": "ad_lateral",
+    "BI-": "binary",
+    "IO-": "iot_firmware",
 }
 
 
@@ -106,21 +114,64 @@ class KernelStateEngine:
         self._energy = EnergyEngine()
         self._gravity = GravityScheduler()
         self._now = lambda: datetime.now(timezone.utc)
+        self._fiber_cache_key: tuple[float, float] | None = None
+        self._fiber_clusters_cache: dict[str, object] = {}
 
-    def observations(self, target_ip: str) -> List[Observation]:
-        """Load all observations for a target from event files."""
-        return load_observations_for_target(
-            target_ip, self.discovery_dir, self.events_dir, self.cve_dir
+    def _interp_dir(self) -> Path:
+        return self.events_dir.parent / "interp"
+
+    def _fiber_context_key(self) -> tuple[float, float]:
+        surface_mtime = 0.0
+        for path in glob(str(self.discovery_dir / "surface_*.json")):
+            try:
+                surface_mtime = max(surface_mtime, Path(path).stat().st_mtime)
+            except Exception:
+                continue
+
+        pearls_path = self.events_dir.parent / "pearls.jsonl"
+        pearls_mtime = 0.0
+        if pearls_path.exists():
+            try:
+                pearls_mtime = pearls_path.stat().st_mtime
+            except Exception:
+                pearls_mtime = 0.0
+
+        return (surface_mtime, pearls_mtime)
+
+    def _fiber_clusters_by_anchor(self) -> dict[str, object]:
+        key = self._fiber_context_key()
+        if self._fiber_cache_key == key:
+            return self._fiber_clusters_cache
+
+        try:
+            from skg.topology.energy import compute_field_fibers
+
+            clusters = compute_field_fibers()
+            self._fiber_clusters_cache = {cluster.anchor: cluster for cluster in clusters}
+        except Exception:
+            self._fiber_clusters_cache = {}
+        self._fiber_cache_key = key
+        return self._fiber_clusters_cache
+
+    def observations(self, node_key: str) -> List[Observation]:
+        """Load all observations for a node from event files.
+
+        node_key is the stable identity_key for the node — resolved by
+        canonical_observation_subject().  For IP-only hosts this equals the IP;
+        for workload-identified nodes it is the host portion of the workload_id.
+        """
+        return load_observations_for_node(
+            node_key, self.discovery_dir, self.events_dir, self.cve_dir
         )
 
-    def states(self, target_ip: str) -> Dict[str, TriState]:
+    def states(self, node_key: str) -> Dict[str, TriState]:
         """
-        Compute kernel-aggregated wicket states for a target.
+        Compute kernel-aggregated wicket states for a node.
 
         Returns {wicket_id: TriState} using support vector aggregation,
         not last-write-wins. Replaces load_wicket_states().
         """
-        observations = self.observations(target_ip)
+        observations = self.observations(node_key)
         if not observations:
             return {}
 
@@ -131,19 +182,19 @@ class KernelStateEngine:
         result: Dict[str, TriState] = {}
         for wicket_id in wickets:
             contrib = self._support.aggregate(
-                observations, target_ip, wicket_id, now
+                observations, node_key, wicket_id, now
             )
             result[wicket_id] = self._state.collapse(contrib)
 
         return result
 
-    def states_with_detail(self, target_ip: str) -> Dict[str, dict]:
+    def states_with_detail(self, node_key: str) -> Dict[str, dict]:
         """
         Like states() but returns full detail dict compatible with
         the existing gravity_field.py callers that expect:
           {wicket_id: {"status": str, "detail": str, "ts": str}}
         """
-        observations = self.observations(target_ip)
+        observations = self.observations(node_key)
         if not observations:
             return {}
 
@@ -154,14 +205,14 @@ class KernelStateEngine:
         for wicket_id in wickets:
             # Find most recent observation for detail/ts
             wk_obs = [o for o in observations if o.context == wicket_id]
-            contrib = self._support.aggregate(observations, target_ip, wicket_id, now)
+            contrib = self._support.aggregate(observations, node_key, wicket_id, now)
             state = self._state.collapse(contrib)
 
             # Get detail from the highest-confidence observation
             best = max(
                 wk_obs,
-                key=lambda o: o.support_mapping.get(target_ip, {}).get("R", 0)
-                              + o.support_mapping.get(target_ip, {}).get("B", 0),
+                key=lambda o: o.support_mapping.get(node_key, {}).get("R", 0)
+                              + o.support_mapping.get(node_key, {}).get("B", 0),
                 default=wk_obs[0] if wk_obs else None,
             )
             detail = best.payload.get("detail", "") if best else ""
@@ -201,19 +252,19 @@ class KernelStateEngine:
 
     def energy(
         self,
-        target_ip: str,
+        node_key: str,
         applicable_wickets: Set[str],
         folds: Optional[List[Fold]] = None,
     ) -> float:
         """
-        Compute field energy E for a target.
+        Compute field energy E for a node.
         E = |unknown wickets in applicable set| + fold weights.
         Replaces field_entropy().
         """
         if not applicable_wickets:
             return 0.0
 
-        states = self.states_with_detail(target_ip)
+        states = self.states_with_detail(node_key)
         node_states = []
         for wid in applicable_wickets:
             state = states.get(
@@ -236,14 +287,14 @@ class KernelStateEngine:
         instrument_name: str,
         instrument_wavelength: List[str],
         instrument_cost: float,
-        target_ip: str,
+        node_key: str,
         applicable_wickets: Set[str],
         folds: Optional[List[Fold]] = None,
         failure_penalty: float = 1.0,
         domain_wickets: Optional[Dict] = None,
     ) -> float:
         """
-        Compute expected energy reduction potential for an instrument on a target.
+        Compute expected energy reduction potential for an instrument on a node.
         Replaces entropy_reduction_potential().
 
         Paper 4 Section 4: Φ_effective(I, t) combines:
@@ -258,7 +309,7 @@ class KernelStateEngine:
         if not applicable_wickets:
             return 0.0
 
-        states = self.states_with_detail(target_ip)
+        states = self.states_with_detail(node_key)
 
         # Unknowns in instrument wavelength that are also applicable
         wave_applicable = set(instrument_wavelength) & applicable_wickets
@@ -285,20 +336,23 @@ class KernelStateEngine:
         # from re-observing). This is the formal decoherence criterion in action.
         phi_fiber_score = 0.0
         try:
-            from .field_local import build_field_locals, phi_fiber as _phi_fiber
+            from .field_functional import phi_fiber as _phi_fiber
+            from .field_local import build_field_locals
             _domain_wickets = domain_wickets or {}
             # Build applicable domain_wickets subset from applicable_wickets
             if not _domain_wickets:
                 # Fallback: infer domain from wicket prefix
                 _domain_wickets = _infer_domain_wickets(applicable_wickets)
-            locals_ = build_field_locals(target_ip, states, _domain_wickets)
+            locals_ = build_field_locals(node_key, states, _domain_wickets)
             # Filter out fully protected locals — Proposition 4
             active_locals = [loc for loc in locals_ if not loc.is_protected()]
             if active_locals:
+                fiber_cluster = self._fiber_clusters_by_anchor().get(node_key)
                 phi_fiber_score = _phi_fiber(
                     instrument_wavelength=list(instrument_wavelength),
                     instrument_cost=instrument_cost,
                     locals_=active_locals,
+                    fiber_cluster=fiber_cluster,
                 )
         except Exception:
             phi_fiber_score = 0.0
@@ -358,32 +412,44 @@ class KernelStateEngine:
 
     def field_locals(
         self,
-        target_ip: str,
+        node_key: str,
         domain_wickets: Optional[Dict] = None,
     ):
         """
-        Paper 4 Section 2.2: Build first-class FieldLocal objects for a target.
+        Paper 4 Section 2.2: Build first-class FieldLocal objects for a node.
 
         Returns List[FieldLocal] — one per domain with known wickets.
         Exposed for UI, reporting, and field_functional() computation.
         """
         from .field_local import build_field_locals
-        states = self.states_with_detail(target_ip)
+        states = self.states_with_detail(node_key)
         _domain_wickets = domain_wickets or _infer_domain_wickets(
             set(states.keys())
         )
-        return build_field_locals(target_ip, states, _domain_wickets)
+        return build_field_locals(node_key, states, _domain_wickets)
 
     def L_field_functional(
         self,
-        target_ip: str,
+        node_key: str,
         domain_wickets: Optional[Dict] = None,
     ) -> float:
         """
         Paper 4 Eq: L(F) = Σ_i E_self(L_i) + Σ_{i<j} E_couple(L_i, L_j) + D(F).
 
-        Returns the full unified field functional value for this target.
+        Returns the full unified field functional value for this node.
         """
-        from .field_local import field_functional
-        locals_ = self.field_locals(target_ip, domain_wickets)
-        return field_functional(locals_)
+        from .field_functional import field_functional_breakdown
+        locals_ = self.field_locals(node_key, domain_wickets)
+        fiber_cluster = self._fiber_clusters_by_anchor().get(node_key)
+        topology = None
+        try:
+            from skg.topology.energy import compute_field_topology
+
+            topology = compute_field_topology(self.discovery_dir, self._interp_dir())
+        except Exception:
+            topology = None
+        return field_functional_breakdown(
+            locals_,
+            fiber_cluster=fiber_cluster,
+            topology=topology,
+        ).total

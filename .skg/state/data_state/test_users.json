@@ -1,0 +1,11 @@
+{
+  "schema_fingerprint": {
+    "users": "created_at,email,last_login,role,user_id,username"
+  },
+  "null_counts": {
+    "users.user_id": 0,
+    "users.username": 0,
+    "users.email": 2,
+    "users.created_at": 0
+  }
+}

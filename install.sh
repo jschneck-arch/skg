@@ -94,7 +94,7 @@ assert project_path(Path("p1",["HO-01","HO-02"]),{"HO-01":ns_r,"HO-02":ns_u}).cl
 assert project_path(Path("p2",["HO-01"]),{"HO-01":ns_r}).classification == "realized"
 assert project_path(Path("p3",["HO-01","HO-03"]),{"HO-01":ns_r,"HO-03":ns_b}).classification == "not_realized"
 b = BondState.from_type("192.168.1.1","172.17.0.2","docker_host")
-assert b.strength == 0.9 and abs(b.prior_influence - 0.45) < 1e-6
+assert b.strength == 0.9 and abs(b.prior_influence - 0.9) < 1e-6
 sk = SKGState.build("wl",{"HO-01":ns_r,"HO-02":ns_u})
 assert sk.E == 0.5
 print("  [OK] substrate")

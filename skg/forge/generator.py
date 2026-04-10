@@ -36,7 +36,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from skg.core.paths import FORGE_STAGING, SKG_HOME
+from skg_core.config.paths import SKG_HOME
+from skg_services.gravity.path_policy import FORGE_STAGING
 
 log = logging.getLogger("skg.forge.generator")
 
@@ -783,7 +784,10 @@ def install_toolchain(staging_path: str | Path,
     # Load through the shared projector discovery path so install-time
     # activation matches runtime activation.
     try:
-        from skg.sensors.projector import _discover_toolchain_projector, _projector_cache
+        from skg_services.gravity.projector_runtime import (
+            _discover_toolchain_projector,
+            _projector_cache,
+        )
 
         tc_name = staging_path.name
         _projector_cache.pop(tc_name, None)

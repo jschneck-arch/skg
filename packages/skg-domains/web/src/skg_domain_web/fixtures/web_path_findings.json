@@ -1,0 +1,23 @@
+[
+  {
+    "path": "/",
+    "status_code": 200,
+    "source": "collector",
+    "pointer": "http://demo.local/",
+    "detail": "root endpoint reachable"
+  },
+  {
+    "path": "/admin",
+    "status_code": 200,
+    "source": "gobuster",
+    "pointer": "http://demo.local/admin",
+    "detail": "admin panel exposed"
+  },
+  {
+    "path": "/.env",
+    "status_code": 200,
+    "source": "gobuster",
+    "pointer": "http://demo.local/.env",
+    "detail": "environment file exposed"
+  }
+]

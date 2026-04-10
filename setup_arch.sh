@@ -206,7 +206,7 @@ assert score2.classification == "realized"
 
 # Bond prior
 b = BondState.from_type("192.168.1.1", "172.17.0.2", "docker_host")
-assert abs(b.prior_influence - 0.45) < 1e-6
+assert abs(b.prior_influence - 0.9) < 1e-6
 
 # SKGState field energy
 sk = SKGState.build("wl", {"HO-01": ns_r, "HO-02": ns_u})

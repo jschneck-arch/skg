@@ -27,24 +27,30 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
-import os
 import tempfile
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 import re as _re
 
+from skg.core.assistant_contract import observation_event_admissible
+from skg.temporal.interp import canonical_interp_payload
+from skg_core.config.paths import SKG_HOME
+from skg_registry import DomainRegistry as _CanonicalDomainRegistry
+try:
+    from skg_services.gravity import projector_runtime as _service_projector_runtime
+except Exception:  # pragma: no cover - legacy fallback when canonical services package is unavailable
+    _service_projector_runtime = None
+
 log = logging.getLogger("skg.sensors.projector")
-_INTERP_KEEP = 3  # keep only this many files per (domain, workload) prefix
+_INTERP_KEEP = 3  # keep only this many files per (domain, workload, attack_path) prefix
 
 
-def _prune_interp_siblings(written: Path, keep: int = _INTERP_KEEP) -> None:
-    """Delete oldest sibling interp files so at most `keep` files exist per prefix."""
-    prefix = _re.sub(r'_[0-9a-f]{8}\.json$', '', written.name)
+def _prune_interp_siblings(written: Path, family_prefix: str, keep: int = _INTERP_KEEP) -> None:
+    """Delete oldest sibling interp files so at most `keep` files exist per family."""
     siblings = sorted(
-        written.parent.glob(f"{prefix}_*.json"),
+        written.parent.glob(f"{family_prefix}__*.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -53,47 +59,6 @@ def _prune_interp_siblings(written: Path, keep: int = _INTERP_KEEP) -> None:
             old.unlink()
         except OSError:
             pass
-
-SKG_HOME = Path(os.environ.get("SKG_HOME", Path(__file__).resolve().parents[2]))
-TOOLCHAIN_ALIASES = {
-    "aprs": "skg-aprs-toolchain",
-    "container_escape": "skg-container-escape-toolchain",
-    "ad_lateral": "skg-ad-lateral-toolchain",
-    "host": "skg-host-toolchain",
-    "web": "skg-web-toolchain",
-    "data": "skg-data-toolchain",
-    "ai_target": "skg-ai-toolchain",
-    "iot_firmware": "skg-iot_firmware-toolchain",
-    "supply_chain": "skg-supply-chain-toolchain",
-    "binary": "skg-binary-toolchain",
-}
-
-TOOLCHAIN_PROJECTOR = {
-    "skg-aprs-toolchain":             ("skg-aprs-toolchain",            "projections/aprs/run.py",     "compute_aprs"),
-    "skg-container-escape-toolchain": ("skg-container-escape-toolchain","projections/escape/run.py",   "compute_escape"),
-    "skg-ad-lateral-toolchain":       ("skg-ad-lateral-toolchain",      "projections/lateral/run.py",  "compute_lateral"),
-    "skg-host-toolchain":             ("skg-host-toolchain",            "projections/host/run.py",     "compute_host_score"),
-    "skg-web-toolchain":              ("skg-web-toolchain",             "projections/web/run.py",      "compute_web"),
-    "skg-data-toolchain":             ("skg-data-toolchain",            "projections/data/run.py",     "compute_data_score"),
-    "skg-ai-toolchain":               ("skg-ai-toolchain",              "projections/run.py",          "compute_ai"),
-    "skg-iot_firmware-toolchain":     ("skg-iot_firmware-toolchain",    "projections/iot_firmware/run.py", "compute_iot_score"),
-    "skg-supply-chain-toolchain":     ("skg-supply-chain-toolchain",    "projections/supply_chain/run.py", "compute_supply_chain_score"),
-    "skg-binary-toolchain":           ("skg-binary-toolchain",          "projections/binary/run.py",   "compute_binary_score"),
-}
-
-# Attack path defaults per domain
-DEFAULT_ATTACK_PATH = {
-    "skg-aprs-toolchain":             "log4j_jndi_rce_v1",
-    "skg-container-escape-toolchain": "container_escape_privileged_v1",
-    "skg-ad-lateral-toolchain":       "ad_kerberoast_v1",
-    "skg-host-toolchain":             "host_ssh_initial_access_v1",
-    "skg-web-toolchain":              "web_initial_access_v1",
-    "skg-data-toolchain":             "data_completeness_failure_v1",
-    "skg-ai-toolchain":               "ai_llm_extract_v1",
-    "skg-iot_firmware-toolchain":     "iot_firmware_network_exploit_v1",
-    "skg-supply-chain-toolchain":     "supply_chain_network_exploit_v1",
-    "skg-binary-toolchain":           "binary_stack_overflow_v1",
-}
 
 ATTACK_PATH_ALIASES = {
     "skg-ad-lateral-toolchain": {
@@ -104,62 +69,159 @@ ATTACK_PATH_ALIASES = {
     },
 }
 
+TOOLCHAIN_ALIASES = {
+    "binary_analysis": {"binary"},
+    "binary": {"binary_analysis"},
+}
+
 _projector_cache: dict[str, object] = {}
 
 
+def _safe_interp_part(value: str, limit: int = 80) -> str:
+    cleaned = _re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    cleaned = cleaned.strip("._") or "unknown"
+    return cleaned[:limit]
+
+
+def _domain_inventory_rows() -> list[dict]:
+    rows: list[dict] = []
+    _search_roots = [SKG_HOME / "packages" / "skg-domains", SKG_HOME]
+    for domain in _CanonicalDomainRegistry.discover(search_roots=_search_roots).list_domains():
+        metadata = dict(domain.manifest.metadata or {})
+        default_path = str(
+            metadata.get("default_path")
+            or metadata.get("default_attack_path")
+            or ""
+        ).strip()
+        projector_path = ""
+        if domain.projectors_dir.exists():
+            run_root = domain.projectors_dir / "run.py"
+            if run_root.exists():
+                projector_path = str(run_root.relative_to(domain.root_dir))
+            else:
+                nested = sorted(domain.projectors_dir.glob("*/run.py"))
+                if nested:
+                    projector_path = str(nested[0].relative_to(domain.root_dir))
+
+        rows.append(
+            {
+                "name": domain.name,
+                "dir": domain.root_dir,
+                "toolchain": domain.root_dir.name,
+                "default_path": default_path,
+                "projector_path": projector_path,
+            }
+        )
+    return rows
+
+
+def _toolchain_row(toolchain: str) -> dict | None:
+    raw = str(toolchain or "").strip()
+    if not raw:
+        return None
+
+    requested = {
+        raw,
+        raw.replace("-", "_"),
+        raw.replace("_", "-"),
+    }
+    if raw.startswith("skg-") and raw.endswith("-toolchain"):
+        middle = raw[len("skg-"):-len("-toolchain")]
+        requested.update({middle, middle.replace("-", "_"), middle.replace("_", "-")})
+    else:
+        requested.add(f"skg-{raw}-toolchain")
+
+    expanded = set(requested)
+    for item in list(requested):
+        norm = item.replace("-", "_")
+        for alias in TOOLCHAIN_ALIASES.get(norm, set()):
+            expanded.update({
+                alias,
+                alias.replace("-", "_"),
+                alias.replace("_", "-"),
+                f"skg-{alias.replace('_', '-')}-toolchain",
+            })
+    requested = expanded
+
+    first_match: dict | None = None
+    for row in _domain_inventory_rows():
+        dir_path = row.get("dir")
+        dir_name = dir_path.name if isinstance(dir_path, Path) else ""
+        toolchain_name = str(row.get("toolchain") or dir_name or "").strip()
+        domain_name = str(row.get("name") or "").strip()
+        aliases = {
+            domain_name,
+            domain_name.replace("-", "_"),
+            domain_name.replace("_", "-"),
+            toolchain_name,
+            dir_name,
+        }
+        if any(item for item in aliases if item in requested):
+            if str(row.get("projector_path") or "").strip():
+                return dict(row)
+            if first_match is None:
+                first_match = dict(row)
+    return first_match
+
+
 def _canonical_toolchain_name(toolchain: str) -> str:
-    canonical = TOOLCHAIN_ALIASES.get(toolchain, toolchain)
-    if canonical != toolchain:
-        return canonical
+    row = _toolchain_row(toolchain)
+    if row:
+        dir_path = row.get("dir")
+        if isinstance(dir_path, Path):
+            return dir_path.name
+        toolchain_name = str(row.get("toolchain") or "").strip()
+        if toolchain_name:
+            return toolchain_name
+    canonical = str(toolchain or "").strip()
     if canonical.startswith("skg-") and canonical.endswith("-toolchain"):
         return canonical
     candidate = f"skg-{canonical}-toolchain"
-    if (SKG_HOME / candidate).exists():
+    if _toolchain_row(candidate):
         return candidate
     return canonical
 
 
 def _canonical_attack_path_id(toolchain: str, attack_path_id: str) -> str:
-    aliases = ATTACK_PATH_ALIASES.get(toolchain, {})
+    aliases = ATTACK_PATH_ALIASES.get(_canonical_toolchain_name(toolchain), {})
     return aliases.get(attack_path_id, attack_path_id)
 
 
 def _discover_toolchain_projector(toolchain: str) -> bool:
-    tc_name = _canonical_toolchain_name(toolchain)
-    if tc_name in TOOLCHAIN_PROJECTOR:
-        return True
-
-    tc_dir = SKG_HOME / tc_name
-    if not tc_dir.exists():
+    row = _toolchain_row(toolchain)
+    if not row:
         return False
+    dir_path = row.get("dir")
+    projector_path = str(row.get("projector_path") or "").strip()
+    return isinstance(dir_path, Path) and bool(projector_path) and (dir_path / projector_path).exists()
 
-    proj_files = sorted(tc_dir.glob("projections/*/run.py"))
-    if not proj_files:
-        return False
 
-    run_file = proj_files[0]
-    rel = run_file.relative_to(tc_dir)
-    domain = run_file.parent.name.replace("-", "_")
-    compute_name = f"compute_{domain}"
-    TOOLCHAIN_PROJECTOR[tc_name] = (tc_name, str(rel), compute_name)
+def _toolchain_domain(toolchain: str) -> str:
+    row = _toolchain_row(toolchain)
+    if row and row.get("name"):
+        return str(row["name"])
+    return _canonical_toolchain_name(toolchain).replace("skg-", "").replace("-toolchain", "").replace("-", "_")
 
-    catalogs = sorted((tc_dir / "contracts" / "catalogs").glob("*.json"))
-    for catalog_file in catalogs:
-        try:
-            catalog = json.loads(catalog_file.read_text())
-        except Exception:
-            continue
-        attack_paths = catalog.get("attack_paths", {})
-        if isinstance(attack_paths, dict) and attack_paths:
-            DEFAULT_ATTACK_PATH[tc_name] = next(iter(attack_paths.keys()))
-            break
-        if isinstance(attack_paths, list) and attack_paths:
-            first = attack_paths[0]
-            if isinstance(first, dict) and first.get("id"):
-                DEFAULT_ATTACK_PATH[tc_name] = first["id"]
-                break
 
-    return True
+def _default_attack_path(toolchain: str) -> str:
+    row = _toolchain_row(toolchain)
+    if row and row.get("default_path"):
+        return str(row["default_path"])
+    return ""
+
+
+def _resolve_projector_entry(toolchain: str) -> tuple[dict, Path] | None:
+    row = _toolchain_row(toolchain)
+    if not row:
+        return None
+    dir_path = row.get("dir")
+    projector_path = str(row.get("projector_path") or "").strip()
+    if not isinstance(dir_path, Path) or not projector_path:
+        return None
+    run_file = dir_path / projector_path
+    if not run_file.exists():
+        return None
+    return row, run_file
 
 
 def _normalize_event(ev: dict) -> dict:
@@ -182,46 +244,61 @@ def _normalize_event(ev: dict) -> dict:
     normalized["payload"] = payload
     normalized["source"] = source
     return normalized
-
-
-def _unwrap_interp_payload(result: dict) -> dict:
-    if isinstance(result, dict) and isinstance(result.get("payload"), dict):
-        return result["payload"]
-    return result
-
-
 def _load_projector(toolchain: str):
     """Dynamically import a projector's run.py. Cached per process."""
     toolchain = _canonical_toolchain_name(toolchain)
     if toolchain in _projector_cache:
         return _projector_cache[toolchain]
 
-    info = TOOLCHAIN_PROJECTOR.get(toolchain)
-    if not info and not _discover_toolchain_projector(toolchain):
-        return None
-    info = TOOLCHAIN_PROJECTOR.get(toolchain)
-    if not info:
+    resolved = _resolve_projector_entry(toolchain)
+    if not resolved:
         return None
 
-    tc_name, rel_path, _ = info
-    run_file = SKG_HOME / tc_name / rel_path
-    if not run_file.exists():
-        log.warning(f"Projector not found: {run_file}")
-        return None
+    row, run_file = resolved
 
     spec = importlib.util.spec_from_file_location(
-        f"skg_proj_{tc_name.replace('-','_')}", run_file
+        f"skg_proj_{toolchain.replace('-','_')}", run_file
     )
+    if spec is None or spec.loader is None:
+        log.warning(f"Projector import spec unavailable: {run_file}")
+        return None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    _projector_cache[toolchain] = mod
-    return mod
+
+    preferred = []
+    domain = str(row.get("name") or "").strip()
+    if domain:
+        preferred.extend([f"compute_{domain}", f"compute_{domain}_score"])
+    subdir = run_file.parent.name.replace("-", "_")
+    if subdir and subdir != "projections":
+        preferred.extend([f"compute_{subdir}", f"compute_{subdir}_score"])
+    preferred.append("compute")
+
+    compute_fn_name = None
+    for name in preferred:
+        if callable(getattr(mod, name, None)):
+            compute_fn_name = name
+            break
+    if compute_fn_name is None:
+        compute_candidates = [
+            name for name in dir(mod)
+            if name.startswith("compute_") and callable(getattr(mod, name, None))
+        ]
+        if len(compute_candidates) == 1:
+            compute_fn_name = compute_candidates[0]
+
+    _projector_cache[toolchain] = (row, mod, compute_fn_name)
+    return _projector_cache[toolchain]
 
 
 def _load_catalog(toolchain: str, attack_path_id: str) -> dict:
     """Load the catalog JSON for a toolchain."""
     attack_path_id = _canonical_attack_path_id(toolchain, attack_path_id)
-    tc_dir = SKG_HOME / toolchain / "contracts" / "catalogs"
+    row = _toolchain_row(toolchain)
+    tc_dir = row.get("dir") if row else None
+    if not isinstance(tc_dir, Path):
+        return {}
+    tc_dir = tc_dir / "contracts" / "catalogs"
     candidates = list(tc_dir.glob("*.json")) if tc_dir.exists() else []
     if not candidates:
         return {}
@@ -243,6 +320,38 @@ def _load_catalog(toolchain: str, attack_path_id: str) -> dict:
         return {}
 
 
+def _ensure_interp_metadata(result: dict, *, domain: str, workload_id: str, attack_path_id: str, run_id: str) -> dict:
+    if not isinstance(result, dict):
+        return result
+
+    payload = result.get("payload")
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("workload_id", workload_id)
+        payload.setdefault("attack_path_id", attack_path_id)
+        payload.setdefault("run_id", run_id)
+        payload.setdefault("domain", domain)
+        updated = dict(result)
+        updated["payload"] = payload
+        return canonical_interp_payload(updated)
+
+    updated = dict(result)
+    updated.setdefault("workload_id", workload_id)
+    updated.setdefault("attack_path_id", attack_path_id)
+    updated.setdefault("run_id", run_id)
+    updated.setdefault("domain", domain)
+    return canonical_interp_payload(updated)
+
+
+def _interp_output_path(interp_dir: Path, *, domain: str, workload_id: str, attack_path_id: str, run_id: str) -> tuple[Path, str]:
+    family_prefix = "__".join([
+        _safe_interp_part(domain, limit=40),
+        _safe_interp_part(workload_id, limit=80),
+        _safe_interp_part(attack_path_id, limit=80),
+    ])
+    return interp_dir / f"{family_prefix}__{run_id}.json", family_prefix
+
+
 def project_events(
     events: list[dict],
     workload_id: str,
@@ -257,14 +366,21 @@ def project_events(
     """
     events = [_normalize_event(ev) for ev in events]
     attack_path_id = _canonical_attack_path_id(toolchain, attack_path_id)
-    mod = _load_projector(toolchain)
-    if mod is None:
+    loaded = _load_projector(toolchain)
+    if loaded is None:
         log.warning(f"No projector for toolchain: {toolchain}")
         return None
 
-    info = TOOLCHAIN_PROJECTOR[toolchain]
-    compute_fn_name = info[2]
-    compute_fn = getattr(mod, compute_fn_name, None)
+    _row, mod, compute_fn_name = loaded
+    compute_fn = getattr(mod, compute_fn_name, None) if compute_fn_name else None
+    domain = _toolchain_domain(toolchain)
+    out_path, family_prefix = _interp_output_path(
+        interp_dir,
+        domain=domain,
+        workload_id=workload_id,
+        attack_path_id=attack_path_id,
+        run_id=run_id,
+    )
 
     # All projectors also expose a generic compute() or main() path
     # Try compute_fn first, then fall back to running via temp files
@@ -272,18 +388,26 @@ def project_events(
 
     if compute_fn and catalog:
         try:
-            result = compute_fn(events, catalog, attack_path_id,
-                                run_id=run_id, workload_id=workload_id)
+            result = compute_fn(
+                events,
+                catalog,
+                attack_path_id,
+                run_id=run_id,
+                workload_id=workload_id,
+            )
             if result:
-                payload = _unwrap_interp_payload(result)
-                domain = toolchain.replace("skg-","").replace("-toolchain","").replace("-","_")
-                wid_safe = workload_id.replace("/","_").replace(":","_").replace(" ","_")[:60]
-                out_path = interp_dir / f"{domain}_{wid_safe}_{run_id}.json"
+                result = _ensure_interp_metadata(
+                    result,
+                    domain=domain,
+                    workload_id=workload_id,
+                    attack_path_id=attack_path_id,
+                    run_id=run_id,
+                )
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, indent=2))
-                _prune_interp_siblings(out_path)
+                _prune_interp_siblings(out_path, family_prefix)
                 log.info(f"[projector] {workload_id}/{attack_path_id} → {out_path.name} "
-                         f"(score={payload.get('aprs', payload.get('lateral_score', payload.get('escape_score', payload.get('host_score', payload.get('web_score', payload.get('ai_score', '?'))))))})")
+                         f"(score={result.get('aprs', result.get('lateral_score', result.get('escape_score', result.get('host_score', result.get('web_score', result.get('ai_score', '?'))))))})")
                 return out_path
         except Exception as exc:
             log.debug(f"[projector] compute_fn failed, trying file path: {exc}")
@@ -306,6 +430,8 @@ def project_events(
                 "--in", str(ev_file),
                 "--out", str(out_file),
                 "--attack-path-id", attack_path_id,
+                "--run-id", run_id,
+                "--workload-id", workload_id,
             ]
             try:
                 mod.main()
@@ -316,12 +442,16 @@ def project_events(
 
             if out_file.exists():
                 result = json.loads(out_file.read_text())
-                domain = toolchain.replace("skg-","").replace("-toolchain","").replace("-","_")
-                wid_safe = workload_id.replace("/","_").replace(":","_").replace(" ","_")[:60]
-                out_path = interp_dir / f"{domain}_{wid_safe}_{run_id}.json"
+                result = _ensure_interp_metadata(
+                    result,
+                    domain=domain,
+                    workload_id=workload_id,
+                    attack_path_id=attack_path_id,
+                    run_id=run_id,
+                )
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(json.dumps(result, indent=2))
-                _prune_interp_siblings(out_path)
+                _prune_interp_siblings(out_path, family_prefix)
                 log.info(f"[projector] {workload_id}/{attack_path_id} → {out_path.name}")
                 return out_path
         except Exception as exc:
@@ -357,13 +487,15 @@ def project_event_file(
 
         if ev.get("type") != "obs.attack.precondition":
             continue
+        if not observation_event_admissible(ev):
+            continue
 
         ev = _normalize_event(ev)
         payload    = ev.get("payload", {})
         toolchain  = ev.get("source", {}).get("toolchain", "")
         toolchain  = _canonical_toolchain_name(toolchain)
         wid        = payload.get("workload_id", "unknown")
-        path_id    = payload.get("attack_path_id") or DEFAULT_ATTACK_PATH.get(toolchain, "")
+        path_id    = payload.get("attack_path_id") or _default_attack_path(toolchain)
         path_id    = _canonical_attack_path_id(toolchain, path_id)
 
         if not toolchain or not _discover_toolchain_projector(toolchain):
@@ -397,3 +529,14 @@ def project_events_dir(
         results = project_event_file(ev_file, interp_dir, run_id)
         outputs.extend(results)
     return outputs
+
+
+if _service_projector_runtime is not None:
+    _projector_cache = _service_projector_runtime._projector_cache
+    _discover_toolchain_projector = _service_projector_runtime._discover_toolchain_projector
+    _canonical_toolchain_name = _service_projector_runtime._canonical_toolchain_name
+    _canonical_attack_path_id = _service_projector_runtime._canonical_attack_path_id
+    _default_attack_path = _service_projector_runtime._default_attack_path
+    project_events = _service_projector_runtime.project_events
+    project_event_file = _service_projector_runtime.project_event_file
+    project_events_dir = _service_projector_runtime.project_events_dir

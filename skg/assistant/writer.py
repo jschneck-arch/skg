@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from skg.assistant.validators import get_contract, render_content, validate_draft
-from skg.core.paths import SKG_STATE_DIR
+from skg.core.assistant_contract import MUTATION_ARTIFACT, artifact_hash, assistant_output_metadata
+from skg_core.config.paths import SKG_STATE_DIR
 
 
 def _draft_dir() -> Path:
@@ -227,6 +228,12 @@ def _save_draft(demand: dict[str, Any], draft: dict[str, Any], contract: dict[st
     path.write_text(rendered, encoding="utf-8")
 
     meta_path = path.with_suffix(path.suffix + ".meta.json")
+    authority = assistant_output_metadata(
+        MUTATION_ARTIFACT,
+        contract_name=str(demand.get("contract") or ""),
+        demand=demand,
+        model=model,
+    )
     metadata = {
         "demand": demand,
         "mode": mode,
@@ -234,6 +241,8 @@ def _save_draft(demand: dict[str, Any], draft: dict[str, Any], contract: dict[st
         "saved_at": datetime.now(timezone.utc).isoformat(),
         "path": str(path),
         "filename": path.name,
+        "artifact_hash": artifact_hash(rendered),
+        **authority,
         "notes": list(draft.get("notes") or []),
     }
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -243,6 +252,8 @@ def _save_draft(demand: dict[str, Any], draft: dict[str, Any], contract: dict[st
         "filename": path.name,
         "content": draft.get("content"),
         "notes": list(draft.get("notes") or []),
+        "assistant_output_class": MUTATION_ARTIFACT,
+        "authority": authority,
     }
 
 

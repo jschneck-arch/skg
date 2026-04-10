@@ -1,0 +1,11 @@
+{
+  "schema_fingerprint": {
+    "sessions": "ip_address,last_seen,session_id,token,user_id"
+  },
+  "null_counts": {
+    "sessions.session_id": 0,
+    "sessions.user_id": 0,
+    "sessions.token": 0,
+    "sessions.last_seen": 0
+  }
+}

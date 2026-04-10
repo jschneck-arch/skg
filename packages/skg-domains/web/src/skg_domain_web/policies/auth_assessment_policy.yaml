@@ -1,0 +1,9 @@
+wickets:
+  default_credentials: WB-10
+confidence:
+  default_credential_realized: 0.90
+  default_credential_blocked: 0.82
+  auth_unknown: 0.50
+evidence_rank: 3
+source_kind: auth.runtime
+pointer_prefix: web-auth://

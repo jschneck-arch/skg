@@ -1,0 +1,3 @@
+# assistant
+
+Service scaffold for \.

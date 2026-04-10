@@ -25,13 +25,14 @@ def _get_engine(resonance_dir: Path):
 
 
 def cmd_status(args):
-    from skg.core.paths import RESONANCE_DIR
+    from skg_services.gravity.path_policy import RESONANCE_DIR
     engine = _get_engine(RESONANCE_DIR)
     print(json.dumps(engine.status(), indent=2))
 
 
 def cmd_ingest(args):
-    from skg.core.paths import RESONANCE_DIR, SKG_HOME
+    from skg_core.config.paths import SKG_HOME
+    from skg_services.gravity.path_policy import RESONANCE_DIR
     from skg.resonance.ingester import ingest_all
     engine = _get_engine(RESONANCE_DIR)
     summary = ingest_all(engine, SKG_HOME)
@@ -39,7 +40,7 @@ def cmd_ingest(args):
 
 
 def cmd_query(args):
-    from skg.core.paths import RESONANCE_DIR
+    from skg_services.gravity.path_policy import RESONANCE_DIR
     engine = _get_engine(RESONANCE_DIR)
     k = args.k or 5
 
@@ -67,7 +68,7 @@ def cmd_query(args):
 
 
 def cmd_draft(args):
-    from skg.core.paths import RESONANCE_DIR
+    from skg_services.gravity.path_policy import RESONANCE_DIR
     from skg.resonance.drafter import draft_catalog
     engine = _get_engine(RESONANCE_DIR)
 
@@ -104,16 +105,23 @@ def cmd_draft(args):
 
 
 def cmd_drafts(args):
-    from skg.core.paths import RESONANCE_DIR
-    engine = _get_engine(RESONANCE_DIR)
-    drafts = engine.list_drafts()
+    from skg_services.gravity.path_policy import RESONANCE_DIR
+    drafts_dir = RESONANCE_DIR / "drafts"
+    if not drafts_dir.exists():
+        print("No pending drafts.")
+        return
+    drafts = sorted(drafts_dir.glob("draft_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
     if not drafts:
         print("No pending drafts.")
         return
     print(f"{len(drafts)} pending draft(s):\n")
-    for d in drafts:
-        meta = d.get("meta", {})
-        print(f"  {d['file']}")
+    for path in drafts:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        meta = data.get("meta", data)
+        print(f"  {path.name}")
         print(f"    domain: {meta.get('domain', '?')}")
         print(f"    drafted: {meta.get('drafted_at', '?')}")
         print(f"    status: {meta.get('status', '?')}")

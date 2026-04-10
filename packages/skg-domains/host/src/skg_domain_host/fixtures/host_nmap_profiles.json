@@ -1,0 +1,32 @@
+[
+  {
+    "host": "192.168.56.10",
+    "host_up": true,
+    "hostname": "target-host",
+    "os": "Linux",
+    "open_ports": [
+      {
+        "port": 22,
+        "proto": "tcp",
+        "service": "ssh",
+        "product": "OpenSSH",
+        "version": "7.1",
+        "extra": "",
+        "scripts": {
+          "ssh2-enum-algos": "kex:curve25519-sha256"
+        }
+      },
+      {
+        "port": 445,
+        "proto": "tcp",
+        "service": "microsoft-ds",
+        "product": "Samba",
+        "version": "4.3.11",
+        "extra": "",
+        "scripts": {
+          "smb-vuln-ms17-010": "State: VULNERABLE"
+        }
+      }
+    ]
+  }
+]

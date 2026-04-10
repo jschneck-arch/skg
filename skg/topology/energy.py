@@ -41,11 +41,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from skg.core.paths import DISCOVERY_DIR, SKG_STATE_DIR
+from skg.core.assistant_contract import observation_event_admissible
+from skg.core.coupling import coupling_value
+from skg_core.config.paths import DISCOVERY_DIR, SKG_STATE_DIR
 from skg.identity import parse_workload_ref
 from skg.kernel.pearls import Pearl, PearlLedger
+from skg.temporal.interp import read_interp_payload
 
 log = logging.getLogger("skg.topology.energy")
+
+# In-process cache for identity_world calls — avoids redundant per-target
+# O(n) round-trips when compute_field_fibers() and _world_states_from_runtime()
+# are both called in the same gravity cycle.  Keyed by identity_key; TTL = 60s.
+_identity_world_cache: dict[str, tuple[float, dict]] = {}
+_IDENTITY_WORLD_CACHE_TTL = 60.0  # seconds
+
+
+def _cached_identity_world(identity_key: str, target: dict, identity_world_fn) -> dict:
+    """Call identity_world_fn with a 60-second in-process cache."""
+    import time as _time
+    now = _time.monotonic()
+    cached = _identity_world_cache.get(identity_key)
+    if cached is not None:
+        ts, world = cached
+        if now - ts < _IDENTITY_WORLD_CACHE_TTL:
+            return world
+    world = identity_world_fn(identity_key, target)
+    _identity_world_cache[identity_key] = (now, world)
+    return world
+
 
 # Phase encoding — tri-state as angle on the unit circle
 PHASE = {
@@ -72,16 +96,21 @@ SPHERE_MAP = {
 FIELD_DOMAIN_TO_SPHERE = {
     "host": "host",
     "sysaudit": "host",
-    "binary_analysis": "host",
+    "binary": "binary",
+    "binary_analysis": "binary",
     "web": "web",
+    "nginx": "web",
     "data": "data",
     "data_pipeline": "data",
     "container_escape": "container",
     "ad_lateral": "ad",
+    "ad": "ad",
+    "lateral": "ad",
     "ai_target": "ai_target",
     "iot_firmware": "iot_firmware",
     "supply_chain": "supply_chain",
     "aprs": "aprs",
+    "metacognition": "metacognition",
 }
 
 
@@ -424,22 +453,6 @@ class FiberCluster:
     total_tension: float
     fibers: list[Fiber]
 
-    # Paper 4 inter-local coupling constants K(L_i, L_j) — Section 3.2
-    _COUPLING_K: dict[tuple[str, str], float] = field(default_factory=lambda: {
-        ("host", "host"):           0.80,  # reachability → smb (L_reachable → L_smb)
-        ("host", "web"):            0.75,
-        ("web", "host"):            0.65,
-        ("credential", "host"):     0.95,  # cred → ssh (K_cred_ssh)
-        ("credential", "ssh"):      0.95,
-        ("web", "data"):            0.85,  # sqli → db (K_web_sqli_db)
-        ("host", "data"):           0.70,
-        ("container", "host"):      0.85,  # container-to-host escape
-        ("host", "container"):      0.60,
-        ("host", "lateral"):        0.80,  # domain-to-lateral
-        ("lateral", "host"):        0.70,
-        ("data", "lateral"):        0.65,
-    })
-
     def G_cluster(self) -> float:
         """
         Paper 4 Eq: G_cluster(C) = Σ_i tension(F_i) × coherence(F_i) + coupling terms.
@@ -456,10 +469,7 @@ class FiberCluster:
             for fj in self.fibers[i + 1:]:
                 if fi.sphere == fj.sphere:
                     continue
-                k = self._COUPLING_K.get(
-                    (fi.sphere, fj.sphere),
-                    self._COUPLING_K.get((fj.sphere, fi.sphere), 0.10),
-                )
+                k = coupling_value(fi.sphere, fj.sphere, table="cluster", apply_reverse_discount=False)
                 g += k * fi.coherence * fj.coherence
 
         return g
@@ -594,6 +604,8 @@ def load_states_from_events(events_file: Path) -> dict[str, list[WicketState]]:
             continue
 
         if ev.get("type") not in ("obs.attack.precondition", "obs.substrate.node"):
+            continue
+        if not observation_event_admissible(ev):
             continue
 
         payload = ev.get("payload", {})
@@ -770,35 +782,35 @@ DEFAULT_CONFIDENCE = {"realized": 0.90, "blocked": 0.75, "unknown": 0.40}
 
 def load_states_from_interp(interp_file: Path) -> dict[str, list[WicketState]]:
     """
-    Load wicket states from an interp NDJSON file (projection summary format).
+    Load wicket states from a projection artifact.
     Uses default confidence values since interp files do not carry per-wicket confidence.
     """
     latest: dict[str, WicketState] = {}
+    payload = read_interp_payload(interp_file)
+    if payload is None:
+        return {}
 
-    for line in interp_file.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    latest_status = dict(payload.get("latest_status", {}) or {})
+    if not latest_status:
+        for wid in payload.get("realized", []) or []:
+            latest_status[wid] = "realized"
+        for wid in payload.get("blocked", []) or []:
+            latest_status[wid] = "blocked"
+        for wid in payload.get("unknown", []) or []:
+            latest_status[wid] = "unknown"
 
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    observed_at = str(payload.get("computed_at", "") or "")
 
-        payload = d.get("payload", {})
-        latest_status = payload.get("latest_status", {})
-        observed_at = d.get("ts", "")
-
-        for wid, status in latest_status.items():
-            confidence = DEFAULT_CONFIDENCE.get(status, 0.40)
-            latest[wid] = WicketState(
-                wicket_id=wid,
-                status=status,
-                confidence=confidence,
-                observed_at=observed_at,
-                decoherence=0.0,
-                compatibility_score=0.0,
-            )
+    for wid, status in latest_status.items():
+        confidence = DEFAULT_CONFIDENCE.get(status, 0.40)
+        latest[wid] = WicketState(
+            wicket_id=wid,
+            status=status,
+            confidence=confidence,
+            observed_at=observed_at,
+            decoherence=0.0,
+            compatibility_score=0.0,
+        )
 
     by_sphere: dict[str, list[WicketState]] = {}
     for ws in latest.values():
@@ -847,22 +859,24 @@ def _world_states_from_surface(surface_path: Path) -> dict[str, list[WicketState
             continue
 
         for domain in target.get("domains", []) or []:
-            if domain == "host":
+            if domain in ("host", "sysaudit"):
                 _add("host", f"world::{host}::domain::host", 0.8, 0.05)
-            elif domain == "web":
+            elif domain in ("web", "nginx"):
                 _add("web", f"world::{host}::domain::web", 0.8, 0.05)
-            elif domain == "data":
+            elif domain in ("data", "data_pipeline"):
                 _add("data", f"world::{host}::domain::data", 0.8, 0.05)
-            elif domain == "container_escape":
+            elif domain in ("container", "container_escape"):
                 _add("container", f"world::{host}::domain::container", 0.8, 0.05)
             elif domain == "ai_target":
                 _add("ai_target", f"world::{host}::domain::ai", 0.85, 0.05)
             elif domain == "supply_chain":
                 _add("supply_chain", f"world::{host}::domain::supply_chain", 0.75, 0.05)
-            elif domain == "iot_firmware":
+            elif domain in ("iot_firmware", "iot"):
                 _add("iot_firmware", f"world::{host}::domain::iot", 0.75, 0.05)
-            elif domain == "ad_lateral":
+            elif domain in ("ad_lateral", "lateral", "ad"):
                 _add("ad", f"world::{host}::domain::ad", 0.75, 0.05)
+            elif domain in ("binary", "binary_analysis"):
+                _add("binary", f"world::{host}::domain::binary", 0.75, 0.05)
 
         for svc in target.get("services", []) or []:
             service = str(svc.get("service") or svc.get("name") or "").lower()
@@ -967,19 +981,33 @@ def _world_states_from_runtime() -> dict[str, list[WicketState]]:
     Load supplementary field states from the canonical daemon world snapshot.
     This keeps topology aligned with the runtime's world formation instead of
     inventing a parallel model.
+
+    Only performs per-target identity_world lookups when the daemon event-loop
+    is actively running (checked via daemon_registry._daemon_loop_running).
+    Gravity cycle one-shots skip this to avoid O(n_targets × 0.6 s) latency.
     """
     try:
+        from skg.core import daemon_registry as _dr
         from skg.core import daemon as daemon_mod
         all_targets_index = getattr(daemon_mod, "_all_targets_index", None)
         identity_world = getattr(daemon_mod, "_identity_world", None)
         if not callable(all_targets_index) or not callable(identity_world):
             return {}
+        # Skip expensive per-target lookups outside the running daemon loop.
+        if not getattr(_dr, "_daemon_loop_running", False):
+            return {}
+        # Limit to 8 targets for topology — take the most-recently-observed ones
+        # (last_seen descending, then arbitrary) to keep the field accurate without
+        # scanning all 20+ stale targets at ~0.6 s/target.
+        all_targets = list(all_targets_index())
+        all_targets.sort(key=lambda t: str(t.get("last_seen") or ""), reverse=True)
+        targets_sample = all_targets[:8]
         by_sphere: dict[str, list[WicketState]] = {}
-        for target in all_targets_index():
+        for target in targets_sample:
             identity_key = str(target.get("ip") or target.get("host") or target.get("workload_id") or "")
             if not identity_key:
                 continue
-            world = identity_world(identity_key, target)
+            world = _cached_identity_world(identity_key, target, identity_world)
             snapshot_states = _world_states_from_snapshot(world)
             for sphere, states in snapshot_states.items():
                 by_sphere.setdefault(sphere, []).extend(states)
@@ -1209,13 +1237,39 @@ def compute_field_fibers() -> list[FiberCluster]:
             "_all_targets_index/_identity_world not registered; fiber layer disabled"
         )
         return []
+    # Skip per-target identity_world lookups when running as a gravity cycle
+    # (not the daemon).  Pearl fibers still provide fiber structure.
+    if not getattr(_reg, "_daemon_loop_running", False):
+        pearl_fibers = _pearl_fibers_from_ledger()
+        # Group pearl fibers by anchor into FiberCluster objects
+        by_anchor: dict[str, list] = {}
+        for pf in pearl_fibers:
+            by_anchor.setdefault(pf.anchor, []).append(pf)
+        return [
+            FiberCluster(
+                cluster_id=f"cluster::{anchor}",
+                anchor=anchor,
+                spheres=sorted({f.sphere for f in fibers}),
+                kinds=sorted({f.kind for f in fibers}),
+                member_count=sum(len(f.members) for f in fibers),
+                total_coherence=sum(f.coherence for f in fibers),
+                total_tension=sum(f.tension for f in fibers),
+                fibers=fibers,
+            )
+            for anchor, fibers in by_anchor.items()
+            if fibers
+        ]
 
+    # Limit to 8 most-recently-observed targets to bound fiber computation latency.
+    # Pearl fibers (below) cover all identities regardless of this cap.
+    all_targets = list(all_targets_index())
+    all_targets.sort(key=lambda t: str(t.get("last_seen") or ""), reverse=True)
     fibers_by_anchor: dict[str, list[Fiber]] = {}
-    for target in all_targets_index():
+    for target in all_targets[:8]:
         identity_key = str(target.get("ip") or target.get("host") or target.get("workload_id") or "")
         if not identity_key:
             continue
-        world = identity_world(identity_key, target)
+        world = _cached_identity_world(identity_key, target, identity_world)
         fibers = _world_snapshot_fibers(world)
         if not fibers:
             continue
@@ -1352,7 +1406,8 @@ def compute_field_energy_all(events_dir: Path,
                     merged[ws.wicket_id] = ws
 
     covered = {_sphere_for_wicket(w) for w in merged}
-    for f in sorted(interp_dir.glob("*_interp.ndjson"))[-10:]:
+    interp_files = sorted(interp_dir.glob("*.json")) + sorted(interp_dir.glob("*_interp.ndjson"))
+    for f in interp_files[-10:]:
         by_sphere = load_states_from_interp(f)
         for sphere, states in by_sphere.items():
             if sphere not in covered:
@@ -1373,9 +1428,6 @@ def compute_field_energy_all(events_dir: Path,
             by_sphere.setdefault(sphere, []).extend(states)
     runtime_world_states = _world_states_from_runtime()
     for sphere, states in runtime_world_states.items():
-        by_sphere.setdefault(sphere, []).extend(states)
-    pearl_states = _pearl_states_from_ledger()
-    for sphere, states in pearl_states.items():
         by_sphere.setdefault(sphere, []).extend(states)
 
     return {

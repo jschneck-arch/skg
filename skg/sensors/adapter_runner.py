@@ -41,6 +41,26 @@ from datetime import datetime, timezone
 log = logging.getLogger("skg.sensors.adapter_runner")
 
 SKG_HOME = Path(os.environ.get('SKG_HOME', Path(__file__).resolve().parents[2]))
+AD07_CONTEXT_STALE_DAYS = 90
+AD07_UNKNOWN_LAST_LOGON_IS_ACTIVE = True
+CANONICAL_DELEGATION_ATTACK_PATH_ID = "ad_delegation_posture_baseline_v1"
+LEGACY_DELEGATION_ATTACK_PATH_IDS = frozenset(
+    {"ad_unconstrained_delegation_v1", "ad_constrained_delegation_s4u_v1"}
+)
+LEGACY_DELEGATION_COMPAT_ENV = "SKG_ENABLE_LEGACY_DELEGATION_COMPAT"
+
+
+def _is_legacy_delegation_path(attack_path_id: str) -> bool:
+    return str(attack_path_id or "") in LEGACY_DELEGATION_ATTACK_PATH_IDS
+
+
+def _legacy_delegation_compat_enabled() -> bool:
+    raw = str(os.environ.get(LEGACY_DELEGATION_COMPAT_ENV, "")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _legacy_delegation_enabled_for_path(attack_path_id: str) -> bool:
+    return _is_legacy_delegation_path(attack_path_id) and _legacy_delegation_compat_enabled()
 
 
 def _adapter_module(toolchain: str, adapter: str):
@@ -138,6 +158,211 @@ def run_container_inspect(
 # AD lateral — BloodHound
 # ---------------------------------------------------------------------------
 
+def _route_ad22_runtime_evidence(
+    *,
+    bh_dir: Path,
+    computers: list[dict] | None,
+    workload_id: str,
+    run_id: str,
+) -> None:
+    """Bridge runtime session evidence into canonical AD-22 input shape."""
+    try:
+        from skg_services.gravity.ad_runtime import route_bloodhound_ad22_evidence
+    except Exception as exc:
+        log.debug(f"ad22 routing unavailable: {exc}")
+        return
+
+    try:
+        route_bloodhound_ad22_evidence(
+            bh_dir=bh_dir,
+            computers=computers or [],
+            workload_id=workload_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        log.warning(f"ad22 runtime evidence routing failed: {exc}")
+
+
+def _route_ad0608_runtime_evidence(
+    *,
+    bh_dir: Path,
+    computers: list[dict] | None,
+    users: list[dict] | None,
+    workload_id: str,
+    run_id: str,
+) -> None:
+    """Bridge delegation posture evidence into canonical AD-06/AD-08 input shape."""
+    try:
+        from skg_services.gravity.ad_runtime import route_bloodhound_delegation_evidence
+    except Exception as exc:
+        log.debug(f"ad0608 routing unavailable: {exc}")
+        return
+
+    try:
+        route_bloodhound_delegation_evidence(
+            bh_dir=bh_dir,
+            computers=computers or [],
+            users=users or [],
+            workload_id=workload_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        log.warning(f"ad0608 runtime evidence routing failed: {exc}")
+
+
+def _route_ad07_runtime_context(
+    *,
+    bh_dir: Path,
+    computers: list[dict] | None,
+    workload_id: str,
+    run_id: str,
+) -> None:
+    """Route AD-07 context computation through canonical protocol/service contract."""
+    try:
+        from skg_services.gravity.ad_runtime import route_bloodhound_ad07_context
+    except Exception as exc:
+        log.debug(f"ad07 routing unavailable: {exc}")
+        return
+
+    try:
+        route_bloodhound_ad07_context(
+            bh_dir=bh_dir,
+            computers=computers or [],
+            workload_id=workload_id,
+            run_id=run_id,
+            stale_days=AD07_CONTEXT_STALE_DAYS,
+            unknown_last_logon_is_active=AD07_UNKNOWN_LAST_LOGON_IS_ACTIVE,
+        )
+    except Exception as exc:
+        log.warning(f"ad07 runtime context routing failed: {exc}")
+
+
+def _drop_legacy_ad22_events(events: list[dict]) -> list[dict]:
+    """Quarantine legacy AD-22 static-unknown semantics from active runtime output."""
+    filtered: list[dict] = []
+    quarantined = 0
+    for event in events:
+        payload = event.get("payload", {}) if isinstance(event, dict) else {}
+        if payload.get("wicket_id") == "AD-22":
+            quarantined += 1
+            continue
+        filtered.append(event)
+
+    if quarantined:
+        log.info(
+            "quarantined %s legacy AD-22 events from bloodhound adapter output",
+            quarantined,
+        )
+    return filtered
+
+
+def _drop_legacy_delegation_slice_events(
+    events: list[dict],
+    *,
+    attack_path_id: str,
+) -> list[dict]:
+    """Drop legacy delegation wickets for the canonical AD-06/AD-08 posture path."""
+    if attack_path_id != CANONICAL_DELEGATION_ATTACK_PATH_ID:
+        return events
+
+    filtered: list[dict] = []
+    dropped = 0
+    for event in events:
+        payload = event.get("payload", {}) if isinstance(event, dict) else {}
+        wicket_id = str(payload.get("wicket_id") or "")
+        if wicket_id in {"AD-06", "AD-07", "AD-08", "AD-09"}:
+            dropped += 1
+            continue
+        filtered.append(event)
+
+    if dropped:
+        log.info(
+            "dropped %s legacy delegation wickets (AD-06..AD-09) for canonical delegation path",
+            dropped,
+        )
+    return filtered
+
+
+def _drop_legacy_ad07_events(events: list[dict]) -> list[dict]:
+    """Drop legacy AD-07 emissions; AD-07 context is service-owned sidecar state."""
+    filtered: list[dict] = []
+    dropped = 0
+    for event in events:
+        payload = event.get("payload", {}) if isinstance(event, dict) else {}
+        if str(payload.get("wicket_id") or "") == "AD-07":
+            dropped += 1
+            continue
+        filtered.append(event)
+
+    if dropped:
+        log.info("dropped %s legacy AD-07 events; canonical AD-07 context is sidecar-only", dropped)
+    return filtered
+
+
+def _map_ad22_sidecar_events(
+    *,
+    bh_dir: Path,
+    workload_id: str,
+    run_id: str,
+    attack_path_id: str,
+) -> list[dict]:
+    if attack_path_id != "ad_privileged_session_tiering_baseline_v1":
+        return []
+    try:
+        from skg_services.gravity.ad_runtime import map_ad22_sidecar_to_events
+    except Exception as exc:
+        log.warning(f"ad22 canonical adapter unavailable: {exc}")
+        return []
+
+    try:
+        from skg_protocol.contracts import AD_TIERING_INPUT_FILENAME
+    except Exception:
+        AD_TIERING_INPUT_FILENAME = "ad22_tiering_input.json"
+
+    try:
+        return map_ad22_sidecar_to_events(
+            sidecar_path=bh_dir / AD_TIERING_INPUT_FILENAME,
+            attack_path_id=attack_path_id,
+            run_id=run_id,
+            workload_id=workload_id,
+        )
+    except Exception as exc:
+        log.warning(f"ad22 sidecar mapping failed: {exc}")
+        return []
+
+
+def _map_ad0608_sidecar_events(
+    *,
+    bh_dir: Path,
+    workload_id: str,
+    run_id: str,
+    attack_path_id: str,
+) -> list[dict]:
+    if attack_path_id != CANONICAL_DELEGATION_ATTACK_PATH_ID:
+        return []
+    try:
+        from skg_services.gravity.ad_runtime import map_ad0608_sidecar_to_events
+    except Exception as exc:
+        log.warning(f"ad0608 canonical adapter unavailable: {exc}")
+        return []
+
+    try:
+        from skg_protocol.contracts import AD_DELEGATION_INPUT_FILENAME
+    except Exception:
+        AD_DELEGATION_INPUT_FILENAME = "ad_delegation_input.json"
+
+    try:
+        return map_ad0608_sidecar_to_events(
+            sidecar_path=bh_dir / AD_DELEGATION_INPUT_FILENAME,
+            attack_path_id=attack_path_id,
+            run_id=run_id,
+            workload_id=workload_id,
+        )
+    except Exception as exc:
+        log.warning(f"ad0608 sidecar mapping failed: {exc}")
+        return []
+
+
 def run_bloodhound(
     bh_dir: Path,
     workload_id: str,
@@ -154,15 +379,53 @@ def run_bloodhound(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out_file = Path(tmpdir) / "events.ndjson"
+        canonical_ad22_events: list[dict] = []
+        canonical_ad0608_events: list[dict] = []
         try:
             mod = _adapter_module("skg-ad-lateral-toolchain", "bloodhound")
             data = mod.load_bh_dir(bh_dir)
+
+            # Route session evidence into canonical AD-domain input shape before
+            # legacy check execution. Full AD-22 slice evaluation remains deferred.
+            _route_ad22_runtime_evidence(
+                bh_dir=bh_dir,
+                computers=data.get("computers", []),
+                workload_id=workload_id,
+                run_id=run_id,
+            )
+            # Route delegation posture-only evidence (AD-06/AD-08) into a
+            # protocol-governed sidecar. AD-09 remains deferred from canonical AD.
+            _route_ad0608_runtime_evidence(
+                bh_dir=bh_dir,
+                computers=data.get("computers", []),
+                users=data.get("users", []),
+                workload_id=workload_id,
+                run_id=run_id,
+            )
+            # Route AD-07 context through the service-owned protocol contract.
+            _route_ad07_runtime_context(
+                bh_dir=bh_dir,
+                computers=data.get("computers", []),
+                workload_id=workload_id,
+                run_id=run_id,
+            )
+            canonical_ad22_events = _map_ad22_sidecar_events(
+                bh_dir=bh_dir,
+                workload_id=workload_id,
+                run_id=run_id,
+                attack_path_id=attack_path_id,
+            )
+            canonical_ad0608_events = _map_ad0608_sidecar_events(
+                bh_dir=bh_dir,
+                workload_id=workload_id,
+                run_id=run_id,
+                attack_path_id=attack_path_id,
+            )
 
             # Run all check functions
             checks = [
                 ("check_kerberoastable",        (data["users"], data["groups"])),
                 ("check_asrep",                 (data["users"], data["groups"])),
-                ("check_delegation",            (data["computers"], data["users"])),
                 ("check_acls",                  (data["acls"], data["groups"])),
                 ("check_dcsync_accounts_enabled", (data["users"], data["acls"])),
                 ("check_passwords_in_descriptions", (data["users"], data["computers"])),
@@ -171,6 +434,31 @@ def run_bloodhound(
                 ("check_weak_password_policy",  (data["domains"],)),
                 ("check_laps",                  (data["computers"],)),
             ]
+            if _legacy_delegation_enabled_for_path(attack_path_id):
+                log.warning(
+                    "legacy delegation branch enabled for compatibility path id %s "
+                    "(%s=1)",
+                    attack_path_id,
+                    LEGACY_DELEGATION_COMPAT_ENV,
+                )
+                checks.insert(
+                    2,
+                    ("check_delegation", (data["computers"], data["users"])),
+                )
+            elif _is_legacy_delegation_path(attack_path_id):
+                log.warning(
+                    "legacy delegation path id %s requested but compatibility mode is disabled; "
+                    "set %s=1 to re-enable compatibility branch temporarily",
+                    attack_path_id,
+                    LEGACY_DELEGATION_COMPAT_ENV,
+                )
+            else:
+                log.info(
+                    "legacy delegation branch disabled for path id %s; canonical delegation "
+                    "coverage is %s (AD-06/AD-08) and AD-07 context sidecar only",
+                    attack_path_id,
+                    CANONICAL_DELEGATION_ATTACK_PATH_ID,
+                )
 
             for fn_name, args in checks:
                 fn = getattr(mod, fn_name, None)
@@ -184,7 +472,14 @@ def run_bloodhound(
             log.warning(f"BloodHound adapter error: {exc}")
             return []
 
-        events = _read_ndjson(out_file)
+        events = _drop_legacy_ad22_events(_read_ndjson(out_file))
+        events = _drop_legacy_ad07_events(events)
+        events = _drop_legacy_delegation_slice_events(
+            events,
+            attack_path_id=attack_path_id,
+        )
+        events.extend(canonical_ad22_events)
+        events.extend(canonical_ad0608_events)
 
     return events
 
@@ -325,24 +620,36 @@ def _analyze_aprs_direct(
     events = []
 
     def _ev(wicket_id, realized, rank, confidence, detail="", source_kind="ssh_collection"):
+        try:
+            from skg_protocol.events import (
+                build_event_envelope as envelope,
+                build_precondition_payload as precondition_payload,
+            )
+        except Exception:
+            from skg.sensors import envelope, precondition_payload
+
         status = "realized" if realized is True else ("blocked" if realized is False else "unknown")
-        return {
-            "id": str(uuid.uuid4()),
-            "ts": now,
-            "type": "obs.attack.precondition",
-            "source": {"source_id": "adapter_runner.aprs_direct",
-                       "toolchain": "skg-aprs-toolchain", "version": "0.0.0"},
-            "payload": {
-                "wicket_id": wicket_id, "status": status,
-                "attack_path_id": attack_path_id, "run_id": run_id,
-                "workload_id": workload_id, "detail": detail,
-            },
-            "provenance": {
-                "evidence_rank": rank,
-                "evidence": {"source_kind": source_kind, "pointer": wicket_id,
-                             "collected_at": now, "confidence": confidence},
-            },
-        }
+        payload = precondition_payload(
+            wicket_id=wicket_id,
+            domain="aprs",
+            workload_id=workload_id,
+            status=status,
+            detail=detail,
+            attack_path_id=attack_path_id,
+        )
+        payload["run_id"] = run_id
+        return envelope(
+            event_type="obs.attack.precondition",
+            source_id="adapter_runner.aprs_direct",
+            toolchain="aprs",
+            payload=payload,
+            evidence_rank=rank,
+            source_kind=source_kind,
+            pointer=wicket_id,
+            confidence=confidence,
+            version="0.0.0",
+            ts=now,
+        )
 
     packages   = (collection.get("packages") or "").lower()
     log4j_jars = (collection.get("log4j_jars") or "")
@@ -446,57 +753,43 @@ def run_ssh_host(
     port: int = 22,
 ) -> list[dict]:
     """
-    Run the host toolchain ssh_collect adapter against a live paramiko client.
+    Compatibility bridge for legacy callers.
+
+    Canonical host runtime ownership is `skg_services.gravity.host_runtime`.
+    This shim delegates to that service wrapper and should be retired once
+    all callers import canonical services directly.
+
+    Run canonical host SSH runtime mapping against a live paramiko client.
     Returns list of envelope events.
     """
     run_id = run_id or str(uuid.uuid4())
+    try:
+        from skg_services.gravity.host_runtime import collect_ssh_session_assessment_to_file
+    except Exception as exc:
+        log.warning(f"canonical host runtime unavailable: {exc}")
+        return []
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _out = out_file or (Path(tmpdir) / "events.ndjson")
         try:
-            mod = _adapter_module("skg-host-toolchain", "ssh_collect")
-            # Emit the initial-access wickets first so partial SSH runs still
-            # preserve the fact that connectivity and authentication succeeded.
-            fn = getattr(mod, "eval_ho01_reachability", None)
-            if fn:
-                try:
-                    fn(host, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho01_reachability: {exc}")
-            fn = getattr(mod, "eval_ho02_ssh", None)
-            if fn:
-                try:
-                    fn(host, port, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho02_ssh: {exc}")
-            fn = getattr(mod, "eval_ho03_credential", None)
-            if fn:
-                try:
-                    fn(host, user, auth_type, _out, attack_path_id, run_id, workload_id)
-                except Exception as exc:
-                    log.debug(f"host eval_ho03_credential: {exc}")
-            # Call all eval_ functions directly with the live client
-            for fn_name in [
-                "eval_ho10_root", "eval_ho06_sudo", "eval_ho07_suid",
-                "eval_ho08_writable_cron", "eval_ho09_cred_in_env",
-                "eval_ho11_vuln_packages", "eval_ho12_kernel", "eval_ho13_ssh_keys",
-                "eval_ho15_docker", "eval_ho16_cloud_metadata",
-                "eval_ho23_av_edr", "eval_ho24_domain_joined",
-            ]:
-                fn = getattr(mod, fn_name, None)
-                if fn:
-                    try:
-                        fn(client, host, _out, attack_path_id, run_id, workload_id)
-                    except Exception as exc:
-                        log.debug(f"host {fn_name}: {exc}")
-
+            events = collect_ssh_session_assessment_to_file(
+                client,
+                host=host,
+                out_path=_out,
+                attack_path_id=attack_path_id,
+                run_id=run_id,
+                workload_id=workload_id,
+                username=user,
+                auth_type=auth_type,
+                port=port,
+            )
         except Exception as exc:
-            log.warning(f"host ssh_collect adapter error: {exc}")
+            log.warning(f"host ssh runtime mapping error: {exc}")
             return []
 
-        events = _read_ndjson(_out)
-
-    return events
+        if out_file is None:
+            return _read_ndjson(_out)
+        return list(events)
 
 
 # ---------------------------------------------------------------------------

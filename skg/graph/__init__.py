@@ -67,7 +67,9 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from skg.identity import parse_workload_ref
+from skg.core.assistant_contract import observation_event_admissible
+from skg.core.coupling import intra_target_table
+from skg.identity import canonical_observation_subject, parse_workload_ref
 
 log = logging.getLogger("skg.graph")
 
@@ -405,34 +407,6 @@ class WorkloadGraph:
                 f"via {relationship}: prior={prior.prior:.3f}"
             )
 
-    # Cross-domain intra-target coupling map.
-    # When domain A achieves a significant realization on a target,
-    # it elevates priors for domain B on the SAME target by this weight.
-    # The intuition: a realized web attack on a host makes host privesc
-    # more likely (attacker already has a foothold); a realized container
-    # escape makes AD lateral movement more likely (escaped to domain host).
-    # These are same-target relationships, not cross-target bond propagation.
-    INTRA_TARGET_COUPLING = {
-        # (source_domain, target_domain): coupling_weight
-        ("web",               "data_pipeline"):    0.65,
-        ("web",               "host"):             0.60,
-        ("web",               "container_escape"): 0.50,
-        ("host",              "web"):              0.45,
-        ("host",              "container_escape"): 0.70,
-        ("host",              "ad_lateral"):        0.55,
-        ("host",              "data_pipeline"):    0.40,
-        ("container_escape",  "host"):              0.75,
-        ("container_escape",  "web"):               0.45,
-        ("container_escape",  "ad_lateral"):        0.65,
-        ("ad_lateral",        "host"):              0.60,
-        ("aprs",              "host"):              0.70,
-        ("aprs",              "container_escape"): 0.50,
-        ("binary_analysis",   "host"):              0.55,
-        ("sysaudit",          "host"):              0.50,
-        ("data_pipeline",     "host"):              0.30,
-        ("data_pipeline",     "web"):               0.55,
-    }
-
     # Which wickets carry the cross-domain signal
     # When these are realized in source domain, trigger intra-target coupling
     INTRA_TARGET_TRIGGER_WICKETS = {
@@ -479,7 +453,7 @@ class WorkloadGraph:
         now = datetime.now(timezone.utc).isoformat()
         coupled = 0
 
-        for (src_d, tgt_d), coupling_weight in self.INTRA_TARGET_COUPLING.items():
+        for (src_d, tgt_d), coupling_weight in intra_target_table().items():
             if src_d != source_domain:
                 continue
 
@@ -592,22 +566,31 @@ class WorkloadGraph:
         for ev in events:
             if ev.get("type") not in ("obs.attack.precondition", "obs.substrate.node"):
                 continue
+            if not observation_event_admissible(ev):
+                continue
 
             payload = ev.get("payload", {})
             wid = payload.get("workload_id", "")
-            domain = payload.get("domain", "")
             if not wid:
                 continue
 
             meta = payload.get("host_meta", {})
 
-            ad_domain = meta.get("ad_domain", "") or domain
+            ad_domain = (
+                str(meta.get("ad_domain", "") or "").strip()
+                or str(payload.get("ad_domain", "") or "").strip()
+            )
             if ad_domain:
                 by_domain.setdefault(ad_domain, [])
                 if wid not in by_domain[ad_domain]:
                     by_domain[ad_domain].append(wid)
 
-            ip = meta.get("hostname", "") or wid.split("::")[-1]
+            subject = canonical_observation_subject(payload)
+            ip = (
+                str(meta.get("hostname", "") or "").strip()
+                or str(subject.get("target_ip", "") or "").strip()
+                or str(subject.get("identity_key", "") or "").strip()
+            )
             parts = ip.split(".")
             if len(parts) == 4:
                 subnet = ".".join(parts[:3])

@@ -162,7 +162,7 @@ class OllamaBackend:
         """Load resonance.ollama config from SKG config if available."""
         try:
             import yaml
-            from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME
+            from skg_core.config.paths import SKG_CONFIG_DIR, SKG_HOME
 
             candidates = [
                 SKG_CONFIG_DIR / "skg_config.yaml",
@@ -325,7 +325,7 @@ class OllamaBackend:
         Override the active model. Persists to SKG state so the
         training system can swap in a fine-tuned model after a run.
         """
-        from skg.core.paths import SKG_STATE_DIR
+        from skg_core.config.paths import SKG_STATE_DIR
         self._model = model_tag
         model_override_file = SKG_STATE_DIR / "training" / "active_model.txt"
         model_override_file.parent.mkdir(parents=True, exist_ok=True)
@@ -335,7 +335,7 @@ class OllamaBackend:
     def load_model_override() -> str | None:
         """Load trainer model override if present."""
         try:
-            from skg.core.paths import SKG_STATE_DIR
+            from skg_core.config.paths import SKG_STATE_DIR
             f = SKG_STATE_DIR / "training" / "active_model.txt"
             if f.exists():
                 tag = f.read_text().strip()

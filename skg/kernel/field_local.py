@@ -26,6 +26,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from skg.core.coupling import coupling_value
+
 from .support import SupportContribution
 
 
@@ -56,37 +58,6 @@ from .support import SupportContribution
 #
 #   Reverse-direction lookups (domain_j, domain_i) are computed with a 0.8×
 #   discount by coupling_constant() below — structure flows downstream.
-_COUPLING_TABLE: Dict[Tuple[str, str], float] = {
-    # ── host / SMB / vuln chain (EternalBlue coupling) ─────────────────────
-    ("host", "host"):       0.80,   # reachability → lateral host coupling
-    ("host", "smb"):        0.80,   # host reachable → SMB visible (§7)
-    ("smb", "vuln"):        0.90,   # SMB exposed → vuln confirmed (§7)
-    ("host", "vuln"):       0.85,   # host reachable → vuln context
-
-    # ── credential coupling (K_cred; §3.2) ─────────────────────────────────
-    ("credential", "host"): 0.95,   # cred → SSH auth: direct precondition
-    ("credential", "ssh"):  0.95,
-    ("credential", "web"):  0.80,   # cred → web auth: strong but not entailed
-
-    # ── web / CMDI / data chain (DVWA coupling) ─────────────────────────────
-    ("web", "data"):        0.85,   # SQLi → DB access (K_web_sqli_db; §3.2)
-    ("web", "cmdi"):        0.90,   # CMDI → OS command execution
-    ("cmdi", "shell"):      0.90,   # shell is the direct consequence of CMDI
-
-    # ── host ↔ data / container / lateral ───────────────────────────────────
-    ("host", "data"):       0.70,
-    ("container", "host"):  0.85,   # container escape → host access
-    ("host", "container"):  0.60,   # host presence → container discovery
-    ("host", "lateral"):    0.80,   # host foothold → lateral movement
-    ("lateral", "host"):    0.70,   # lateral pivot lands on new host
-    ("data", "lateral"):    0.65,   # exfil path → lateral data pivot
-    ("web", "lateral"):     0.55,   # weak: web vuln enables lateral in some chains
-
-    # ── binary / host ────────────────────────────────────────────────────────
-    ("host", "binary"):     0.60,   # binary analysis follows host access
-    ("binary", "host"):     0.60,   # binary vuln enables host escalation
-}
-
 # Decoherence criterion thresholds (Paper 4 Section 5)
 _DECOHERENCE_CRITERION = {
     "compatibility_score_min": 0.70,   # C ≥ 0.7
@@ -99,15 +70,10 @@ _DECOHERENCE_CRITERION = {
 def coupling_constant(domain_i: str, domain_j: str) -> float:
     """
     Return K(L_i, L_j) for the given domain pair.
-    Tries both orderings; falls back to a default of 0.10.
+    Reads the active config-backed coupling table and applies reverse-direction
+    discounting when only the opposite edge is defined.
     """
-    k = _COUPLING_TABLE.get((domain_i, domain_j))
-    if k is not None:
-        return k
-    k = _COUPLING_TABLE.get((domain_j, domain_i))
-    if k is not None:
-        return k * 0.8  # reverse direction has slightly weaker coupling
-    return 0.10
+    return coupling_value(domain_i, domain_j, table="inter_local")
 
 
 @dataclass
@@ -269,7 +235,7 @@ class FieldLocal:
 # ---------------------------------------------------------------------------
 
 def build_field_locals(
-    workload_id: str,
+    node_key: str,
     states_detail: Dict[str, dict],
     domain_wickets: Dict[str, set],
 ) -> List[FieldLocal]:
@@ -277,8 +243,8 @@ def build_field_locals(
     Construct one FieldLocal per domain from kernel states_with_detail() output.
 
     Args:
-        workload_id:    Target IP or identifier.
-        states_detail:  Output of KernelStateEngine.states_with_detail(workload_id).
+        node_key:       Stable identity anchor (identity_key) for the node.
+        states_detail:  Output of KernelStateEngine.states_with_detail(node_key).
         domain_wickets: {domain: set of wicket_ids} from load_all_wicket_ids().
 
     Returns:
@@ -308,8 +274,8 @@ def build_field_locals(
 
     return [
         FieldLocal(
-            local_id=f"{workload_id}::{domain}",
-            workload_id=workload_id,
+            local_id=f"{node_key}::{domain}",
+            workload_id=node_key,
             domain=domain,
             wicket_states=wicket_states,
         )
@@ -345,21 +311,9 @@ def field_functional(locals_: List[FieldLocal]) -> float:
     Proposition 1 (Boundedness): L(F) ≥ 0.
     Proposition 3 (Monotone Reduction): new observations reduce L(F).
     """
-    # Σ_i E_self(L_i)
-    total_self = sum(loc.E_self for loc in locals_)
+    from .field_functional import field_functional as _canonical_field_functional
 
-    # Σ_{i<j} E_couple(L_i, L_j)
-    total_coupling = 0.0
-    for i, li in enumerate(locals_):
-        for lj in locals_[i + 1:]:
-            k = coupling_constant(li.domain, lj.domain)
-            if k > 0.0:
-                total_coupling += li.coupling_energy(lj, k)
-
-    # D(F) = total dissipation
-    total_dissipation = sum(loc.decoherence_load() for loc in locals_)
-
-    return total_self + total_coupling + total_dissipation
+    return _canonical_field_functional(locals_)
 
 
 def phi_fiber(
@@ -383,40 +337,11 @@ def phi_fiber(
         locals_:               FieldLocals for the primary target.
         other_locals:          FieldLocals for coupled targets (cross-target coupling).
     """
-    wave_set = set(instrument_wavelength)
-    cost = max(instrument_cost, 1e-9)
+    from .field_functional import phi_fiber as _canonical_phi_fiber
 
-    # Build wicket → local index
-    wicket_to_local: Dict[str, FieldLocal] = {}
-    all_locals = list(locals_) + list(other_locals or [])
-    for loc in all_locals:
-        for wid in loc.wicket_states:
-            wicket_to_local[wid] = loc
-
-    # Determine which locals the instrument can reach (W(I) ∩ local ≠ ∅)
-    reachable_locals: set[str] = set()
-    for wid in wave_set:
-        if wid in wicket_to_local:
-            reachable_locals.add(wicket_to_local[wid].local_id)
-
-    reachable_set = [loc for loc in all_locals if loc.local_id in reachable_locals]
-
-    # Term 1: Fiber tension — Σ tension(F_ν) × coherence(F_ν) × 𝟙[W∩F≠∅]
-    phi_tension = sum(loc.tension_times_coherence() for loc in reachable_set)
-
-    # Term 2: Coupling opportunity — Σ K(·,L_j) × U_m(L_j) × 𝟙[W∩L_j≠∅]
-    phi_couple = 0.0
-    for loc_i in all_locals:
-        if loc_i.local_id in reachable_locals:
-            continue  # already directly reachable — no coupling bonus needed
-        # Check if any reachable local has coupling into loc_i
-        for loc_r in reachable_set:
-            k = coupling_constant(loc_r.domain, loc_i.domain)
-            if k > 0.0:
-                phi_couple += k * loc_i.U_m
-                break  # count each unreachable local once
-
-    # Term 3: Decoherence load — Σ D(L_i) × 𝟙[W∩L_i≠∅]
-    phi_decoherence = sum(loc.decoherence_load() for loc in reachable_set)
-
-    return (phi_tension + phi_couple + phi_decoherence) / cost
+    return _canonical_phi_fiber(
+        instrument_wavelength,
+        instrument_cost,
+        locals_,
+        other_locals=other_locals,
+    )

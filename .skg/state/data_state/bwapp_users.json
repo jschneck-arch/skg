@@ -1,0 +1,11 @@
+{
+  "schema_fingerprint": {
+    "users": "id,login,password,email,secret,activation_code,activated,reset_code,admin"
+  },
+  "null_counts": {
+    "users.id": 0,
+    "users.login": 0,
+    "users.password": 0,
+    "users.email": 0
+  }
+}

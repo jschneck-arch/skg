@@ -7,6 +7,7 @@ Three types, each backed by a JSONL file and a FAISS index.
 WicketMemory   — a single atomic precondition extracted from any catalog
 AdapterMemory  — an adapter's evidence sources and wickets covered
 DomainMemory   — a full domain's shape: paths, wicket count, attack surface
+CorpusMemory   — local free-text knowledge chunks (pearls/help/man/code)
 """
 
 from __future__ import annotations
@@ -108,9 +109,52 @@ class DomainMemory:
         return f"{domain}: {description} Attack paths: {paths}"
 
 
+@dataclass
+class CorpusMemory:
+    """
+    Local free-text memory chunk.
+    This is the retrieval surface for local docs/man/help/code/pearls.
+    """
+    record_id: str
+    source_kind: str      # pearl | help | man | code | doc
+    source_ref: str       # path/command/reference
+    title: str
+    text: str
+    tags: list[str]
+    domain: str
+    embed_text: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CorpusMemory":
+        return cls(**d)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @staticmethod
+    def make_embed_text(
+        source_kind: str,
+        source_ref: str,
+        title: str,
+        text: str,
+        tags: list[str],
+        domain: str = "",
+    ) -> str:
+        tag_text = ", ".join(tags or [])
+        return (
+            f"{source_kind} {source_ref} {title}. "
+            f"Domain: {domain}. Tags: {tag_text}. "
+            f"Content: {text}"
+        )
+
+
 # Registry of record types for generic serialization
 RECORD_TYPES = {
     "wicket":  WicketMemory,
     "adapter": AdapterMemory,
     "domain":  DomainMemory,
+    "corpus":  CorpusMemory,
 }

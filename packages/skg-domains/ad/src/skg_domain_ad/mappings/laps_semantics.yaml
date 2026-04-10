@@ -1,0 +1,12 @@
+laps_semantics:
+  explicit_presence_keys:
+    - haslaps
+    - has_laps
+  domain_controller_keys:
+    - isdc
+    - isDomainController
+    - is_domain_controller
+  password_attribute_keys:
+    - ms-Mcs-AdmPwd
+    - ms-mcs-admpwd
+    - msLAPS-Password

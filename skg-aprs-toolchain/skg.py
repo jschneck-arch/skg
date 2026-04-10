@@ -47,7 +47,7 @@ def main():
     pa.add_argument("--in", dest="infile", required=True)
     pa.add_argument("--out", dest="outfile", required=True)
     pa.add_argument("--attack-path-id", default="log4j_jndi_rce_v1")
-    pa.add_argument("--catalog", default="contracts/catalogs/attack_preconditions_catalog.v1.json")
+    pa.add_argument("--catalog", default="contracts/catalogs/attack_preconditions_catalog.aprs.v1.json")
     pa.add_argument("--run-id", default=None)
     pa.add_argument("--workload-id", default=None)
     pi = sub.add_parser("ingest")

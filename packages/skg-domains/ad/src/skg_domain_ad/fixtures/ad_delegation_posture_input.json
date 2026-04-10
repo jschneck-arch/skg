@@ -1,0 +1,70 @@
+{
+  "schema": "skg.ad.delegation_input.v1",
+  "slice": "ad06_ad08_delegation_posture_core_input",
+  "source_kind": "bloodhound.delegation",
+  "workload_id": "ad::contoso.local",
+  "run_id": "run-ad-delegation-fixture",
+  "observed_at": "2026-04-03T00:00:00+00:00",
+  "wicket_ids": [
+    "AD-06",
+    "AD-08"
+  ],
+  "principal_rows": [
+    {
+      "name": "WS01.CONTOSO.LOCAL",
+      "object_id": "C-WS01",
+      "enabled": true,
+      "is_domain_controller": false,
+      "unconstrained_delegation": true,
+      "trusted_to_auth_for_delegation": false,
+      "allowed_to_delegate": []
+    },
+    {
+      "name": "APP01$",
+      "object_id": "U-APP01",
+      "enabled": true,
+      "is_domain_controller": false,
+      "unconstrained_delegation": false,
+      "trusted_to_auth_for_delegation": true,
+      "allowed_to_delegate": [
+        "ldap/DC01.CONTOSO.LOCAL"
+      ]
+    }
+  ],
+  "unconstrained_non_dc_hosts": [
+    {
+      "name": "WS01.CONTOSO.LOCAL",
+      "object_id": "C-WS01"
+    }
+  ],
+  "protocol_transition_principals": [
+    {
+      "name": "APP01$",
+      "object_id": "U-APP01",
+      "allowed_to_delegate": [
+        "ldap/DC01.CONTOSO.LOCAL"
+      ]
+    }
+  ],
+  "delegation_spn_edges": [
+    {
+      "account": "APP01$",
+      "object_id": "U-APP01",
+      "spn": "ldap/DC01.CONTOSO.LOCAL",
+      "service": "ldap",
+      "target": "dc01.contoso.local"
+    }
+  ],
+  "summary": {
+    "status": "realized",
+    "principal_count": 2,
+    "unconstrained_non_dc_count": 1,
+    "protocol_transition_count": 1,
+    "delegation_spn_edge_count": 1
+  },
+  "deferred_coupling": {
+    "ad07_context_deferred": true,
+    "ad09_sensitive_target_deferred": true,
+    "path_value_reasoning_deferred": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "test",
+  "description": "test description",
+  "drafted_at": "20260408T031509",
+  "status": "awaiting_response",
+  "prompt_path": "/opt/skg/.skg/state/resonance/drafts/prompt_test_20260408T031509.txt",
+  "context_used": {
+    "wickets_surfaced": 4,
+    "adapters_surfaced": 4,
+    "domains_surfaced": 4
+  }
+}

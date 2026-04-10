@@ -1,0 +1,86 @@
+attack_paths:
+  host_cloud_credential_imds_v1:
+    description: Retrieve cloud IAM credentials from the instance metadata service.
+    references:
+    - https://attack.mitre.org/techniques/T1552/005/
+    required_wickets:
+    - HO-03
+    - HO-16
+  host_container_escape_docker_v1:
+    description: Escape container environment via Docker socket access on host.
+    references:
+    - https://attack.mitre.org/techniques/T1611/
+    required_wickets:
+    - HO-03
+    - HO-15
+  host_credential_access_env_v1:
+    description: Harvest credentials from environment variables, shell history, or
+      config files.
+    references:
+    - https://attack.mitre.org/techniques/T1552/001/
+    - https://attack.mitre.org/techniques/T1552/007/
+    required_wickets:
+    - HO-03
+    - HO-09
+  host_lateral_ssh_key_v1:
+    description: Move laterally using an SSH private key found on the compromised
+      host.
+    references:
+    - https://attack.mitre.org/techniques/T1021/004/
+    required_wickets:
+    - HO-03
+    - HO-13
+  host_linux_privesc_kernel_v1:
+    description: Escalate to root via a known kernel LPE vulnerability.
+    references:
+    - https://attack.mitre.org/techniques/T1068/
+    required_wickets:
+    - HO-03
+    - HO-12
+  host_linux_privesc_sudo_v1:
+    description: Escalate from low-privilege user to root via misconfigured sudo.
+    references:
+    - https://attack.mitre.org/techniques/T1548/003/
+    required_wickets:
+    - HO-03
+    - HO-06
+  host_linux_privesc_suid_v1:
+    description: Escalate to root via abuse of a SUID binary (e.g. vim, find, python).
+    references:
+    - https://attack.mitre.org/techniques/T1548/001/
+    required_wickets:
+    - HO-03
+    - HO-07
+  host_msf_post_exploitation_v1:
+    description: 'Full post-exploitation capability via active Metasploit session:
+      dump creds, pivot, persist.'
+    references:
+    - https://attack.mitre.org/techniques/T1059/
+    - https://attack.mitre.org/techniques/T1003/
+    required_wickets:
+    - HO-17
+  host_network_exploit_v1:
+    description: Exploit a network-exposed service running a vulnerable version (e.g.
+      EternalBlue, Log4Shell, BlueKeep).
+    references:
+    - https://attack.mitre.org/techniques/T1190/
+    required_wickets:
+    - HO-01
+    - HO-25
+  host_ssh_initial_access_v1:
+    description: Gain initial foothold via SSH with a harvested or default credential.
+    references:
+    - https://attack.mitre.org/techniques/T1078/
+    - https://attack.mitre.org/techniques/T1021/004/
+    required_wickets:
+    - HO-01
+    - HO-02
+    - HO-03
+  host_winrm_initial_access_v1:
+    description: Gain initial foothold on a Windows host via WinRM with a valid credential.
+    references:
+    - https://attack.mitre.org/techniques/T1021/006/
+    required_wickets:
+    - HO-01
+    - HO-04
+    - HO-05

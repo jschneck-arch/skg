@@ -65,9 +65,151 @@ SERVICE_PORT_DOMAINS: dict[int, list[str]] = {
 
 AI_SPECULATIVE_PORTS = [11434, 6333, 8888, 7860, 5001, 4000, 6006]
 
+GRAVITY_DOMAIN_ALIASES = {
+    "binary": "binary_analysis",
+    "data": "data_pipeline",
+}
+
 
 def _service_name_tokens(service: dict[str, Any]) -> str:
     return (service.get("name") or service.get("service") or "").lower()
+
+
+def _gravity_domain(domain: str) -> str:
+    raw = str(domain or "").strip()
+    return GRAVITY_DOMAIN_ALIASES.get(raw, raw)
+
+
+def summarize_view_nodes(view_nodes: Iterable[dict[str, Any]], *, identity_key: str) -> dict[str, Any]:
+    summary = {
+        "identity_key": identity_key,
+        "view_count": 0,
+        "measured_domains": [],
+        "measured_unknowns": 0.0,
+        "measured_realized": 0,
+        "measured_blocked": 0,
+        "memory_pearl_count": 0,
+        "memory_reinforced_wickets": [],
+        "observed_tools": {
+            "tool_names": [],
+            "observed_tools": [],
+            "domain_hints": [],
+            "instrument_hints": [],
+            "scope": "node_local",
+            "status": "unknown",
+            "observed_at": "",
+            "nse_available": False,
+            "nse_script_count": 0,
+        },
+        "view_nodes": [],
+    }
+    if not identity_key:
+        return summary
+
+    domains: set[str] = set()
+    reinforced: set[str] = set()
+    memory_pearl_count = 0
+    measured_unknowns = 0.0
+    measured_realized = 0
+    measured_blocked = 0
+    matched: list[dict[str, Any]] = []
+    tool_names: set[str] = set()
+    tool_domain_hints: set[str] = set()
+    tool_instrument_hints: set[str] = set()
+    observed_tools: dict[str, dict[str, Any]] = {}
+    observed_tool_status = "unknown"
+    observed_tool_scope = "node_local"
+    observed_tool_at = ""
+    nse_available = False
+    nse_script_count = 0
+
+    for row in view_nodes or []:
+        if str(row.get("identity_key") or "") != identity_key:
+            continue
+        matched.append(dict(row))
+        summary["view_count"] += 1
+        domain = _gravity_domain(str(row.get("domain") or ""))
+        if domain:
+            domains.add(domain)
+        measured = dict(row.get("measured_now") or {})
+        measured_unknowns += float(len(measured.get("unknown") or []))
+        measured_realized += len(measured.get("realized") or [])
+        measured_blocked += len(measured.get("blocked") or [])
+        overlay = dict(row.get("memory_overlay") or {})
+        memory_pearl_count += int(overlay.get("pearl_count", 0) or 0)
+        reinforced.update(str(wid) for wid in (overlay.get("reinforced_wickets") or []) if wid)
+        tool_overlay = dict(row.get("observed_tools") or measured.get("observed_tools") or {})
+        for tool_name in tool_overlay.get("tool_names") or []:
+            text = str(tool_name or "").strip()
+            if text:
+                tool_names.add(text)
+        for domain_hint in tool_overlay.get("domain_hints") or []:
+            text = _gravity_domain(str(domain_hint or "").strip())
+            if text:
+                tool_domain_hints.add(text)
+        for inst_hint in tool_overlay.get("instrument_hints") or []:
+            text = str(inst_hint or "").strip()
+            if text:
+                tool_instrument_hints.add(text)
+        for tool in tool_overlay.get("observed_tools") or []:
+            if not isinstance(tool, dict):
+                continue
+            name = str(tool.get("name") or "").strip()
+            if not name:
+                continue
+            current = dict(observed_tools.get(name) or {})
+            merged = dict(tool)
+            merged["name"] = name
+            merged["instrument_names"] = sorted({
+                str(item or "").strip()
+                for item in (list(current.get("instrument_names") or []) + list(tool.get("instrument_names") or []))
+                if str(item or "").strip()
+            })
+            merged["domain_hints"] = sorted({
+                _gravity_domain(str(item or "").strip())
+                for item in (list(current.get("domain_hints") or []) + list(tool.get("domain_hints") or []))
+                if str(item or "").strip()
+            })
+            if bool(current.get("nse_available")) or bool(tool.get("nse_available")):
+                merged["nse_available"] = True
+            merged["nse_script_count"] = max(
+                int(current.get("nse_script_count", 0) or 0),
+                int(tool.get("nse_script_count", 0) or 0),
+            )
+            observed_tools[name] = merged
+            if merged.get("nse_available"):
+                nse_available = True
+            nse_script_count = max(nse_script_count, int(merged.get("nse_script_count", 0) or 0))
+        observed_at = str(tool_overlay.get("observed_at") or "").strip()
+        if observed_at and observed_at > observed_tool_at:
+            observed_tool_at = observed_at
+        if tool_overlay.get("status") == "realized":
+            observed_tool_status = "realized"
+        elif observed_tool_status != "realized" and tool_overlay.get("status") == "blocked":
+            observed_tool_status = "blocked"
+        scope = str(tool_overlay.get("scope") or "").strip()
+        if scope:
+            observed_tool_scope = scope
+
+    summary["measured_domains"] = sorted(domains)
+    summary["measured_unknowns"] = round(measured_unknowns, 4)
+    summary["measured_realized"] = measured_realized
+    summary["measured_blocked"] = measured_blocked
+    summary["memory_pearl_count"] = memory_pearl_count
+    summary["memory_reinforced_wickets"] = sorted(reinforced)
+    summary["observed_tools"] = {
+        "tool_names": sorted(tool_names),
+        "observed_tools": [observed_tools[name] for name in sorted(observed_tools)],
+        "domain_hints": sorted(tool_domain_hints),
+        "instrument_hints": sorted(tool_instrument_hints),
+        "scope": observed_tool_scope,
+        "status": observed_tool_status,
+        "observed_at": observed_tool_at,
+        "nse_available": nse_available,
+        "nse_script_count": nse_script_count,
+    }
+    summary["view_nodes"] = matched
+    return summary
 
 
 def _probe_ai_ports(ip: str, ports: Iterable[int]) -> bool:
@@ -94,10 +236,21 @@ def derive_effective_domains(
     *,
     ip: str,
     discovery_dir: Path | str,
+    view_state: dict[str, Any] | None = None,
     probe_ai: bool = True,
     ai_port_probe=None,
 ) -> set[str]:
-    effective_domains = set(target.get("domains", []))
+    view_state = dict(view_state or {})
+    effective_domains = {
+        _gravity_domain(domain)
+        for domain in (view_state.get("measured_domains") or [])
+        if str(domain or "").strip()
+    }
+    effective_domains.update(
+        _gravity_domain(domain)
+        for domain in (target.get("domains", []) or [])
+        if str(domain or "").strip()
+    )
     for service in target.get("services", []):
         port = service.get("port")
         service_name = _service_name_tokens(service)
@@ -151,9 +304,10 @@ def apply_first_contact_floor(
     applicable: set[str],
     domain_wickets: dict[str, set[str]],
     discovery_dir: Path | str,
+    has_measured_view: bool = False,
 ) -> tuple[float, set[str], bool]:
     has_prior_nmap = bool(glob.glob(str(Path(discovery_dir) / f"gravity_nmap_{ip}_*.ndjson")))
-    if has_prior_nmap:
+    if has_prior_nmap or has_measured_view:
         return entropy, set(applicable), False
 
     adjusted_entropy = max(float(entropy or 0.0), 25.0)

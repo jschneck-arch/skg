@@ -714,8 +714,8 @@ def main():
         timeout=t)
     collection["http_error_page"] = _run(
         ssh,
-        "curl -sI --max-time 5 "
-        "http://127.0.0.1/skg_nonexistent_probe_$(date +%s) 2>/dev/null | head -15",
+        "curl -s --max-time 5 "
+        "http://127.0.0.1/skg_nonexistent_probe_$(date +%s) 2>/dev/null | head -30",
         timeout=t)
     collection["http_methods"] = _run(
         ssh,

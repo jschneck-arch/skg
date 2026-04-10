@@ -1,0 +1,7 @@
+privileged_group_aliases:
+  - domain admins
+  - enterprise admins
+  - schema admins
+  - administrators
+  - backup operators
+  - account operators

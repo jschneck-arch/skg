@@ -10,7 +10,7 @@ from skg.cli.utils import (
     DISCOVERY_DIR, SKG_HOME, SKG_STATE_DIR,
 )
 import json
-from skg.core.paths import IDENTITY_FILE
+from skg_services.gravity.path_policy import IDENTITY_FILE
 
 
 def cmd_start(a):

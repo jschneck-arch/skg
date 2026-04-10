@@ -1,0 +1,28 @@
+wickets:
+  WB-05:
+    confidence: 0.82
+    patterns:
+      - admin
+      - manager
+      - console
+      - login
+      - dashboard
+      - cpanel
+      - phpmyadmin
+  WB-08:
+    confidence: 0.9
+    patterns:
+      - "\\.git(?:/|$)"
+  WB-09:
+    confidence: 0.88
+    patterns:
+      - "\\.env(?:$|\\.)"
+      - "config\\.(php|ya?ml|json)$"
+      - "backup\\.(zip|sql|tar|gz)$"
+  WB-07:
+    confidence: 0.8
+    patterns:
+      - server-status
+      - server-info
+      - actuator
+      - debug

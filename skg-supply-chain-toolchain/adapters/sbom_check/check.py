@@ -105,11 +105,26 @@ VULNERABLE_PACKAGES: dict[str, list[dict]] = {
         {"package": "Pillow", "below": "6.2.2", "cve": "CVE-2020-5310",
          "description": "Pillow integer overflow"},
     ],
+    # SC-10: cryptography_high_vuln_present — weak/vulnerable crypto library
     "SC-10": [
-        {"package": "requests", "below": "2.20.0", "cve": "CVE-2018-18074",
-         "description": "Requests credential exposure via redirect"},
-        {"package": "urllib3", "below": "1.24.2", "cve": "CVE-2019-11324",
-         "description": "urllib3 SSL certificate validation bypass"},
+        {"package": "cryptography", "below": "41.0.4", "cve": "CVE-2023-49083",
+         "description": "cryptography NULL ptr dereference in PKCS12 parsing"},
+        {"package": "pyOpenSSL", "below": "23.2.0", "cve": "CVE-2023-49083",
+         "description": "pyOpenSSL NULL ptr dereference via cryptography dep"},
+    ],
+    # SC-11: pillow_high_vuln_present — CVE-2019-16865 (< 6.2.0)
+    "SC-11": [
+        {"package": "pillow", "below": "6.2.0", "cve": "CVE-2019-16865",
+         "description": "Pillow uncontrolled resource consumption via specially crafted file"},
+        {"package": "Pillow", "below": "6.2.0", "cve": "CVE-2019-16865",
+         "description": "Pillow uncontrolled resource consumption via specially crafted file"},
+    ],
+    # SC-12: pillow_out_of_bounds_read_exploitable — CVE-2020-5313 (< 6.2.3)
+    "SC-12": [
+        {"package": "pillow", "below": "6.2.3", "cve": "CVE-2020-5313",
+         "description": "Pillow out-of-bounds read via FLI format file"},
+        {"package": "Pillow", "below": "6.2.3", "cve": "CVE-2020-5313",
+         "description": "Pillow out-of-bounds read via FLI format file"},
     ],
 }
 

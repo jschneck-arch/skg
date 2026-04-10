@@ -4,6 +4,7 @@ from .landscape import (
     applicable_wickets_for_domains,
     apply_first_contact_floor,
     derive_effective_domains,
+    summarize_view_nodes,
     summarize_applicable_states,
 )
 from .runtime import (
@@ -11,7 +12,11 @@ from .runtime import (
     emit_follow_on_proposals,
     execute_triggered_proposals,
 )
-from .selection import choose_instruments_for_target, rank_instruments_for_target
+from .selection import (
+    choose_instruments_for_target,
+    rank_instruments_for_node,
+    rank_instruments_for_target,  # compat alias
+)
 
 __all__ = [
     "GravityFailureReporter",
@@ -19,10 +24,12 @@ __all__ = [
     "applicable_wickets_for_domains",
     "apply_first_contact_floor",
     "derive_effective_domains",
+    "summarize_view_nodes",
     "summarize_applicable_states",
     "emit_auxiliary_proposals",
     "emit_follow_on_proposals",
     "execute_triggered_proposals",
     "choose_instruments_for_target",
+    "rank_instruments_for_node",
     "rank_instruments_for_target",
 ]

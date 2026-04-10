@@ -1,0 +1,10 @@
+{
+  "schema_fingerprint": {
+    "heroes": "id,login,password,secret"
+  },
+  "null_counts": {
+    "heroes.id": 0,
+    "heroes.login": 0,
+    "heroes.secret": 0
+  }
+}

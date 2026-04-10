@@ -41,7 +41,7 @@ def cmd_check(_a):
         ("fastapi", True), ("uvicorn", True), ("pydantic", True),
         ("yaml", True), ("paramiko", True), ("requests", True),
         ("numpy", False), ("faiss", False),
-        ("sentence_transformers", False), ("pywinrm", False),
+        ("sentence_transformers", False), ("winrm", False),
         ("pymetasploit3", False),
     ]:
         try:

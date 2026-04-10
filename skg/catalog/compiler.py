@@ -227,7 +227,7 @@ def compile_file(yaml_path: Path, out_dir: Path | None = None) -> Path:
         out_dir = yaml_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     domain   = catalog.get("domain", yaml_path.stem)
-    out_path = out_dir / f"attack_preconditions_catalog.v1.{domain}.json"
+    out_path = out_dir / f"attack_preconditions_catalog.{domain}.v1.json"
     out_path.write_text(json.dumps(catalog, indent=2))
     return out_path
 

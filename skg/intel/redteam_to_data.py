@@ -31,8 +31,7 @@ Usage:
     python redteam_to_data.py --events-dir /var/lib/skg/events \\
                                --out /var/lib/skg/discovery/data_from_redteam.ndjson
 
-    # Or via the CLI:
-    skg data redteam --out-dir /var/lib/skg/discovery/
+    # Or pass --out-dir to write into the discovery directory directly.
 """
 from __future__ import annotations
 
@@ -414,8 +413,14 @@ def report(derived_events: list[dict]) -> dict:
         status = p["status"]
         by_workload[wkl][status].append(wid)
 
-    from skg.substrate.projection import project_path
-    from skg.substrate.node import NodeState, TriState
+    try:
+        from skg_core.substrate.node import NodeState, TriState
+        from skg_core.substrate.path import Path as SKGPath
+        from skg_core.substrate.projection import project_path
+    except Exception:
+        from skg.substrate.node import NodeState, TriState
+        from skg.substrate.path import Path as SKGPath
+        from skg.substrate.projection import project_path
 
     catalog_path = Path(__file__).parent.parent / \
         "skg-data-toolchain/contracts/catalogs/" \
@@ -458,7 +463,6 @@ def report(derived_events: list[dict]) -> dict:
                 node_states[wid] = NodeState.unknown(wid)
 
             for path_id, path_def in catalog.get("attack_paths", {}).items():
-                from skg.substrate.path import Path as SKGPath
                 req = path_def.get("required_wickets", [])
                 if not req:
                     continue

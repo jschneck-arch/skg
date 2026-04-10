@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import subprocess
@@ -9,6 +10,21 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
+
+from skg.identity import canonical_observation_subject
+try:
+    from skg_protocol.events import (
+        build_event_envelope as _protocol_build_event_envelope,
+        build_precondition_payload as _protocol_build_precondition_payload,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    _protocol_build_event_envelope = None
+    _protocol_build_precondition_payload = None
+
+try:
+    from skg_services.gravity.event_writer import emit_events as _service_emit_events
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    _service_emit_events = None
 
 log = logging.getLogger("skg.sensors")
 
@@ -34,7 +50,27 @@ def register(name: str):
 
 
 def available_sensors() -> list[str]:
-    return list(_SENSOR_REGISTRY.keys())
+    return sorted(_SENSOR_REGISTRY.keys())
+
+
+def _sensor_module_names() -> list[str]:
+    sensors_dir = Path(__file__).resolve().parent
+    return [
+        f"skg.sensors.{module_path.stem}"
+        for module_path in sorted(sensors_dir.glob("*_sensor.py"))
+        if module_path.name != "__init__.py"
+    ]
+
+
+def _import_sensor_modules() -> list[str]:
+    imported = []
+    for module_name in _sensor_module_names():
+        try:
+            importlib.import_module(module_name)
+            imported.append(module_name)
+        except Exception as exc:
+            log.warning(f"Sensor module '{module_name}' failed to import: {exc}")
+    return imported
 
 
 def _safe_condition_id(wicket_id: str | None = None, node_id: str | None = None) -> str:
@@ -78,6 +114,24 @@ def envelope(
     - old callers can ignore all richer fields
     - newer callers can pass optional substrate hints
     """
+    if _protocol_build_event_envelope is not None:
+        return _protocol_build_event_envelope(
+            event_type=event_type,
+            source_id=source_id,
+            toolchain=toolchain,
+            payload=payload,
+            evidence_rank=evidence_rank,
+            source_kind=source_kind,
+            pointer=pointer,
+            confidence=confidence,
+            version=version,
+            ts=ts,
+            confidence_vector=confidence_vector,
+            local_energy=local_energy,
+            phase=phase,
+            is_latent=is_latent,
+        )
+
     now = ts or datetime.now(timezone.utc).isoformat()
 
     evidence = {
@@ -125,6 +179,7 @@ def precondition_payload(
     detail: str = "",
     attack_path_id: str = "",
     node_id: str | None = None,
+    target_ip: str = "",
 ) -> dict:
     """
     Standard payload for obs.attack.precondition events.
@@ -133,7 +188,25 @@ def precondition_payload(
 
     Backward compatible with wicket_id while also carrying node_id alias.
     """
+    if _protocol_build_precondition_payload is not None:
+        return _protocol_build_precondition_payload(
+            wicket_id=wicket_id,
+            label=label,
+            domain=domain,
+            workload_id=workload_id,
+            realized=realized,
+            status=status,
+            detail=detail,
+            attack_path_id=attack_path_id,
+            node_id=node_id,
+            target_ip=target_ip,
+        )
+
     condition_id = _safe_condition_id(wicket_id=wicket_id, node_id=node_id)
+    subject = canonical_observation_subject(
+        workload_id=workload_id,
+        target_ip=target_ip,
+    )
 
     if status is None:
         if realized is True:
@@ -143,7 +216,7 @@ def precondition_payload(
         else:
             status = "unknown"
 
-    return {
+    payload = {
         "wicket_id": condition_id,
         "node_id": condition_id,
         "label": label,
@@ -154,6 +227,13 @@ def precondition_payload(
         "detail": detail,
         "attack_path_id": attack_path_id,
     }
+    if subject["identity_key"] and subject["identity_key"] != "unknown":
+        payload["identity_key"] = subject["identity_key"]
+    if subject["manifestation_key"] and subject["manifestation_key"] != "unknown":
+        payload["manifestation_key"] = subject["manifestation_key"]
+    if subject["target_ip"]:
+        payload["target_ip"] = subject["target_ip"]
+    return payload
 
 
 # ── Base sensor ──────────────────────────────────────────────────────────────
@@ -168,7 +248,7 @@ class BaseSensor(ABC):
         if events_dir:
             self.events_dir = events_dir
         else:
-            from skg.core.paths import EVENTS_DIR
+            from skg_core.config.paths import EVENTS_DIR
             self.events_dir = EVENTS_DIR
 
         self.events_dir.mkdir(parents=True, exist_ok=True)
@@ -266,14 +346,14 @@ def collect_host(
         "targets": [target],
         "timeout_s": 30,
         "collect_interval_s": 0,
+        "run_id": run_id,
     }
 
     try:
         sensor = SshSensor(sensor_cfg, events_dir=events_dir)
-        sensor._force_collect = True
         ids = sensor.run()
         log.info(f"collect_host: {host} → {len(ids)} events (run {run_id})")
-        return True
+        return bool(ids)
     except Exception as exc:
         log.error(f"collect_host failed for {host}: {exc}", exc_info=True)
         return False
@@ -362,6 +442,8 @@ class SensorLoop:
         self._graph = graph
         self._obs_memory = obs_memory
         self._feedback = feedback
+        self._sweep_lock = threading.Lock()
+        self._active_run_id: str = ""
         self._load_sensors()
 
     def _load_sensors(self):
@@ -369,10 +451,7 @@ class SensorLoop:
         self._cfg = _load_skg_config(self._config_dir)
         sensor_cfg = self._cfg.get("sensors", {})
 
-        from skg.sensors import (  # noqa: F401
-            usb_sensor, ssh_sensor, msf_sensor, cve_sensor, agent_sensor,
-            bloodhound_sensor, web_sensor, net_sensor, data_sensor
-        )
+        _import_sensor_modules()
 
         enabled = sensor_cfg.get("enabled", list(_SENSOR_REGISTRY.keys()))
         self._sensors = []
@@ -397,52 +476,60 @@ class SensorLoop:
 
     def _sweep(self, run_id: str):
         """Run all sensors once, optionally project, then run feedback loop."""
-        log.info(f"[SensorLoop] sweep start (run={run_id})")
-        total = 0
-
-        for s in self._sensors:
-            try:
-                ids = s.run()
-                total += len(ids)
-            except Exception as exc:
-                log.error(f"Sensor {s.name} error: {exc}", exc_info=True)
-
-        self._last_run = datetime.now(timezone.utc).isoformat()
-        self._run_count += 1
-        log.info(f"[SensorLoop] sweep done: {total} events (run={run_id})")
-
-        if self._auto_project and total > 0:
-            self._auto_project_all(run_id)
+        with self._sweep_lock:
+            self._active_run_id = run_id
+            log.info(f"[SensorLoop] sweep start (run={run_id})")
+            total = 0
 
             try:
-                from skg.forge.pipeline import run_forge_pipeline
-                resonance = getattr(self, "_resonance", None)
-                forge_summary = run_forge_pipeline(
-                    events_dir=self._events_dir,
-                    resonance_engine=resonance,
-                )
-                if forge_summary.get("proposed", 0) > 0:
-                    log.info(
-                        f"[SensorLoop] forge: {forge_summary['proposed']} new proposal(s) — "
-                        f"run 'skg proposals list' to review"
-                    )
-            except Exception as _fe:
-                log.debug(f"[SensorLoop] forge pipeline error: {_fe}")
+                for s in self._sensors:
+                    try:
+                        ids = s.run()
+                        total += len(ids)
+                    except Exception as exc:
+                        log.error(f"Sensor {s.name} error: {exc}", exc_info=True)
 
-        if self._feedback is not None:
-            try:
-                fb_result = self._feedback.process_new_interps()
-                if fb_result["transitions"] > 0:
-                    log.info(
-                        f"[SensorLoop] feedback: {fb_result['transitions']} transitions, "
-                        f"{fb_result['propagations']} propagated (run={run_id})"
-                    )
-            except Exception as exc:
-                log.error(f"Feedback loop error: {exc}", exc_info=True)
+                self._last_run = datetime.now(timezone.utc).isoformat()
+                self._run_count += 1
+                log.info(f"[SensorLoop] sweep done: {total} events (run={run_id})")
+
+                if self._auto_project and total > 0:
+                    self._auto_project_all(run_id)
+
+                    try:
+                        from skg.forge.pipeline import run_forge_pipeline
+                        resonance = getattr(self, "_resonance", None)
+                        forge_summary = run_forge_pipeline(
+                            events_dir=self._events_dir,
+                            resonance_engine=resonance,
+                        )
+                        if forge_summary.get("proposed", 0) > 0:
+                            log.info(
+                                f"[SensorLoop] forge: {forge_summary['proposed']} new proposal(s) — "
+                                f"run 'skg proposals list' to review"
+                            )
+                    except Exception as _fe:
+                        log.debug(f"[SensorLoop] forge pipeline error: {_fe}")
+
+                if self._feedback is not None:
+                    try:
+                        fb_result = self._feedback.process_new_interps()
+                        if fb_result["transitions"] > 0:
+                            log.info(
+                                f"[SensorLoop] feedback: {fb_result['transitions']} transitions, "
+                                f"{fb_result['propagations']} propagated (run={run_id})"
+                            )
+                    except Exception as exc:
+                        log.error(f"Feedback loop error: {exc}", exc_info=True)
+            finally:
+                self._active_run_id = ""
 
     def _auto_project_all(self, run_id: str):
         """Project all event files from this run across all toolchains."""
-        from skg.sensors.projector import project_events_dir
+        from skg_services.gravity.projector_runtime import (
+            project_event_file,
+            project_events_dir,
+        )
 
         outputs = project_events_dir(
             self._events_dir, self._interp_dir,
@@ -451,8 +538,6 @@ class SensorLoop:
         if outputs:
             log.info(f"[SensorLoop] projected {len(outputs)} workload+path pairs (run={run_id})")
         else:
-            from skg.sensors.projector import project_event_file
-
             count = 0
             for ev_file in sorted(self._events_dir.glob("*.ndjson"))[-20:]:
                 results = project_event_file(ev_file, self._interp_dir, run_id)
@@ -488,6 +573,8 @@ class SensorLoop:
     def trigger(self) -> str:
         """Run one immediate sweep outside of the polling loop. Returns run_id."""
         run_id = str(uuid.uuid4())[:8]
+        if self._sweep_lock.locked():
+            log.info(f"[SensorLoop] trigger queued behind active sweep (next run={run_id})")
         t = threading.Thread(
             target=self._sweep, args=(run_id,), name="skg-sensor-trigger", daemon=True
         )
@@ -503,6 +590,8 @@ class SensorLoop:
             "sensor_count": len(self._sensors),
             "run_count": self._run_count,
             "last_run": self._last_run,
+            "sweep_in_progress": bool(self._active_run_id),
+            "active_run_id": self._active_run_id,
         }
 
 
@@ -520,29 +609,45 @@ def inject_context(sensors: list, graph, obs_memory) -> None:
     log.info(f"SensorContext injected into {len(sensors)} sensors")
 
 
-def emit_events(events: list[dict], events_dir, source_tag: str = "sensor") -> list[str]:
+def emit_events(
+    events: list[dict],
+    events_dir,
+    source_tag: str = "sensor",
+    run_id: str | None = None,
+) -> list[str]:
     """
     Write a list of pre-built envelope events to EVENTS_DIR.
     Returns list of event IDs written.
     Used by sensors that get events from adapter_runner.
+
+    When run_id is supplied the filename includes it as a suffix so callers
+    can glob for *_{run_id}.ndjson to locate this file later.
     """
-    import uuid as _uuid
-    from datetime import datetime, timezone as _tz
+    if _service_emit_events is not None:
+        return _service_emit_events(
+            events=events,
+            events_dir=events_dir,
+            source_tag=source_tag,
+            run_id=run_id,
+        )
 
     if events_dir is None:
         return []
 
     events_dir = Path(events_dir)
     events_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(_tz.utc).strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     tag = source_tag.replace("/", "_").replace(":", "_")[:40]
-    out_path = events_dir / f"{ts}_{tag}.ndjson"
+    if run_id:
+        out_path = events_dir / f"{ts}_{tag}_{run_id}.ndjson"
+    else:
+        out_path = events_dir / f"{ts}_{tag}.ndjson"
     ids = []
 
     with out_path.open("a") as fh:
         for ev in events:
             if "id" not in ev:
-                ev["id"] = str(_uuid.uuid4())
+                ev["id"] = str(uuid.uuid4())
             fh.write(json.dumps(ev) + "\n")
             ids.append(ev["id"])
 

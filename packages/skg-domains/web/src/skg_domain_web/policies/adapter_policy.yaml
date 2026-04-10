@@ -1,0 +1,10 @@
+realized_status_codes:
+  - 200
+  - 301
+  - 302
+  - 403
+reachable_wicket: WB-01
+fallback_admin_wicket: WB-05
+fallback_admin_on_http_200: true
+reachable_confidence: 0.9
+minimum_confidence: 0.65

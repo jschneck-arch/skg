@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from skg.core.assistant_contract import observation_event_admissible
+
 log = logging.getLogger("skg.topology.manifold")
 
 
@@ -240,6 +242,8 @@ def enrich_from_events(sc: SimplicialComplex,
                 continue
 
             if ev.get("type") not in ("obs.attack.precondition", "obs.substrate.node"):
+                continue
+            if not observation_event_admissible(ev):
                 continue
 
             p = ev.get("payload", {})

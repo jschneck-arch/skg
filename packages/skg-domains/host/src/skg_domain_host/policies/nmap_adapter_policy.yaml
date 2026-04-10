@@ -1,0 +1,9 @@
+source_kind: nmap_scan
+evidence_rank: 4
+default_confidence: 0.85
+exploit_confidence: 0.75
+unknown_exploit_confidence: 0.4
+pointer_prefix: nmap://
+reachable_wicket_id: HO-01
+exploit_wicket_id: HO-25
+emit_unknown_exploit_when_no_hits: true

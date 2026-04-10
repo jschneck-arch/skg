@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from skg.core.paths import DISCOVERY_DIR, EVENTS_DIR, SKG_CONFIG_DIR, SKG_HOME, SKG_STATE_DIR
+from skg.identity import canonical_observation_subject, parse_workload_ref
 
 log = logging.getLogger("skg.gravity.cred_reuse")
 
@@ -76,6 +77,38 @@ def _config_file(name: str) -> Path:
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _canonical_identity(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return str(parse_workload_ref(text).get("identity_key") or text).strip()
+
+
+def _identity_aliases(*values: str) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        aliases.add(text)
+        parsed = parse_workload_ref(text)
+        for candidate in (
+            parsed.get("identity_key"),
+            parsed.get("host"),
+            parsed.get("locator"),
+            parsed.get("manifestation_key"),
+        ):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                aliases.add(candidate_text)
+    return aliases
+
+
+def _safe_subject_token(value: str) -> str:
+    text = str(value or "").strip() or "subject"
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
 
 
 # ── Credential Store ────────────────────────────────────────────────────────
@@ -129,6 +162,9 @@ class CredentialStore:
             if r.get("user") == user and r.get("secret") == secret:
                 return None
 
+        origin_identity = _canonical_identity(origin_ip)
+        tested_on = [origin_identity or origin_ip] if (origin_identity or origin_ip) else []
+
         record = {
             "id":             str(uuid.uuid4())[:12],
             "source":         source,
@@ -136,21 +172,26 @@ class CredentialStore:
             "user":           user,
             "secret":         secret,
             "origin_ip":      origin_ip,
+            "origin_identity": origin_identity or origin_ip,
             "origin_wicket":  origin_wicket,
-            "tested_on":      [origin_ip],   # no need to retest where it was found
+            "tested_on":      tested_on,   # no need to retest where it was found
             "found_at":       _iso_now(),
         }
         self._records.append(record)
         self._append(record)
-        log.info(f"[cred_store] +credential user={user} from {origin_ip} ({origin_wicket})")
+        log.info(f"[cred_store] +credential user={user} from {origin_identity or origin_ip} ({origin_wicket})")
         return record
 
     def mark_tested(self, cred_id: str, target_ip: str) -> None:
         """Record that a credential was tested against target_ip."""
+        target_identity = _canonical_identity(target_ip) or str(target_ip or "").strip()
         for r in self._records:
             if r["id"] == cred_id:
-                if target_ip not in r.get("tested_on", []):
-                    r.setdefault("tested_on", []).append(target_ip)
+                tested_aliases = set()
+                for seen in r.get("tested_on", []):
+                    tested_aliases.update(_identity_aliases(str(seen or "")))
+                if target_identity and target_identity not in tested_aliases:
+                    r.setdefault("tested_on", []).append(target_identity)
                 # Rewrite entire store (small file, safe)
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with self._path.open("w") as fh:
@@ -160,8 +201,17 @@ class CredentialStore:
 
     def untested_for(self, target_ip: str) -> list[dict]:
         """Return credentials not yet tested against target_ip."""
-        return [r for r in self._records
-                if target_ip not in r.get("tested_on", [])]
+        target_aliases = _identity_aliases(target_ip)
+        if not target_aliases:
+            return list(self._records)
+        pending = []
+        for record in self._records:
+            tested_aliases = set()
+            for seen in record.get("tested_on", []):
+                tested_aliases.update(_identity_aliases(str(seen or "")))
+            if not (tested_aliases & target_aliases):
+                pending.append(record)
+        return pending
 
     def all(self) -> list[dict]:
         return list(self._records)
@@ -209,10 +259,9 @@ def extract_from_events(events_dir: Path, store: CredentialStore | None = None) 
             wicket_id = payload.get("wicket_id", "")
             status = payload.get("status", "")
             detail = str(payload.get("detail", ""))
-            target_ip = (
+            target_ip = _canonical_identity(
                 payload.get("target_ip")
-                or payload.get("workload_id", "").split("::")[-1]
-                or ""
+                or payload.get("workload_id", "")
             )
 
             if status != "realized":
@@ -460,6 +509,11 @@ def test_http_credential(url: str, user: str, password: str,
 def _make_reuse_event(wicket_id: str, status: str, detail: str,
                       target_ip: str, workload_id: str,
                       run_id: str, confidence: float) -> dict:
+    subject = canonical_observation_subject(
+        {"workload_id": workload_id, "target_ip": target_ip},
+        workload_id=workload_id,
+        target_ip=target_ip,
+    )
     return {
         "id":   str(uuid.uuid4()),
         "ts":   _iso_now(),
@@ -476,6 +530,8 @@ def _make_reuse_event(wicket_id: str, status: str, detail: str,
             "workload_id":    workload_id,
             "run_id":         run_id,
             "target_ip":      target_ip,
+            "identity_key":   subject.get("identity_key", ""),
+            "manifestation_key": subject.get("manifestation_key", ""),
             "detail":         detail,
         },
         "provenance": {
@@ -537,10 +593,11 @@ def run_reuse_sweep(
              f"(SSH ports: {ssh_ports}, Web ports: {web_ports})")
 
     run_id = str(uuid.uuid4())[:8]
-    workload_id = f"cred_reuse::{target_ip}"
+    subject_identity = _canonical_identity(target_ip) or str(target_ip or "").strip()
+    workload_id = f"cred_reuse::{subject_identity or target_ip}"
     emitted: list[dict] = []
     out_dir.mkdir(parents=True, exist_ok=True)
-    events_file = out_dir / f"cred_reuse_{target_ip.replace('.', '_')}_{run_id}.ndjson"
+    events_file = out_dir / f"cred_reuse_{_safe_subject_token(subject_identity or target_ip)}_{run_id}.ndjson"
 
     for cred in untested:
         user = cred["user"]
@@ -629,6 +686,8 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
         from skg.assistant.action_proposals import create_action_proposal
+        subject_identity = _canonical_identity(target_ip) or str(target_ip or "").strip()
+        subject_label = _safe_subject_token(subject_identity or target_ip)
 
         if service_type == "ssh":
             wicket_hint = "HO-03"
@@ -654,6 +713,7 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
             artifact_content={
                 "plan_type": "cred_reuse_v1",
                 "service_type": service_type,
+                "identity_key": subject_identity,
                 "target_ip": target_ip,
                 "port": str(port),
                 "user": user,
@@ -663,16 +723,18 @@ def _emit_cred_proposal(target_ip: str, port: int, user: str, secret: str,
                 "wicket_hint": wicket_hint,
                 "command_hint": command_hint,
             },
-            filename_hint=f"cred_reuse_{service_type}_{target_ip.replace('.', '_')}_{port}.json",
+            filename_hint=f"cred_reuse_{service_type}_{subject_label}_{port}.json",
             out_dir=None,
             domain="cred_reuse",
             description=description,
             attack_surface=f"{target_ip}:{port}",
-            hosts=[target_ip],
+            hosts=[subject_identity or target_ip],
             category="credential_test",
             evidence=f"Credential confirmed on {origin_ip}, untested on {target_ip}",
             action={
                 "instrument":   instrument,
+                "identity_key": subject_identity,
+                "execution_target": target_ip,
                 "target_ip":    target_ip,
                 "port":         port,
                 "user":         user,

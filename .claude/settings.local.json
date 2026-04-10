@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nmap:*)",
+      "Bash(python3:*)",
+      "Bash(/opt/skg/bin/skg exploit:*)",
+      "Bash(/opt/skg/bin/skg proposals:*)",
+      "Bash(find /var/lib/skg/msf_audit -name *d811b60e*)",
+      "Bash(/opt/skg/bin/skg engage:*)",
+      "Bash(skg engage:*)",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0, ''''/opt/skg''''\\); from skg.core.daemon import INTERP_DIR; print\\(INTERP_DIR\\)\")",
+      "Bash(ping -c 1 -W 2 192.168.122.143)",
+      "Bash(curl -s --max-time 5 http://192.168.122.143:5985/wsman -o /dev/null -w \"%{http_code}\")",
+      "Bash(for f:*)",
+      "Bash(do)",
+      "Bash(echo \"OK: $f\")",
+      "Bash(echo \"FAIL: $f\")",
+      "Bash(done)"
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "computers": [
+    {
+      "Properties": {
+        "name": "WS01.CONTOSO.LOCAL",
+        "enabled": true,
+        "isdc": false,
+        "haslaps": false
+      }
+    },
+    {
+      "Properties": {
+        "name": "WS02.CONTOSO.LOCAL",
+        "enabled": true,
+        "isdc": false,
+        "haslaps": true
+      }
+    },
+    {
+      "Properties": {
+        "name": "WS03.CONTOSO.LOCAL",
+        "enabled": true,
+        "isdc": false,
+        "ms-Mcs-AdmPwd": "REDACTED"
+      }
+    },
+    {
+      "attributes": {
+        "dNSHostName": "WS04.CONTOSO.LOCAL",
+        "enabled": true,
+        "isdc": false,
+        "msLAPS-Password": null
+      }
+    },
+    {
+      "Properties": {
+        "name": "DC01.CONTOSO.LOCAL",
+        "enabled": true,
+        "isdc": true,
+        "haslaps": false
+      }
+    }
+  ]
+}

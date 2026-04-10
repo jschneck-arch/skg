@@ -536,7 +536,7 @@ def reset_pool():
 def _load_pool_config() -> dict:
     try:
         import yaml
-        from skg.core.paths import SKG_CONFIG_DIR, SKG_HOME
+        from skg_core.config.paths import SKG_CONFIG_DIR, SKG_HOME
         candidates = [
             SKG_CONFIG_DIR / "skg_config.yaml",
             SKG_HOME / "config" / "skg_config.yaml",

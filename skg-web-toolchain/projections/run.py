@@ -18,7 +18,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 
-CATALOG_PATH = Path(__file__).resolve().parents[1] / "contracts" / "catalogs" / "web_attack_preconditions_catalog.v1.json"
+CATALOG_PATH = Path(__file__).resolve().parents[1] / "contracts" / "catalogs" / "attack_preconditions_catalog.web.v1.json"
 
 
 def load_catalog() -> dict:
@@ -167,6 +167,8 @@ def latest(interp_path: str, attack_path_id: str, workload_id: str = None):
             except json.JSONDecodeError:
                 continue
             if rec.get("attack_path_id") == attack_path_id:
+                if workload_id and rec.get("workload_id") != workload_id:
+                    continue
                 latest_interp = rec
 
     if latest_interp:

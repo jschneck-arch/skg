@@ -12,3 +12,8 @@ from typing import Any, Callable, Optional
 
 _all_targets_index: Optional[Callable[[], list[dict[str, Any]]]] = None
 _identity_world:    Optional[Callable[[str, Optional[dict]], dict[str, Any]]] = None
+
+# Set to True only while the daemon event-loop is actively running.
+# topology/energy.py checks this to skip expensive per-target lookups
+# when executing as a one-shot gravity cycle rather than the daemon.
+_daemon_loop_running: bool = False

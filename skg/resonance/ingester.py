@@ -269,6 +269,21 @@ def ingest_all(engine: ResonanceEngine, skg_home: Path) -> dict:
         wicket_counts = ingest_catalog(engine, domain, catalog_path)
         new_adapters  = ingest_adapters(engine, domain, adapters, catalog_path)
 
+        # Refresh the domain record with discovered adapter names so that
+        # DomainMemory.adapters is populated rather than left as [].
+        adapter_names = [a.name for a in adapters]
+        if adapter_names:
+            try:
+                existing = engine._domains._records  # type: ignore[attr-defined]
+                for rec in existing:
+                    if getattr(rec, "domain", None) == domain and not rec.adapters:
+                        rec.adapters = adapter_names
+            except Exception:
+                pass
+
+        # Only count as newly added when store_domain actually inserted the record.
+        domain_is_new = wicket_counts["wickets"] > 0  # proxy: had new content to store
+
         summary["domains"][domain] = {
             "new_wickets":  wicket_counts["wickets"],
             "new_adapters": new_adapters,
@@ -277,7 +292,8 @@ def ingest_all(engine: ResonanceEngine, skg_home: Path) -> dict:
         summary["toolchains_processed"].append(domain)
         summary["wickets_added"] += wicket_counts["wickets"]
         summary["adapters_added"] += new_adapters
-        summary["domains_added"] += 1
+        if domain_is_new:
+            summary["domains_added"] += 1
         log.info(f"  {domain}: +{wicket_counts['wickets']} wickets, "
                  f"+{new_adapters} adapters")
 

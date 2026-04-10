@@ -22,7 +22,29 @@ ATTACK_PATH_ALIASES = {
 }
 
 
+_WEB_TO_WB = {
+    "WEB-01": "WB-01",  # target reachable → web_reachable
+    "WEB-02": "WB-11",  # tls in use → tls_weak_or_missing (inverted: blocked=present)
+    "WEB-03": "WB-11",  # self-signed → tls_weak_or_missing
+    "WEB-04": "WB-05",  # admin interface → admin_interface_exposed
+    "WEB-05": "WB-10",  # default credentials → default_credentials
+    "WEB-06": "WB-09",  # sensitive path → env_file_exposed (best match)
+    "WEB-07": "WB-07",  # api/actuator → debug_endpoint_exposed
+    "WEB-08": "WB-12",  # cors wildcard → cors_wildcard
+    "WEB-09": "WB-04",  # missing headers → security_headers_absent
+    "WEB-10": "WB-03",  # tech identified → stack_leaked
+    "WEB-11": "WB-02",  # version string → server_version_leaked
+    "WEB-12": "WB-38",  # credentials in body → credentials_in_config
+    "WEB-13": "WB-17",  # directory listing → sensitive_path_exposed
+    "WEB-14": "WB-16",  # onion service → onion_service_active
+}
+
+
 def _normalize_required_wicket(wicket_id: str) -> str:
+    if wicket_id in _WEB_TO_WB:
+        return _WEB_TO_WB[wicket_id]
+    if wicket_id.startswith("WEB-"):
+        return "WB-" + wicket_id[4:]
     if wicket_id.startswith("W-"):
         return "WB-" + wicket_id.split("-", 1)[1]
     return wicket_id

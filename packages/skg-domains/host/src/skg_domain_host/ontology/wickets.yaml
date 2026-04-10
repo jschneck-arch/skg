@@ -1,0 +1,124 @@
+wickets:
+  HO-01:
+    decay_class: ephemeral
+    description: Target host responds to network probes; collection or exploitation
+      is feasible.
+    label: host_reachable_and_responsive
+  HO-02:
+    decay_class: ephemeral
+    description: SSH service is listening on a reachable port.
+    label: ssh_service_exposed
+  HO-03:
+    decay_class: operational
+    description: A valid SSH credential (key or password) for a user account is available.
+    label: ssh_credential_valid
+  HO-04:
+    decay_class: ephemeral
+    description: WinRM (5985/5986) is listening and accessible.
+    label: winrm_service_exposed
+  HO-05:
+    decay_class: operational
+    description: A valid WinRM credential is available for the target.
+    label: winrm_credential_valid
+  HO-06:
+    decay_class: operational
+    description: sudoers grants NOPASSWD or wildcard exec for non-root user.
+    label: sudo_misconfigured
+  HO-07:
+    decay_class: operational
+    description: A SUID binary that can be abused for privilege escalation exists
+      on the filesystem.
+    label: suid_binary_present
+  HO-08:
+    decay_class: operational
+    description: A cron job, systemd unit, or service executable is world-writable
+      or writable by a low-privilege user.
+    label: world_writable_cron_or_service
+  HO-09:
+    decay_class: ephemeral
+    description: A credential, token, or secret is present in environment variables,
+      shell history, or config files.
+    label: credential_in_environment
+  HO-10:
+    decay_class: operational
+    description: The collected user account has root/Administrator-level privileges
+      on the host.
+    label: user_is_local_admin_or_root
+  HO-11:
+    decay_class: ephemeral
+    description: An installed package has a known CVE with public exploit code.
+    label: vulnerable_package_installed
+  HO-12:
+    decay_class: operational
+    description: Kernel version is below a patch threshold that fixes known LPE CVEs.
+    label: unpatched_kernel
+  HO-13:
+    decay_class: ephemeral
+    description: An SSH private key readable by the current user exists in ~/.ssh
+      or accessible paths.
+    label: ssh_private_key_accessible
+  HO-14:
+    decay_class: operational
+    description: An authorized_keys file on the host or an upstream host is writable.
+    label: writable_authorized_keys
+  HO-15:
+    decay_class: ephemeral
+    description: Docker or another container runtime is installed and the current
+      user can interact with it.
+    label: container_runtime_present
+  HO-16:
+    decay_class: ephemeral
+    description: Instance metadata service (169.254.169.254 or IMDSv2) is reachable
+      and returns credentials.
+    label: cloud_metadata_reachable
+  HO-17:
+    decay_class: ephemeral
+    description: An active Metasploit session exists for this host.
+    label: msf_session_active
+  HO-18:
+    decay_class: operational
+    description: Metasploit has harvested a credential (hash, plaintext, or token)
+      for this host.
+    label: msf_credential_harvested
+  HO-19:
+    decay_class: ephemeral
+    description: SMB (445/139) is listening on the host.
+    label: smb_service_exposed
+  HO-20:
+    decay_class: ephemeral
+    description: RDP (3389) is listening on the host.
+    label: rdp_service_exposed
+  HO-21:
+    decay_class: operational
+    description: NFS exports are present and accessible without authentication.
+    label: nfs_share_world_readable
+  HO-22:
+    decay_class: operational
+    description: The same credential found on this host is likely valid on other hosts
+      in the environment.
+    label: password_reuse_likely
+  HO-23:
+    decay_class: ephemeral
+    description: No endpoint detection/response agent or antivirus is running, or
+      a known-bypassable version is present.
+    label: av_edr_absent_or_weak
+  HO-24:
+    decay_class: operational
+    description: Host is domain-joined, enabling Kerberos ticket acquisition for lateral
+      movement.
+    label: host_in_domain
+  HO-25:
+    decay_class: ephemeral
+    description: An nmap-identified open port is running a service version with a
+      known exploitable CVE.
+    label: open_port_running_exploitable_service
+  HO-26:
+    decay_class: operational
+    description: "SMB null/anonymous session permitted \u2014 unauthenticated share\
+      \ listing or enumeration is possible."
+    label: smb_null_session_allowed
+  HO-27:
+    decay_class: operational
+    description: Sensitive or credential-bearing files are readable on SMB shares
+      without authentication.
+    label: smb_sensitive_files_accessible

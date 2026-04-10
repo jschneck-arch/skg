@@ -142,6 +142,132 @@
       "evidence_hint": "HTTP 200/403 on /script or /scriptText",
       "default_rank": 1,
       "decay_class": "ephemeral"
+    },
+    "WB-21": {
+      "label": "webshell_present",
+      "description": "Web shell or backdoor script accessible on the server",
+      "evidence_hint": "HTTP 200 on /shell.php, /c99.php, cmd.php with command output",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "WB-22": {
+      "label": "ssti_injectable",
+      "description": "Server-side template injection detected — template expression evaluated in response",
+      "evidence_hint": "Expression like {{7*7}} returns 49, or Jinja2/Twig/Freemarker eval",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "WB-23": {
+      "label": "unauth_api_endpoint",
+      "description": "Unauthenticated API endpoint accessible without credentials",
+      "evidence_hint": "HTTP 200 on /api/v1/*, /rest/*, /graphql without auth header",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-24": {
+      "label": "robots_path_disclosure",
+      "description": "robots.txt or sitemap.xml discloses hidden paths or restricted areas",
+      "evidence_hint": "Disallow: entries in robots.txt or sitemap paths pointing to admin/internal areas",
+      "default_rank": 3,
+      "decay_class": "ephemeral"
+    },
+    "WB-30": {
+      "label": "exposed_api_schema",
+      "description": "OpenAPI/Swagger schema accessible without authentication",
+      "evidence_hint": "HTTP 200 on /openapi.json, /swagger.json, /api-docs",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-31": {
+      "label": "config_endpoint_exposed",
+      "description": "Configuration file (config.json/yaml, settings.json) accessible",
+      "evidence_hint": "HTTP 200 on /config.json, /config.yaml, /settings.json",
+      "default_rank": 1,
+      "decay_class": "ephemeral"
+    },
+    "WB-32": {
+      "label": "debug_endpoint_accessible",
+      "description": "Debug or actuator endpoint exposing environment variables or configuration",
+      "evidence_hint": "HTTP 200 on /debug/vars, /actuator/env, /actuator/configprops",
+      "default_rank": 1,
+      "decay_class": "ephemeral"
+    },
+    "WB-33": {
+      "label": "health_endpoint_exposed",
+      "description": "Health or status endpoint leaks version or internal service information",
+      "evidence_hint": "HTTP 200 on /health, /api/v1/health, /actuator/health",
+      "default_rank": 3,
+      "decay_class": "ephemeral"
+    },
+    "WB-34": {
+      "label": "metrics_exposed",
+      "description": "Prometheus or Spring metrics endpoint accessible without authentication",
+      "evidence_hint": "HTTP 200 on /metrics, /actuator/metrics with metric names",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-35": {
+      "label": "xmlrpc_exposed",
+      "description": "XML-RPC endpoint active and responding (brute-force or SSRF risk)",
+      "evidence_hint": "HTTP 200 on /xmlrpc.php, /xmlrpc with XML method response",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-36": {
+      "label": "security_txt_present",
+      "description": "/.well-known/security.txt present — discloses contacts and scope",
+      "evidence_hint": "HTTP 200 on /.well-known/security.txt",
+      "default_rank": 4,
+      "decay_class": "ephemeral"
+    },
+    "WB-37": {
+      "label": "version_disclosed_structured",
+      "description": "Version string present in structured JSON/XML endpoint response",
+      "evidence_hint": "version/ver/release key in JSON response body or XML version field",
+      "default_rank": 3,
+      "decay_class": "ephemeral"
+    },
+    "WB-38": {
+      "label": "credentials_in_config",
+      "description": "Sensitive key (password/secret/token/key) found in accessible config endpoint",
+      "evidence_hint": "password=, secret=, token=, api_key= patterns in /config.json or similar",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "WB-39": {
+      "label": "internal_ip_disclosed",
+      "description": "Private IP address present in structured endpoint response",
+      "evidence_hint": "10.x.x.x, 192.168.x.x, 172.16-31.x.x in JSON/XML body",
+      "default_rank": 3,
+      "decay_class": "ephemeral"
+    },
+    "WB-40": {
+      "label": "jsonl_event_stream_exposed",
+      "description": "JSONL event stream accessible without authentication",
+      "evidence_hint": "HTTP 200 on /events, /stream, /api/events returning newline-delimited JSON",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-41": {
+      "label": "sqli_injectable",
+      "description": "SQL injection vulnerability confirmed in web application parameter or form field",
+      "evidence_hint": "SQL error pattern, boolean-based, or time-based injection response differential",
+      "default_rank": 1,
+      "decay_class": "operational"
+    },
+    "WB-42": {
+      "label": "xss_injectable",
+      "description": "Cross-site scripting (XSS) vulnerability confirmed — user input reflected unescaped",
+      "evidence_hint": "Script tag or canary string reflected verbatim in response body",
+      "default_rank": 2,
+      "decay_class": "ephemeral"
+    },
+    "WB-43": {
+      "label": "cmdi_injectable",
+      "description": "OS command injection confirmed — shell command output present in response or timing delay detected",
+      "evidence_hint": "uid= in response body, or response time delta >3s on sleep payload",
+      "default_rank": 1,
+      "decay_class": "operational"
     }
   },
   "attack_paths": {
@@ -178,6 +304,74 @@
       "required_wickets": [
         "WB-01",
         "WB-13"
+      ],
+      "ordered": false
+    },
+    "web_sqli_to_shell_v1": {
+      "label": "Web SQLi to Shell",
+      "description": "SQL injection confirmed — escalate to OS command execution via INTO OUTFILE or UDF",
+      "required_wickets": [
+        "WB-01",
+        "WB-09",
+        "WB-10"
+      ],
+      "ordered": false,
+      "references": ["https://attack.mitre.org/techniques/T1190/"]
+    },
+    "web_full_chain_v1": {
+      "label": "Web Full Chain (SQLi)",
+      "description": "Alias for web_sqli_to_shell_v1 — full exploitation chain via SQL injection",
+      "required_wickets": [
+        "WB-01",
+        "WB-09",
+        "WB-10"
+      ],
+      "ordered": false
+    },
+    "web_cmdi_to_shell_v1": {
+      "label": "Web CMDi to Shell",
+      "description": "Command injection confirmed — execute reverse shell payload",
+      "required_wickets": [
+        "WB-01",
+        "WB-07"
+      ],
+      "ordered": false,
+      "references": ["https://attack.mitre.org/techniques/T1059/"]
+    },
+    "web_ssti_to_rce_v1": {
+      "label": "Web SSTI to RCE",
+      "description": "Server-side template injection confirmed — craft template payload for remote code execution",
+      "required_wickets": [
+        "WB-01",
+        "WB-22"
+      ],
+      "ordered": false,
+      "references": ["https://attack.mitre.org/techniques/T1190/"]
+    },
+    "web_default_creds_to_admin_v1": {
+      "label": "Web Default Credentials to Admin",
+      "description": "Default credentials accepted — gain admin access and deploy webshell",
+      "required_wickets": [
+        "WB-01",
+        "WB-10"
+      ],
+      "ordered": false,
+      "references": ["https://attack.mitre.org/techniques/T1078/"]
+    },
+    "web_struct_fetch_v1": {
+      "label": "Web Structured Endpoint Analysis",
+      "description": "Structured endpoint exposure — config/API/debug endpoints accessible without auth",
+      "required_wickets": [
+        "WB-01",
+        "WB-30"
+      ],
+      "ordered": false
+    },
+    "web_surface_v1": {
+      "label": "Web Surface Enumeration",
+      "description": "Web target reachable and enumerable — sufficient surface for attack planning",
+      "required_wickets": [
+        "WB-01"
       ],
       "ordered": false
     }

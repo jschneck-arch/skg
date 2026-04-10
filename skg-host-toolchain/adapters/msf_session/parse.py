@@ -182,7 +182,8 @@ def process_sessions(sessions: list[dict], out_path: Path,
 
     for sess in sessions:
         target = sess.get("target_host") or sess.get("tunnel_peer", "").split(":")[0] or default_wid
-        wid = target
+        # Normalize to host::{ip} so identity joins with CLI and daemon paths.
+        wid = f"host::{target}" if target and "::" not in target else target
 
         emit(out_path, "HO-17", "realized", 1, "msf_session", pointer, 0.99,
              attack_path_id, run_id, wid,
@@ -211,10 +212,11 @@ def process_creds(creds: list[dict], out_path: Path,
     if not creds:
         return
 
-    # Group by host
+    # Group by host, normalizing to host::{ip} identity shape.
     by_host: dict[str, list] = {}
     for c in creds:
-        h = c.get("host") or default_wid
+        raw = c.get("host") or default_wid
+        h = f"host::{raw}" if raw and "::" not in raw else raw
         by_host.setdefault(h, []).append(c)
 
     for host, host_creds in by_host.items():
@@ -245,7 +247,8 @@ def process_loot(loot_items: list[dict], out_path: Path,
 
     by_host: dict[str, list] = {}
     for item in loot_items:
-        h = item.get("host") or default_wid
+        raw = item.get("host") or default_wid
+        h = f"host::{raw}" if raw and "::" not in raw else raw
         by_host.setdefault(h, []).append(item)
 
     for host, items in by_host.items():
@@ -276,10 +279,11 @@ def process_hosts(hosts: list[dict], out_path: Path,
                   attack_path_id: str, run_id: str, pointer: str):
     for h in hosts:
         ip = h.get("address", "unknown")
+        wid = f"host::{ip}" if ip and "::" not in ip else ip
         os_name = (h.get("os_name", "") + " " + h.get("os_flavor", "")).strip().lower()
 
         emit(out_path, "HO-01", "realized", 4, "msf_hosts_db", pointer, 0.8,
-             attack_path_id, run_id, ip,
+             attack_path_id, run_id, wid,
              f"MSF database entry for {ip} — os: {os_name or 'unknown'}",
              {"os": os_name, "purpose": h.get("purpose", "")})
 

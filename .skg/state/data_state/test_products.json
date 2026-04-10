@@ -1,0 +1,5 @@
+{
+  "schema_fingerprint": {
+    "products": "category,name,price,product_id,stock"
+  }
+}

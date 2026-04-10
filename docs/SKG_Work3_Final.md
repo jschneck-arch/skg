@@ -155,6 +155,8 @@ The gravity web discovers these relationships from observation:
 
 Bonds are discovered, not declared. The operator adds targets to the field. The web emerges from what the instruments observe about those targets.
 
+Runtime note, March 2026: the live `WorkloadGraph` vocabulary has since shifted to `same_identity` (0.85), `credential_overlap` (0.45), `same_domain` (0.35), and `same_subnet` (0.20) for propagation, while manual graph links are also exposed for operator overrides. The list above is the original Work 3 presentation, not the current runtime weight table.
+
 ### 6.2 Prior Propagation
 
 When node n is realized on target A, and A is bonded to target B with coupling strength s, the prior influence on node n for target B is:

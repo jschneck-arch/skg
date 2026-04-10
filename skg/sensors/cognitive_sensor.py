@@ -76,8 +76,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from skg.sensors import BaseSensor, register, emit_events
-from skg.core.paths import SKG_STATE_DIR, SKG_CONFIG_DIR
+from skg.sensors import BaseSensor, register
+from skg_core.config.paths import SKG_STATE_DIR, SKG_CONFIG_DIR
+try:
+    from skg_services.gravity.event_writer import emit_events
+except Exception:  # pragma: no cover - legacy fallback when canonical packages are unavailable
+    from skg.sensors import emit_events
 
 log = logging.getLogger("skg.sensors.cognitive")
 

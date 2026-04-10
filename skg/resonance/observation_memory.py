@@ -257,19 +257,27 @@ class ObservationMemory:
             if idx < 0 or idx >= len(self._records):
                 continue
             rec = self._records[int(idx)]
-            if rec.wicket_id == condition_id:
-                results.append((rec, float(score)))
-                continue
 
             same_domain = bool(domain) and rec.domain == domain
             same_target = False
             if query_identity:
                 same_target = rec.identity_key == query_identity
-            if query_target:
-                same_target = same_target or query_target in str(rec.workload_id) or query_target in str(rec.evidence_text)
+            if query_target and not same_target:
+                same_target = (
+                    query_target in str(rec.workload_id)
+                    or query_target in str(rec.evidence_text)
+                )
 
-            # Fallback match when the exact wicket/node is absent but the
-            # observation is from the same target/domain neighborhood.
+            if rec.wicket_id == condition_id:
+                # Exact wicket match: accept only when no workload_id was supplied
+                # (sweep-mode) OR when the record belongs to the same identity.
+                # Without this gate, one workload's confirmed wickets pollute the
+                # history of a different workload that happens to share the wicket id.
+                if not query_identity or same_target:
+                    results.append((rec, float(score)))
+                continue
+
+            # Fallback match: same target/domain neighborhood, different wicket.
             if same_domain and same_target:
                 results.append((rec, float(score)))
 

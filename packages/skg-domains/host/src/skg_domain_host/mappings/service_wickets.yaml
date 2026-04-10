@@ -1,0 +1,19 @@
+services:
+  - match: ssh
+    wicket_id: HO-02
+    port: 22
+  - match: winrm
+    wicket_id: HO-04
+    port: 5985
+  - match: ms-wbt-server
+    wicket_id: HO-20
+    port: 3389
+  - match: microsoft-ds
+    wicket_id: HO-19
+    port: 445
+  - match: netbios-ssn
+    wicket_id: HO-19
+    port: 139
+  - match: nfs
+    wicket_id: HO-21
+    port: 2049

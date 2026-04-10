@@ -7,7 +7,10 @@ from pathlib import Path
 
 from skg.temporal import DeltaStore, WicketTransition
 from skg.graph import WorkloadGraph
-from skg.core.paths import INTERP_DIR, EVENTS_DIR, SKG_STATE_DIR
+from skg.identity import parse_workload_ref
+from skg.kernel.pearls import Pearl, PearlLedger
+from skg_core.config.paths import INTERP_DIR, EVENTS_DIR, SKG_STATE_DIR
+from skg.temporal.interp import read_interp_payload
 
 log = logging.getLogger("skg.temporal.feedback")
 
@@ -22,8 +25,13 @@ DOMAIN_FROM_SCORE_KEY = {
 
 
 def _infer_domain(interp: dict, filename: str) -> str:
+    payload = interp.get("payload") if isinstance(interp.get("payload"), dict) else interp
+    explicit = str(payload.get("domain") or interp.get("domain") or "").strip()
+    if explicit:
+        return explicit
+
     for key, domain in DOMAIN_FROM_SCORE_KEY.items():
-        if key in interp:
+        if key in payload:
             return domain
 
     fname = filename.lower()
@@ -47,6 +55,10 @@ def _extract_workload_run(filename: str) -> tuple[str, str]:
       host_<workload_id>_<run_id>.json
     """
     stem = Path(filename).stem
+    if "__" in stem:
+        parts = stem.split("__")
+        if len(parts) >= 4:
+            return parts[1], parts[-1]
     parts = stem.split("_")
     if len(parts) >= 3:
         run_id = parts[-1]
@@ -102,12 +114,14 @@ class FeedbackIngester:
         obs_memory,  # ObservationMemory (optional — None if resonance not loaded)
         interp_dir: Path = INTERP_DIR,
         events_dir: Path = EVENTS_DIR,
+        pearls_path: Path = SKG_STATE_DIR / "pearls.jsonl",
     ):
         self.delta = delta_store
         self.graph = graph
         self.obs = obs_memory
         self.interp_dir = interp_dir
         self.events_dir = events_dir
+        self.pearls = PearlLedger(pearls_path)
         self._state = self._load_state()
 
     def _load_state(self) -> dict:
@@ -166,13 +180,16 @@ class FeedbackIngester:
 
     def _process_one(self, interp_file: Path) -> dict:
         """Process a single projection interp file."""
-        interp = json.loads(interp_file.read_text())
+        interp = read_interp_payload(interp_file)
+        if not interp:
+            raise ValueError(f"invalid interp payload: {interp_file.name}")
 
         workload_id, run_id = _extract_workload_run(interp_file.name)
         domain = _infer_domain(interp, interp_file.name)
 
         # Override workload_id from content if present
         workload_id = interp.get("workload_id", workload_id)
+        run_id = interp.get("run_id", run_id)
 
         ts = interp.get("computed_at", datetime.now(timezone.utc).isoformat())
 
@@ -229,6 +246,8 @@ class FeedbackIngester:
                 subject_id = _transition_subject_id(t)
                 self.graph.clear_prior(workload_id, subject_id)
 
+        self._record_projection_pearl(workload_id, domain, run_id, interp, transitions)
+
         # 3. ObservationMemory: close the loop on pending observations
         if self.obs is not None:
             self._close_observations(workload_id, interp, domain)
@@ -239,6 +258,90 @@ class FeedbackIngester:
         )
 
         return {"transitions": len(transitions), "propagations": propagations}
+
+    def _record_projection_pearl(
+        self,
+        workload_id: str,
+        domain: str,
+        run_id: str,
+        interp: dict,
+        transitions: list[WicketTransition],
+    ) -> None:
+        parsed = parse_workload_ref(workload_id)
+        identity_key = parsed.get("identity_key", "")
+        manifestation_key = parsed.get("manifestation_key", "")
+        attack_path_id = str(interp.get("attack_path_id", "") or "")
+        classification = str(interp.get("classification", "unknown") or "unknown")
+
+        state_changes = [
+            {
+                "workload_id": workload_id,
+                "attack_path_id": t.attack_path_id,
+                "wicket_id": t.wicket_id,
+                "from": t.from_state,
+                "to": t.to_state,
+                "signal_weight": t.signal_weight,
+                "confidence_delta": t.confidence_delta,
+                "local_energy_delta": t.local_energy_delta,
+            }
+            for t in transitions
+        ]
+
+        observation_confirms = []
+        for status in ("realized", "blocked"):
+            for wicket_id in interp.get(status, []) or []:
+                observation_confirms.append({
+                    "workload_id": workload_id,
+                    "attack_path_id": attack_path_id,
+                    "wicket_id": wicket_id,
+                    "status": status,
+                })
+
+        projection_changes = []
+        if domain or attack_path_id or classification != "unknown":
+            projection_changes.append({
+                "kind": "projection_ingest",
+                "added": [domain] if domain else [],
+                "removed": [],
+                "attack_path_id": attack_path_id,
+                "classification": classification,
+                "run_id": run_id,
+            })
+
+        if not (state_changes or observation_confirms or projection_changes):
+            return
+
+        total_energy = float(interp.get("total_energy", 0.0) or 0.0)
+        if total_energy == 0.0:
+            total_energy = sum(
+                float((interp.get("unresolved_detail", {}) or {}).get(wid, {}).get("local_energy", 0.0) or 0.0)
+                for wid in interp.get("unknown", []) or []
+            )
+
+        self.pearls.record(Pearl(
+            state_changes=state_changes,
+            observation_confirms=observation_confirms,
+            projection_changes=projection_changes,
+            energy_snapshot={
+                "target_ip": identity_key,
+                "workload_id": workload_id,
+                "identity_key": identity_key,
+                "manifestation_key": manifestation_key,
+                "domain": domain,
+                "run_id": run_id,
+                "attack_path_id": attack_path_id,
+                "classification": classification,
+                "E": round(total_energy, 6),
+                "decay_class": "operational" if (state_changes or observation_confirms) else "structural",
+            },
+            target_snapshot={
+                "workload_id": workload_id,
+                "identity_key": identity_key,
+                "manifestation_key": manifestation_key,
+                "domain": domain,
+                "attack_path_id": attack_path_id,
+            },
+        ))
 
     def _close_observations(self, workload_id: str, interp: dict, domain: str):
         """
@@ -308,6 +411,7 @@ class FeedbackIngester:
             "processed_interps": len(self._state.get("processed_interps", [])),
             "delta": self.delta.environment_summary(),
             "graph": self.graph.status(),
+            "pearls": self.pearls.count(),
             "obs": self.obs.status() if self.obs else None,
         }
 

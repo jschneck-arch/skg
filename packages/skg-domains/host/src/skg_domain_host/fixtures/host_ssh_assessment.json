@@ -1,0 +1,16 @@
+[
+  {
+    "host": "192.168.56.20",
+    "port": 22,
+    "username": "msfadmin",
+    "auth_type": "password",
+    "reachable": true,
+    "ssh_exposed": true,
+    "credential_valid": true,
+    "is_admin": true,
+    "sudo_nopasswd": true,
+    "kernel_release": "5.10.0-kali9-amd64",
+    "id_output": "uid=0(root) gid=0(root) groups=0(root)",
+    "sudo_output": "(ALL) NOPASSWD: ALL"
+  }
+]

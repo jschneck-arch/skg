@@ -108,28 +108,39 @@ def iso_now() -> str:
 def _ev(wicket_id: str, status: str, rank: int, confidence: float,
         detail: str, workload_id: str, run_id: str,
         source_kind: str = "db_discovery_runtime",
-        pointer: str = "") -> dict:
+        pointer: str = "",
+        attack_path_id: str = "") -> dict:
     now = iso_now()
+    payload: dict = {
+        "wicket_id":   wicket_id,
+        "status":      status,
+        "rank":        rank,
+        "confidence":  confidence,
+        "detail":      detail,
+        "workload_id": workload_id,
+        "run_id":      run_id,
+        "observed_at": now,
+    }
+    if attack_path_id:
+        payload["attack_path_id"] = attack_path_id
     return {
         "id":   str(uuid.uuid4()),
         "ts":   now,
         "type": "obs.attack.precondition",
         "source": {
-            "source_id":   SOURCE_ID,
-            "toolchain":   TOOLCHAIN,
-            "version":     get_version(),
-            "source_kind": source_kind,
-            "pointer":     pointer,
+            "source_id": SOURCE_ID,
+            "toolchain": TOOLCHAIN,
+            "version":   get_version(),
         },
-        "payload": {
-            "wicket_id":   wicket_id,
-            "status":      status,
-            "rank":        rank,
-            "confidence":  confidence,
-            "detail":      detail,
-            "workload_id": workload_id,
-            "run_id":      run_id,
-            "observed_at": now,
+        "payload": payload,
+        "provenance": {
+            "evidence_rank": rank,
+            "evidence": {
+                "source_kind": source_kind,
+                "pointer":     pointer,
+                "collected_at": now,
+                "confidence":   round(confidence, 4),
+            },
         },
     }
 

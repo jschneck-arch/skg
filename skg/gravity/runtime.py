@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from skg.assistant.action_proposals import create_msf_action_proposal
-from skg.core.paths import EVENTS_DIR, SKG_STATE_DIR
+from skg_core.config.paths import EVENTS_DIR, SKG_STATE_DIR
+from skg.identity import parse_workload_ref
 
 from .failures import GravityFailureReporter
 
@@ -23,10 +24,65 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2))
 
 
+def _subject_aliases(*values: str) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        aliases.add(text)
+        parsed = parse_workload_ref(text)
+        for candidate in (
+            parsed.get("identity_key"),
+            parsed.get("host"),
+            parsed.get("locator"),
+            parsed.get("manifestation_key"),
+        ):
+            candidate_text = str(candidate or "").strip()
+            if candidate_text:
+                aliases.add(candidate_text)
+    return aliases
+
+
+def _proposal_identity_key(proposal: dict[str, Any], action: dict[str, Any]) -> str:
+    for candidate in (
+        action.get("identity_key"),
+        proposal.get("identity_key"),
+        action.get("workload_id"),
+        action.get("execution_target"),
+        action.get("target_ip"),
+        *(proposal.get("hosts") or []),
+    ):
+        identity_key = str(parse_workload_ref(str(candidate or "")).get("identity_key") or "").strip()
+        if identity_key:
+            return identity_key
+    return ""
+
+
+def _execution_target(proposal: dict[str, Any], action: dict[str, Any]) -> str:
+    for candidate in (
+        action.get("execution_target"),
+        action.get("target_ip"),
+        proposal.get("attack_surface"),
+        _proposal_identity_key(proposal, action),
+    ):
+        parsed = parse_workload_ref(str(candidate or ""))
+        target = str(parsed.get("host") or parsed.get("identity_key") or candidate or "").strip()
+        if target:
+            return target
+    return ""
+
+
+def _safe_subject_label(value: str) -> str:
+    text = str(value or "").strip() or "subject"
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in text)
+
+
 def emit_follow_on_proposals(
     *,
     concurrent_results: dict[str, dict[str, Any]],
     ip: str,
+    node_key: str = "",
     out_path: Path,
     run_id: str,
     load_wicket_states: Callable[[str], dict[str, Any]],
@@ -38,6 +94,9 @@ def emit_follow_on_proposals(
     reporter: GravityFailureReporter | None = None,
 ) -> list[dict[str, Any]]:
     proposals_dir = proposals_dir or (SKG_STATE_DIR / "proposals")
+    # node_key is the stable identity anchor (identity_key). Falls back to ip for
+    # hosts that have no workload-id differentiation.
+    _node_key = node_key or ip
     generated: list[dict[str, Any]] = []
 
     for result in concurrent_results.values():
@@ -46,7 +105,7 @@ def emit_follow_on_proposals(
             if not path_id:
                 continue
             try:
-                refreshed_states = load_wicket_states(ip)
+                refreshed_states = load_wicket_states(_node_key)
                 realized = [
                     wid for wid, state in refreshed_states.items()
                     if isinstance(state, dict) and state.get("status") == "realized"
@@ -84,6 +143,7 @@ def emit_follow_on_proposals(
                 props = generate_exploit_proposals(
                     path_id=path_id,
                     target_ip=ip,
+                    identity_key=str(parse_workload_ref(ip).get("identity_key") or ip).strip(),
                     port=follow_on.get("port", 0),
                     realized_wickets=realized,
                     lhost=get_lhost(),
@@ -110,6 +170,7 @@ def emit_follow_on_proposals(
 def emit_auxiliary_proposals(
     *,
     ip: str,
+    node_key: str = "",
     target: dict[str, Any],
     run_id: str,
     out_path: Path,
@@ -122,8 +183,9 @@ def emit_auxiliary_proposals(
 ) -> list[dict[str, Any]]:
     proposals_dir = proposals_dir or (SKG_STATE_DIR / "proposals")
     created: list[dict[str, Any]] = []
+    _node_key = node_key or ip
 
-    refreshed_states = load_wicket_states(ip)
+    refreshed_states = load_wicket_states(_node_key)
     realized_set = {
         wid for wid, state in refreshed_states.items()
         if isinstance(state, dict) and state.get("status") == "realized"
@@ -151,6 +213,11 @@ def emit_auxiliary_proposals(
                 if duplicate:
                     break
 
+                identity_key = str(
+                    target.get("identity_key")
+                    or parse_workload_ref(ip).get("identity_key")
+                    or ip
+                ).strip()
                 port_text = str(candidate.get("options", {}).get("RPORT", "0"))
                 try:
                     port = int(port_text)
@@ -184,6 +251,8 @@ def emit_auxiliary_proposals(
                         "instrument": "msf",
                         "module": candidate["module"],
                         "module_class": candidate.get("class", "auxiliary"),
+                        "identity_key": identity_key or ip,
+                        "execution_target": ip,
                         "target_ip": ip,
                         "port": port,
                         "options": options,
@@ -231,9 +300,16 @@ def execute_triggered_proposals(
                 continue
             action = proposal.get("action", {})
             rc_file = action.get("rc_file", "") or proposal.get("rc_file", "")
-            target_ip = action.get("target_ip", "?")
+            identity_key = _proposal_identity_key(proposal, action)
+            execution_target = _execution_target(proposal, action) or "?"
+            target_ip = str(action.get("target_ip") or "").strip()
             proposal_id = proposal.get("id", "?")[:12]
-            if focus_target and target_ip != focus_target:
+            if focus_target and focus_target not in _subject_aliases(
+                focus_target,
+                identity_key,
+                execution_target,
+                target_ip,
+            ):
                 continue
 
             module_candidates = action.get("module_candidates", [])
@@ -245,7 +321,7 @@ def execute_triggered_proposals(
             is_exploit_module = module.startswith("exploit/") and module != "exploit/multi/handler"
             sync_exec = ((proposal.get("category") == "runtime_observation" or all_aux) and not is_exploit_module)
 
-            print_fn(f"  [AUTO-EXEC] Triggered proposal {proposal_id} for {target_ip}")
+            print_fn(f"  [AUTO-EXEC] Triggered proposal {proposal_id} for {execution_target}")
             if not rc_file or not Path(rc_file).exists():
                 if proposal.get("proposal_kind") == "field_action":
                     proposal["status"] = "error_missing_rc"
@@ -255,7 +331,7 @@ def execute_triggered_proposals(
                         reporter.emit(
                             "triggered_proposals",
                             "RC file missing for triggered field action",
-                            target_ip=target_ip,
+                            target_ip=target_ip or execution_target,
                             context={"proposal_id": proposal.get("id", ""), "rc_file": rc_file},
                         )
                 continue
@@ -266,7 +342,7 @@ def execute_triggered_proposals(
                     reporter.emit(
                         "triggered_proposals",
                         "msfconsole not found for triggered proposal execution",
-                        target_ip=target_ip,
+                        target_ip=target_ip or execution_target,
                         context={"proposal_id": proposal.get("id", ""), "rc_file": rc_file},
                     )
                 print_fn("    msfconsole not found — cannot auto-execute")
@@ -286,14 +362,19 @@ def execute_triggered_proposals(
                     from skg.sensors.msf_sensor import _parse_console_output, summarize_console_output
 
                     module_name = module_candidates[0].get("module") if module_candidates else "resource_script"
-                    workload_id = f"{proposal.get('domain', 'web')}::{target_ip}"
+                    workload_anchor = identity_key or execution_target
+                    workload_id = f"{proposal.get('domain', 'web')}::{workload_anchor}"
                     events = _parse_console_output(run.stdout or "", workload_id, module_name)
                     summary = summarize_console_output(run.stdout or "")
                     if events:
-                        events_file = out_path / f"msf_events_{target_ip.replace('.','_')}_{run_id[:8]}.ndjson"
+                        events_file = out_path / f"msf_events_{_safe_subject_label(workload_anchor)}_{run_id[:8]}.ndjson"
                         with events_file.open("w", encoding="utf-8") as fh:
                             for event in events:
-                                event.setdefault("payload", {})["target_ip"] = target_ip
+                                payload = event.setdefault("payload", {})
+                                if target_ip:
+                                    payload["target_ip"] = target_ip
+                                if identity_key:
+                                    payload["identity_key"] = identity_key
                                 fh.write(json.dumps(event) + "\n")
                         EVENTS_DIR.mkdir(parents=True, exist_ok=True)
                         (EVENTS_DIR / events_file.name).write_text(events_file.read_text())
@@ -311,7 +392,7 @@ def execute_triggered_proposals(
                         reporter.emit(
                             "triggered_proposals_ingest",
                             "MSF output ingestion failed after triggered execution",
-                            target_ip=target_ip,
+                            target_ip=target_ip or execution_target,
                             exc=exc,
                             context={"proposal_id": proposal.get("id", "")},
                         )

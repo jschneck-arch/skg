@@ -1,0 +1,11 @@
+source_kind: ad.inventory.snapshot
+source_id: adapter.ad_asrep_exposure
+pointer_prefix: ad://
+exclude_machine_accounts: false
+wickets:
+  AD-AS-01:
+    evidence_rank: 3
+    confidence: 0.92
+  AD-AS-02:
+    evidence_rank: 3
+    confidence: 0.9

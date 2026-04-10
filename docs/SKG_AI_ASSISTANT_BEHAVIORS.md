@@ -4,6 +4,7 @@ Purpose: define concrete behaviors for an AI assistant built on SKG.
 
 This is not a generic chatbot specification.
 It is a bounded assistant specification over SKG substrate objects.
+It is a cross-cutting SKG layer that may be queried by any runtime layer.
 
 ## Role
 
@@ -13,12 +14,14 @@ The AI assistant is:
 - an interpreter of SKG state
 - a drafter of actions and reports
 - a helper for moving instruments and tools under operator control
+- a knowledge and mutation tool that works only under SKG direction
 
 The AI assistant is not:
 
 - the substrate
 - the measurement engine
 - the authority on realized/blocked/unknown state
+- an autonomous controller separate from SKG
 
 ## Primary Inputs
 
@@ -49,6 +52,7 @@ The assistant should be able to answer:
 Required constraint:
 
 - explanations must reference substrate structures, not freeform speculation
+- explanations are `derived_advice`, not live state
 
 ### 2. Explain Folds And Pressure
 
@@ -73,6 +77,7 @@ Required constraint:
 
 - the assistant proposes actions
 - the operator or SKG proposal system authorizes them
+- drafted artifacts are `mutation_artifact`, not observation
 
 ### 4. Compare Across Time
 
@@ -105,11 +110,13 @@ The assistant may:
 - prepare commands
 - suggest the next instrument
 - describe why gravity is favoring an instrument or target
+- suggest alternate instruments or recent external knowledge that SKG may want to consider
 
 The assistant may not:
 
 - silently execute destructive actions
 - claim a tool succeeded without substrate evidence
+- reduce applicability to a single forced instrument based only on memory
 
 ### Growth Guidance
 
@@ -128,6 +135,20 @@ The assistant must not:
 - treat remembered state as current state without re-observation
 - erase folds because they are inconvenient
 - replace operator approval for sensitive actions
+- move advisory output into the observation plane without intact chain of custody
+
+## Evidence Handling
+
+AI can handle observed data, but it is not itself an observer.
+
+If AI relays evidence into SKG, the relay must preserve chain of custody:
+
+- exact artifact path or reference
+- artifact hash
+- source pointer, command, or URI
+- collection timestamp
+
+Without that, the AI output remains advisory and cannot be admitted as observation.
 
 ## Minimum Useful AI Outputs
 

@@ -1,0 +1,18 @@
+wickets:
+  reachable: WB-01
+  version_disclosure: WB-02
+  missing_security_headers: WB-19
+  cors_misconfigured: WB-18
+  tls_misconfigured: WB-17
+confidence:
+  reachable_realized: 1.0
+  reachable_blocked: 0.95
+  version_realized: 0.95
+  version_blocked: 0.8
+  missing_headers_realized: 0.9
+  missing_headers_blocked: 0.85
+  cors_realized: 0.9
+  cors_blocked: 0.75
+  tls_realized: 0.85
+  tls_blocked: 0.8
+  tls_unknown: 0.5

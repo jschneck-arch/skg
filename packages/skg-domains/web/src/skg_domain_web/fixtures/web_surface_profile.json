@@ -1,0 +1,27 @@
+{
+  "base_url": "https://demo.local",
+  "scheme": "https",
+  "host": "demo.local",
+  "port": 443,
+  "reachable": true,
+  "reachable_detail": "HTTP 200 in 180ms",
+  "response_headers": {
+    "Server": "Apache/2.4.49",
+    "X-Powered-By": "PHP/7.4"
+  },
+  "missing_security_headers": [
+    "content-security-policy",
+    "strict-transport-security"
+  ],
+  "cors": {
+    "acao": "*",
+    "acac": "true"
+  },
+  "tls": {
+    "tls_version": "TLSv1.2",
+    "cipher_name": "ECDHE-RSA-AES128-GCM-SHA256",
+    "cipher_bits": 128,
+    "issues": []
+  },
+  "source_kind": "surface.profile"
+}

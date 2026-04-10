@@ -1,0 +1,15 @@
+name: web
+status: active
+runtime: domain-pack
+version: 1.0.0
+compatibility:
+  protocol: "1.0"
+components:
+  adapters: adapters
+  projectors: projectors
+  policies: policies
+contracts:
+  catalogs: ontology/catalogs
+metadata:
+  description: "Pilot canonical web domain pack"
+  default_path: web_initial_access_v1

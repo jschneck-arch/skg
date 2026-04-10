@@ -2,17 +2,16 @@
 sqlmap_adapter.py
 =================
 Automated SQL injection exploitation via sqlmap.
-Fires after WB-05 (SQL injection) is realized or suspected.
+Fires after WB-14 (auth surface) or WB-01 (web service) is realized.
 
 Emits:
-  WB-05: SQL injection confirmed
+  WB-41: SQL injection injectable (confirmed vuln)
   WB-10: auth bypass via SQLi
   DP-10: database reachable (if data dumped)
   DP-02: schema extracted
 """
 from __future__ import annotations
-import json, os, re, subprocess, sys, tempfile, uuid
-from datetime import datetime, timezone
+import json, re, subprocess, sys, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -52,9 +51,6 @@ def run_sqlmap(target_url: str, out_dir: Path, forms: bool = True,
     if forms:
         cmd.append("--forms")   # auto-detect forms
 
-    events = []
-    now = datetime.now(timezone.utc).isoformat()
-
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         output = proc.stdout + proc.stderr
@@ -71,78 +67,79 @@ def run_sqlmap(target_url: str, out_dir: Path, forms: bool = True,
     tables_dumped = bool(re.search(r"Table:.*\n.*rows", output, re.IGNORECASE))
     auth_bypassed = bool(re.search(r"(admin.*logged|authentication.*bypassed|session.*cookie)", output, re.IGNORECASE))
 
+    from skg.sensors.event_builder import make_precondition_event
+    from skg.identity.workload import canonical_workload_id
+
+    web_workload_id = canonical_workload_id(target_url, domain="web")
+    data_workload_id = canonical_workload_id(target_url, domain="data")
+
+    events = []
+
     if injectable:
-        events.append({
-            "type": "obs.attack.precondition",
-            "id": str(uuid.uuid4()),
-            "ts": now,
-            "payload": {
-                "wicket_id": "WB-05",
-                "target_ip": target_url,
-                "workload_id": f"web::{target_url}",
-                "domain": "web",
-                "status": "realized",
-                "confidence": 0.95,
-                "evidence": f"sqlmap confirmed injection. DBMS: {db_type or 'unknown'}",
-                "decay_class": "structural",
-                "source": "sqlmap",
-                "db_type": db_type,
-            },
-        })
+        events.append(make_precondition_event(
+            wicket_id="WB-41",
+            status="realized",
+            workload_id=web_workload_id,
+            source_id="sqlmap_adapter",
+            toolchain="skg-web-toolchain",
+            target_ip=target_url,
+            domain="web",
+            label="sqli_injectable",
+            detail=f"sqlmap confirmed injection. DBMS: {db_type or 'unknown'}",
+            attack_path_id="web_sqli_to_shell_v1",
+            evidence_rank=3,
+            source_kind="sqlmap",
+            confidence=0.95,
+        ))
 
         if db_type:
-            events.append({
-                "type": "obs.attack.precondition",
-                "id": str(uuid.uuid4()),
-                "ts": now,
-                "payload": {
-                    "wicket_id": "DP-10",
-                    "target_ip": target_url,
-                    "workload_id": f"data::{target_url}",
-                    "domain": "data",
-                    "status": "realized",
-                    "confidence": 0.90,
-                    "evidence": f"Database accessible via SQLi: {db_type}",
-                    "decay_class": "structural",
-                    "source": "sqlmap",
-                },
-            })
+            events.append(make_precondition_event(
+                wicket_id="DP-10",
+                status="realized",
+                workload_id=data_workload_id,
+                source_id="sqlmap_adapter",
+                toolchain="skg-web-toolchain",
+                target_ip=target_url,
+                domain="data",
+                label="database_accessible",
+                detail=f"Database accessible via SQLi: {db_type}",
+                evidence_rank=3,
+                source_kind="sqlmap",
+                confidence=0.90,
+            ))
 
         if tables_dumped:
-            events.append({
-                "type": "obs.attack.precondition",
-                "id": str(uuid.uuid4()),
-                "ts": now,
-                "payload": {
-                    "wicket_id": "DP-02",
-                    "target_ip": target_url,
-                    "workload_id": f"data::{target_url}",
-                    "domain": "data",
-                    "status": "realized",
-                    "confidence": 0.92,
-                    "evidence": "sqlmap dumped table structure",
-                    "decay_class": "structural",
-                    "source": "sqlmap",
-                },
-            })
+            events.append(make_precondition_event(
+                wicket_id="DP-02",
+                status="realized",
+                workload_id=data_workload_id,
+                source_id="sqlmap_adapter",
+                toolchain="skg-web-toolchain",
+                target_ip=target_url,
+                domain="data",
+                label="schema_extracted",
+                detail="sqlmap dumped table structure",
+                evidence_rank=3,
+                source_kind="sqlmap",
+                confidence=0.92,
+            ))
 
     if auth_bypassed:
-        events.append({
-            "type": "obs.attack.precondition",
-            "id": str(uuid.uuid4()),
-            "ts": now,
-            "payload": {
-                "wicket_id": "WB-10",
-                "target_ip": target_url,
-                "workload_id": f"web::{target_url}",
-                "domain": "web",
-                "status": "realized",
-                "confidence": 0.88,
-                "evidence": "sqlmap achieved authentication bypass via SQL injection",
-                "decay_class": "structural",
-                "source": "sqlmap",
-            },
-        })
+        events.append(make_precondition_event(
+            wicket_id="WB-10",
+            status="realized",
+            workload_id=web_workload_id,
+            source_id="sqlmap_adapter",
+            toolchain="skg-web-toolchain",
+            target_ip=target_url,
+            domain="web",
+            label="auth_bypass_via_sqli",
+            detail="sqlmap achieved authentication bypass via SQL injection",
+            attack_path_id="web_sqli_to_shell_v1",
+            evidence_rank=3,
+            source_kind="sqlmap",
+            confidence=0.88,
+        ))
 
     # Write events to NDJSON
     out_file = out_dir / f"sqlmap_events_{uuid.uuid4().hex[:8]}.ndjson"

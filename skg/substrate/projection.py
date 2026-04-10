@@ -31,8 +31,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from skg.identity import canonical_observation_subject
 from skg.substrate.node import NodeState, TriState
 from skg.substrate.path import Path, PathScore
+
+try:
+    from skg_services.gravity.state_collapse import (
+        load_states_from_events as _service_load_states_from_events,
+        load_states_from_events_priority as _service_load_states_from_events_priority,
+    )
+except Exception:  # pragma: no cover - legacy fallback when canonical services package is unavailable
+    _service_load_states_from_events = None
+    _service_load_states_from_events_priority = None
 
 
 def _safe_unknown(node_id: str) -> NodeState:
@@ -195,9 +205,10 @@ def classify(realized: list[str],
 def _target_for_events(events: list[dict]) -> str:
     for ev in reversed(events):
         payload = ev.get("payload", {})
-        target = payload.get("target_ip") or payload.get("workload_id")
+        subject = canonical_observation_subject(payload)
+        target = subject.get("subject_key", "")
         if target:
-            return target.split("::")[-1]
+            return target
     return "unknown"
 
 
@@ -226,6 +237,25 @@ def load_states_from_events(events: list[dict]) -> dict[str, NodeState]:
     Backward compatible with older event payloads while seeding richer
     substrate state when available.
     """
+    if _service_load_states_from_events is not None:
+        service_states = _service_load_states_from_events(events)
+        result = {}
+        for node_id, node_state in service_states.items():
+            ns = NodeState(
+                node_id=node_state.node_id,
+                state=TriState(str(node_state.state.value if hasattr(node_state.state, "value") else node_state.state)),
+                confidence=node_state.confidence,
+                observed_at=node_state.observed_at,
+                source_kind=node_state.source_kind,
+                pointer=node_state.pointer,
+                notes=node_state.notes,
+                attributes=dict(node_state.attributes),
+            )
+            ns.local_energy = float(getattr(node_state, "local_energy", 0.0) or 0.0)
+            ns.is_latent = bool(getattr(node_state, "is_latent", False))
+            result[node_id] = ns
+        return result
+
     from skg.kernel.adapters import event_to_observation
     from skg.kernel.state import CollapseThresholds, StateEngine
     from skg.kernel.support import SupportEngine
@@ -316,6 +346,25 @@ def load_states_from_events_priority(
     If required is provided, only states for nodes in that list are returned.
     All other behavior (event types, field hints) is identical to load_states_from_events.
     """
+    if _service_load_states_from_events_priority is not None:
+        service_states = _service_load_states_from_events_priority(events, required=required)
+        result = {}
+        for node_id, node_state in service_states.items():
+            ns = NodeState(
+                node_id=node_state.node_id,
+                state=TriState(str(node_state.state.value if hasattr(node_state.state, "value") else node_state.state)),
+                confidence=node_state.confidence,
+                observed_at=node_state.observed_at,
+                source_kind=node_state.source_kind,
+                pointer=node_state.pointer,
+                notes=node_state.notes,
+                attributes=dict(node_state.attributes),
+            )
+            ns.local_energy = float(getattr(node_state, "local_energy", 0.0) or 0.0)
+            ns.is_latent = bool(getattr(node_state, "is_latent", False))
+            result[node_id] = ns
+        return result
+
     from skg.kernel.adapters import event_to_observation
     from skg.kernel.state import CollapseThresholds, StateEngine
     from skg.kernel.support import SupportEngine

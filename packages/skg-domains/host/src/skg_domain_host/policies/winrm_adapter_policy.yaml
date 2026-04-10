@@ -1,0 +1,18 @@
+source_kind: winrm_runtime
+source_id: adapter.host_winrm_assessment
+pointer_prefix: winrm://
+wickets:
+  HO-04:
+    evidence_rank: 4
+    confidence: 0.95
+  HO-05:
+    evidence_rank: 1
+    confidence: 0.99
+  HO-10:
+    evidence_rank: 1
+    confidence: 0.9
+  HO-09:
+    evidence_rank: 1
+    confidence: 0.8
+credential_patterns:
+  - "(?i)(password|passwd|secret|token|api.?key|aws.?secret)"

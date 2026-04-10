@@ -26,7 +26,7 @@ def compute_binary_score(events, catalog, attack_path_id, run_id=None, workload_
     cls = ("not_realized" if blocked else "indeterminate" if unknown else "realized")
     sheaf_data = {}
     try:
-        import sys as _s; _s.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        import sys as _s; _s.path.insert(0, str(Path(__file__).resolve().parents[3]))
         from skg.topology.sheaf import classify_with_sheaf
         cls, sheaf_data = classify_with_sheaf(cls, catalog, attack_path_id,
                                                realized, blocked, unknown)

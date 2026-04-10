@@ -14,7 +14,7 @@ One architectural property was left implicit in that formalization: SKG has no d
 
 This paper makes that architecture explicit and derives its consequences.
 
-A domain expression is a four-tuple Δ = (Ω, Ι, Α, Π): a wicket catalog defining what can be observed, an instrument set specifying how, an adapter translating raw output to field events, and a projection evaluating observations against the substrate. Thirteen domain expressions are currently registered across 211 named conditions. All run through the same kernel without modification.
+A domain expression is a four-tuple Δ = (Ω, Ι, Α, Π): a wicket catalog defining what can be observed, an instrument set specifying how, an adapter translating raw output to field events, and a projection evaluating observations against the substrate. Twelve domain expressions are currently registered across 221 named conditions. Five are daemon-native in the live runtime today; the rest are auxiliary or operator-invoked, but their projectors are discovered by the same registry-driven loader.
 
 The field functional connects expressions through an inter-expression coupling law K(Δ_a, Δ_b). When a local in expression Δ_a is realized on a target, the coupling term elevates the field potential for instruments in Δ_b. Cross-domain attack chains emerge from this coupling energy — not from hardcoded sequencing.
 
@@ -76,19 +76,18 @@ A domain expression provides everything the substrate needs to observe a specifi
 
 ### 2.2 Expression independence
 
-Two expressions Δ_a and Δ_b are expression-independent if Ω_a ∩ Ω_b = ∅. All currently deployed expressions are expression-independent. A web observation cannot directly collapse a host wicket. The only cross-expression channel is the coupling law K(Δ_a, Δ_b), which adjusts priors rather than directly modifying state.
+Two expressions Δ_a and Δ_b are expression-independent if Ω_a ∩ Ω_b = ∅. All currently deployed expressions are expression-independent. A web observation cannot directly collapse a host wicket. The only cross-expression channels are the coupling law K(Δ_a, Δ_b), fiber-cluster structure spanning expression locals for the same identity, and cross-target propagation through the WorkloadGraph. None of these directly collapse state; they change which measurements are gravitationally attractive next.
 
-Thirteen expressions are currently registered:
+The repository currently contains toolchains for the following expressions. Only a subset are daemon-native in the live runtime; the rest are auxiliary or operator-invoked even though their projectors are now discovered through the same registry-driven loader:
 
 | Expression | Namespace | Wicket count |
 |---|---|---|
-| host | HO- | 25 |
-| sysaudit | FI-, PI- | 24 |
+| host | HO-, FI-, PI- | 49 |
 | web | WB- | 20 |
 | ad-lateral | AD- | 25 |
 | container-escape | CE- | 14 |
 | aprs | AP- | 14 |
-| data | DP- | 15 |
+| data | DP-, DE- | 26 |
 | nginx | NX- | 12 |
 | supply-chain | SC- | 12 |
 | iot-firmware | IF- | 15 |
@@ -96,7 +95,7 @@ Thirteen expressions are currently registered:
 | binary | BA- | 6 |
 | metacognition | MC- | 8 |
 
-211 named conditions. Four were active in the validation engagement.
+221 named conditions. Four were active in the validation engagement.
 
 ### 2.3 The toolchain as the expression runtime
 
@@ -116,7 +115,7 @@ The substrate discovers available expressions by enumerating toolchain directori
 
 One expression is unusual: metacognition (MC-01 through MC-08) has SKG's own coverage gaps as its observation space. MC-03 is "coverage gap detected — service class with no catalog wickets." MC-05 is "contradictory evidence without reconciliation." These are conditions about the substrate's own epistemic state, not about a target.
 
-The metacognition expression is partially implemented. The wickets are defined. The mechanism by which a realized MC-03 would trigger catalog compilation for a new expression is not yet wired. This is noted here because it is structurally interesting — a substrate that can observe its own observability gaps and propose extensions is a different thing from one that requires human intervention at every coverage boundary. The implementation path is clear; it has not been taken yet.
+The runtime now separates substrate metacognition from cognitive generation artifacts. A realized substrate-side coverage gap is recorded as `MC-03` in the forge pipeline and can stage an operator-reviewed toolchain-generation proposal. When forge actually produces a candidate artifact, the runtime emits a separate `CP-01` cognitive signal. `MC-03` therefore remains about the substrate's own ignorance; `CP-01` records the act of candidate generation. `CP-01` is currently a runtime signal rather than a full projected expression, but the feedback loop is live.
 
 ---
 
@@ -165,6 +164,8 @@ This formula applies to any instrument from any expression. A web_collector with
 
 This is a small validation of the domain-agnostic design: instrument quality is a property of the measurement device, not of the observation space. The same failure mode — overconfidence — is corrected by the same mechanism regardless of domain.
 
+In the current runtime, this calibration is materialized as per-source factors in `$SKG_STATE_DIR/calibration.json`, produced by `skg calibrate` and loaded by `SensorContext` before history and graph priors are blended.
+
 ---
 
 ## 4. The Field Functional Over Domain Expressions
@@ -209,7 +210,7 @@ The Work 3 field energy E(S, A) = |{n ∈ A : Σ(n) = U}| is recovered as the le
 
 ### 4.3 Runtime instantiation
 
-The field functional is computed in `skg/kernel/field_local.py:field_functional()`. Field locals are constructed from `KernelStateEngine.states_with_detail()` output by `build_field_locals()`. The `FieldLocal` class holds the wicket states per (workload_id, domain) pair and exposes E_self, E_local, E_latent, decoherence_load, and the coupling energy method directly. L(F) is logged to `evidence/figures/A_energy.json` on each gravity cycle.
+The canonical runtime implementation of the field functional is `skg/kernel/field_functional.py:field_functional_breakdown()`. `skg/kernel/field_local.py` delegates to it for compatibility. Field locals are constructed from `KernelStateEngine.states_with_detail()` output by `build_field_locals()`, and the canonical breakdown now accepts optional fiber-cluster context so the same implementation covers local self-energy, coupling, dissipation, curvature, and cluster-aware fiber load. L(F) is logged to `evidence/figures/A_energy.json` on each gravity cycle.
 
 ---
 
@@ -241,7 +242,7 @@ K(Δ_a, Δ_b) encodes how much realized structure in expression Δ_a contributes
 
 K = 0.90–0.95: structural dependency — target expression's conditions require source expression's realization. K = 0.65–0.89: strong implication — source realization makes target conditions gravitationally accessible. K = 0.10: default (no coupling data; effectively decoupled).
 
-These values are hand-tuned on two engagements. They encode the author's understanding of the structural dependencies between observation domains. They are not derived from data. Whether they generalize to environments other than the validation lab is unknown. Section 10 is direct about this.
+These values began as hand-tuned judgments on two engagements. In the deployed runtime they are now externalized to `config/coupling.yaml`, hot-reloaded by `skg/core/coupling.py`, and retrospectively learnable from engagement snapshots. They are still operator-curated by default rather than online-learned. Whether they generalize to environments other than the validation lab remains an empirical question.
 
 ### 5.3 Coupling energy as the cross-expression bridge
 
@@ -292,11 +293,11 @@ When Lᵢ is realized in expression Δ_a and Lⱼ in expression Δ_b is coupled 
 
 Contradictory locals in any expression attract instruments. The substrate routes toward measurement conflicts before they accumulate.
 
-Combined:
+Combined, the formal expression remains:
 
     Φ_fiber(I, t) = [Φ_tension + Φ_couple + Φ_decoherence] × penalty(I, t) / c(I)
 
-Selection is argmax_I Φ_fiber(I, t) over all instruments from all registered expressions.
+The current runtime uses a hybrid realization of this formula. When an instrument intersects a usable explicit fiber cluster, cross-expression influence is carried by matched fibers and cluster structure, and the generic additive Φ_couple term is suppressed to avoid double counting. When no usable cluster context exists, the scheduler falls back to the older local-plus-coupling approximation. Selection is argmax_I Φ_fiber(I, t) over all instruments from all registered expressions.
 
 **Proposition 3 (Work 3 Recovery).** Φ(I, t) from Work 3 is Φ_fiber(I, t) under: unit coherence and tension per unknown wicket, K = 0 everywhere, D = 0 everywhere, penalty = 1, one active expression.
 
@@ -313,7 +314,7 @@ The pearl manifold computes a wavelength_boost from reinforced neighborhoods —
 
 The factor of 10.0 normalizes the boost range (0–10) to a multiplicative coefficient in [1.0, 2.0]. Strong memory reinforcement can double the potential for an instrument on a target where prior sweeps were highly informative. It cannot override direct field observation — the multiplier is bounded at 2×.
 
-**Runtime instantiation.** Φ_fiber is computed in `skg/kernel/field_local.py:phi_fiber()`. The wavelength_boost comes from `skg/kernel/pearl_manifold.py:wavelength_boost()`. Gravity cycle execution in `skg-gravity/gravity_field.py` combines them with the penalty term for instrument reuse.
+**Runtime instantiation.** The canonical implementation is `skg/kernel/field_functional.py:phi_fiber_breakdown()`, with `skg/kernel/field_local.py` delegating to it. The wavelength_boost comes from `skg/kernel/pearl_manifold.py:wavelength_boost()`. Kernel selection in `skg/kernel/engine.py` passes explicit fiber clusters into the breakdown when available, and gravity cycle execution in `skg-gravity/gravity_field.py` combines the resulting potential with the reuse penalty.
 
 ---
 
@@ -340,7 +341,7 @@ The four thresholds are calibrated on operational data, not derived from first p
 
 **φ_contradiction < 0.15.** With n=2 at confidence 0.8 (M ≈ 1.6), a single full-confidence opposing observation cannot flip the dominant polarity: 0.15×1.6 + 0.95 = 1.19 < 0.85×1.6 = 1.36. The bound is tight for minimum-confidence instruments (γ = 0.5, M ≈ 1.0), which is why the four conditions must be jointly satisfied — the contradiction bound alone is insufficient at minimum confidence.
 
-**φ_decoherence < 0.20.** Three decay classes — ephemeral (TTL ≈ 1 hour), operational (TTL ≈ 24 hours), structural (TTL ≈ 30 days) — apply across all expressions identically. The 0.20 bound ensures effective mass is at least 80% of original, structurally consistent with n ≥ 2 for M_orig ≥ 1.0.
+**φ_decoherence < 0.20.** Three decay classes — ephemeral (TTL = 4 hours), operational (TTL = 24 hours), structural (TTL = 168 hours) — are currently configured identically across expressions in `config/coupling.yaml`. Expired observations are excluded from active support mass on access by the SupportEngine rather than left as indefinitely decayed residue. The 0.20 bound therefore applies to active evidence remaining within TTL and to temporal decay nearing expiry.
 
 **n ≥ 2.** n counts gravity cycles, not instrument executions. A single sweep producing multiple observations is still n=1. This prevents a target briefly in an unusual state from being classified as protected on one informative sweep.
 
@@ -363,7 +364,7 @@ A protected local is a local minimum of L(F) restricted to Lᵢ that is stable u
 
 ### 7.4 Temporal folds
 
-A protected-state temporal fold arises when φ_decoherence rises above 0.20 as evidence ages past TTL. The local is no longer protected. Gravity pulls toward re-observation. This is the Work 3 temporal fold mechanism, derived from the decoherence criterion rather than stated as a separate rule. The mechanism applies identically across all expressions — an aging web injection finding and an aging host reachability finding both generate temporal folds through the same formula.
+A protected-state temporal fold arises when evidence ages toward or past TTL and the local no longer satisfies the protection criterion. In the current runtime, expired observations are removed from active support aggregation on access, and temporal fold detection uses the same decay-class map as the support engine. The local is no longer protected. Gravity pulls toward re-observation. This is the Work 3 temporal fold mechanism, derived from the decoherence criterion rather than stated as a separate rule. The mechanism applies identically across all expressions — an aging web injection finding and an aging host reachability finding both generate temporal folds through the same decay logic.
 
 ---
 
@@ -371,11 +372,11 @@ A protected-state temporal fold arises when φ_decoherence rises above 0.20 as e
 
 A pearl records a transformation of L(F): a state collapse, a proposal lifecycle event, a significant projection change. The pearl ledger is the append-only history of field transformations across all domain expressions.
 
-Pearl clusters — groups of pearls for the same (identity_key, domain_label) where the same wickets recur — are the current approximation of fibers. A cluster of pearls in the host expression repeatedly realizing HO-01, HO-19, HO-25 for the same target represents fiber tension: the field has been informative there repeatedly. The wavelength_boost computation aggregates this into a memory curvature modifier for Φ_effective.
+Pearl clusters — groups of pearls for the same (identity_key, domain_label) where the same wickets recur — remain the memory-curvature side of the geometry. A cluster of pearls in the host expression repeatedly realizing HO-01, HO-19, HO-25 for the same target represents prior informativeness, and `wavelength_boost` aggregates this into a bounded curvature modifier for Φ_effective.
 
-A fiber with |Λ| > 1 — spanning multiple expressions for the same target — is not yet computed. The pearl manifold currently computes boosts per (identity_key, domain_label) pair independently. Aggregating across domain labels for the same identity key would produce a multi-expression fiber object F = (m, Λ, ρ, τ, coherence, tension) with tension and coherence summarizing across all contributing expressions. The cluster-level gravity pull G_cluster(C) = Σᵥ tension(Fᵥ) × coherence(Fᵥ) + Σ coupling terms would use these. This is the implementation path; it has not been taken.
+The runtime now also computes explicit multi-expression fiber clusters for the same identity key in the topology layer and passes them into kernel selection. A fiber with |Λ| > 1 is therefore no longer purely aspirational: cross-expression clusters participate directly in Φ_tension and in the canonical field-functional breakdown. The remaining gap is hybridization, not absence. When usable cluster structure exists, fibers carry cross-expression pull; when it does not, the scheduler falls back to generic coupling.
 
-The current approximation is adequate for the wavelength boost. It is not adequate for the full cluster-level selection mechanism. Both are stated honestly because the contribution of this work is the framework, not a finished implementation.
+The pearl manifold is still important because it preserves historical informativeness rather than only live structural pull. The current runtime therefore uses both: explicit fibers for present cross-expression geometry and pearl neighborhoods for bounded memory curvature.
 
 ---
 
@@ -451,13 +452,15 @@ The calibration mechanism corrected instrument confidence across all active expr
 
 The web_collector result — a 28.9% correction — is the calibration mechanism catching the exact failure mode it was designed for: an instrument that is meaningfully overconfident relative to its empirical performance.
 
+In the current implementation, this calibration path is unified: `skg calibrate` writes the same file the runtime consumes, and the live sensor context reloads it automatically when the file changes.
+
 ---
 
 ## 10. Discussion
 
 ### 10.1 What the domain expression architecture changes in practice
 
-**New observation capabilities are additive.** Someone who wants to add IoT firmware analysis implements one toolchain — a catalog of IF- wickets, an adapter that reads firmware analysis tool output, a projection that applies the existing StateEngine. Nothing else changes. The gravity field immediately competes firmware instruments against all other instruments. The coupling table gets one new row: K(host, iot-firmware) = something reasonable. That is the full cost of extending the substrate to a new domain.
+**New observation capabilities are additive.** Someone who wants to add IoT firmware analysis implements one toolchain — a catalog of IF- wickets, an adapter that reads firmware analysis tool output, a projection that applies the existing StateEngine. The substrate still does not need domain-specific changes. The live runtime does still expect a discoverable projector layout and registry metadata for daemon-native scheduling, but it no longer requires edits to a hardcoded projector table for standard projector discovery.
 
 **The coupling table is where domain knowledge enters.** No domain-specific logic lives in the substrate. All expert knowledge about which observations imply which others is encoded in K(Δ_a, Δ_b). This is where the architecture makes the knowledge base explicit and auditable. Someone reviewing a deployment of SKG can read the coupling table and see exactly what structural dependencies the system is asserting. They can disagree with K(web, data) = 0.85 and change it to 0.60. The substrate's behavior changes accordingly. The knowledge is not buried in code.
 
@@ -465,13 +468,15 @@ The web_collector result — a 28.9% correction — is the calibration mechanism
 
 ### 10.2 What remains incomplete and what that means
 
-**Multi-expression fiber objects.** The pearl manifold computes per-expression reinforced neighborhoods. It does not compute fibers that span expression boundaries. A target observed by three expressions over multiple cycles produces pearls in all three namespaces; the current substrate treats them as independent pearl clusters. The cross-expression fiber object F = (m, Λ, ρ, τ, coherence, tension) with |Λ| > 1 would aggregate them. Cluster-level gravity G_cluster(C) would use it. Neither is implemented. The approximation (per-expression boost, per-expression Φ_fiber) is functional but misses cross-expression memory curvature.
+**Fiber scheduling is still hybrid.** Explicit multi-expression fiber objects and clusters now participate in selection, but the runtime still keeps a fallback generic coupling path for targets where cluster structure is sparse or absent. The clean theoretical endpoint is a scheduler driven entirely by fiber geometry with coupling as a residual or derived quantity.
 
-**Coupling constants are hand-tuned on two engagements.** K values encode expert judgment about structural dependencies. They are not derived from engagement data. A Bayesian update over engagement outcomes — observing which expression realizations are empirically followed by which other expression realizations — would produce data-driven K values and reduce the hand-tuning burden. This is the correct path. It requires more engagement data than currently exists.
+**Coupling constants are configurable and learnable, but not self-updating.** K values now live in `config/coupling.yaml`, hot-reload at runtime, and can be retrospectively estimated from engagement history. They are still operator-curated by default rather than automatically rewritten from live data. A stronger empirical basis requires more engagements and a reviewed application path.
 
 **The empirical evaluation is thin.** Three targets, one operator, one lab environment. The coupling constants may be correct for this environment and incorrect for others. The decoherence thresholds (C ≥ 0.7, n ≥ 2) were sufficient here and have not been tested in noisy or adversarially instrumented environments. The calibration corrections (−28.9% for web_collector) are specific to this engagement's target set. These limitations are not failures of the framework; they are the current boundary of what has been validated.
 
-**The metacognition expression is not yet active as a feedback mechanism.** MC wickets are defined. The substrate does not yet autonomously propose catalog extension when MC-03 fires. This is the most interesting incomplete feature: a substrate that can observe its own coverage gaps and propose extensions would remove a significant class of human intervention from the operational loop.
+**Metacognition is split but not fully projected.** `MC-03` now records substrate-side coverage gaps and can stage toolchain-generation proposals through forge; `CP-01` records when the cognitive pipeline actually produced a candidate artifact. What is still missing is a first-class projected cognitive expression with its own decay, projection, and coupling semantics.
+
+**Decay is enforced semantically, but not yet narrated as its own event stream.** Expired observations no longer contribute support mass, and temporal folds see the same TTL map as the support engine. The remaining gap is auditability: the runtime does not yet emit a separate "decayed" event ledger when observations age out.
 
 ### 10.3 Publication posture
 
@@ -503,7 +508,7 @@ The field functional L(F) = Σ E_self + Σ E_couple + D(F) + κ(F) is the energy
 
 The empirical validation demonstrates the mechanism on three targets: the gravity field crossed expression boundaries twice autonomously (web to data, host to exploit), driven by coupling energy. The EternalBlue coupling chain was traversed in one nmap execution. These results are preliminary and should be read as proof-of-mechanism, not as a comprehensive evaluation.
 
-The architecture's practical consequence: domain expressions are additive. New observation capabilities extend SKG by implementing one toolchain. The substrate does not change. Thirteen expressions are registered. The substrate would behave identically if there were thirty.
+The architecture's practical consequence: domain expressions are additive. New observation capabilities extend SKG by implementing one toolchain. The substrate does not change, even though the live runtime still distinguishes five daemon-native expressions from a larger set of registry-discoverable auxiliary toolchains.
 
 ---
 

@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from skg.temporal.interp import canonical_interp_payload, normalize_interp_classification
+
 log = logging.getLogger("skg.temporal")
 
 StateValue = Literal["realized", "blocked", "unknown"]
@@ -87,6 +89,9 @@ class WicketTransition:
     from_is_latent: bool = False
     to_is_latent: bool = False
     latent_delta: int = 0
+
+    # evidence rank of the observation that produced the to_state
+    evidence_rank: int = 1
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -232,6 +237,7 @@ class DeltaStore:
         - phase_by_node / phase_by_wicket
         - latent_nodes
         """
+        interp = canonical_interp_payload(interp)
         ts = ts or datetime.now(timezone.utc).isoformat()
         attack_path_id = interp.get("attack_path_id", "")
 
@@ -256,7 +262,9 @@ class DeltaStore:
             "aprs",
             interp.get("lateral_score", interp.get("escape_score", 0.0))
         )
-        classification = interp.get("classification", "indeterminate")
+        classification = normalize_interp_classification(
+            interp.get("classification", "unknown")
+        )
 
         wicket_confidences = dict(
             interp.get("confidence_by_wicket", interp.get("confidence_by_node", {})) or {}

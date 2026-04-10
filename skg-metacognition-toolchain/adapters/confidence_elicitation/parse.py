@@ -82,12 +82,13 @@ def _emit_node_event(
     attributes: dict | None = None,
 ) -> dict:
     """Build a compliant obs.substrate.node event."""
+    now = iso_now()
     return {
+        "id": str(uuid.uuid4()),
         "type": "obs.substrate.node",
-        "ts": iso_now(),
-        "schema_version": "1.0.0",
+        "ts": now,
         "source": {
-            "id": SOURCE_ID,
+            "source_id": SOURCE_ID,
             "toolchain": TOOLCHAIN,
             "version": get_version(),
         },
@@ -95,20 +96,20 @@ def _emit_node_event(
             "node_id": wicket_id,
             "wicket_id": wicket_id,         # backward compat
             "status": status,               # realized / blocked / unknown
-            "observed_at": iso_now(),
+            "observed_at": now,
             "workload_id": workload_id,
             "subject_id": subject_id,
             "notes": notes,
             "attributes": attributes or {},
         },
         "provenance": {
+            "evidence_rank": 1,             # rank 1: live behavioral observation
             "evidence": {
                 "source_kind": "cognitive_probe",
-                "source_id": SOURCE_ID,
-                "evidence_rank": 1,         # rank 1: live behavioral observation
-                "confidence": round(confidence, 4),
                 "pointer": pointer,
-            }
+                "collected_at": now,
+                "confidence": round(confidence, 4),
+            },
         },
         "run_id": run_id,
     }

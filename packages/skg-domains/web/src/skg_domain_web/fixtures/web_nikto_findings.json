@@ -1,0 +1,14 @@
+[
+  {
+    "msg": "OSVDB-1234: SQL injection vulnerability detected in /search.php",
+    "url": "https://demo.local/search.php"
+  },
+  {
+    "msg": "OSVDB-2222: Backup file found at /backup.zip",
+    "url": "https://demo.local/backup.zip"
+  },
+  {
+    "msg": "OSVDB-3333: Server version disclosed in banner",
+    "url": "https://demo.local/"
+  }
+]
